@@ -56,6 +56,7 @@
     <string name="unlock_to_grant_mic">请先解锁手机，授权麦克风后即可开始</string>
     <string name="peer_ended">TA 已结束本次共玩</string>
     <string name="peer_lost">连接断开，共玩已结束</string>
+    <string name="peer_screen_off">对方锁屏了，共玩稍后自动结束</string>
     <string name="overlay_permission_missing">悬浮窗权限未生效——请在 系统设置→授权管理→应用权限管理→陪着你 里开启「显示悬浮窗」，否则对方看不到你的画笔</string>
     <string name="clear_strokes">清屏</string>
     <string name="emoji_toggle">😊+</string>

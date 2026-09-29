@@ -417,7 +417,18 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
         }
     }
 
-    override fun onDataMessage(json: JSONObject) {}
+    /** 共享端 DataChannel 状态通知（锁屏等），在观看端显示明确状态 */
+    override fun onDataMessage(json: JSONObject) {
+        when (json.optString("k")) {
+            "screenoff" -> runOnUiThread {
+                tvState.visibility = View.VISIBLE
+                tvState.setText(R.string.peer_screen_off)
+            }
+            "screenon" -> runOnUiThread {
+                if (live) tvState.visibility = View.GONE
+            }
+        }
+    }
 
     /** 实时性可视化：网络 RTT 每 2 秒刷新，颜色分级（绿<100ms / 橙<250ms / 红≥250ms） */
     override fun onRtt(ms: Long) {

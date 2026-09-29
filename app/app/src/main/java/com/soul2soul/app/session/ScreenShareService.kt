@@ -36,16 +36,25 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
     @Volatile private var live = false
 
     /**
-     * 锁屏看门狗（PRD FR-8）：锁屏后 VirtualDisplay 停止出帧，30 秒后自动结束防挂死。
+     * 锁屏看门狗（PRD FR-8）：锁屏后 VirtualDisplay 停止出帧，15 秒后自动结束防挂死。
      * 不能用"帧数停止增长"判断 —— 静止画面同样不出帧，会误杀（已踩坑）。
+     * 锁屏瞬间立即通知观看端，别让对方对着冻结画面干等。
      */
     private val screenReceiver = object : android.content.BroadcastReceiver() {
         override fun onReceive(context: Context, intent: android.content.Intent) {
             when (intent.action) {
-                android.content.Intent.ACTION_SCREEN_OFF -> {
-                    if (live) watchdog.postDelayed(screenOffStop, NO_FRAME_TIMEOUT_MS)
+                android.content.Intent.ACTION_SCREEN_OFF -> if (live) {
+                    runCatching {
+                        webRtc?.sendAnnotation(org.json.JSONObject().put("k", "screenoff"))
+                    }
+                    watchdog.postDelayed(screenOffStop, SCREEN_OFF_TIMEOUT_MS)
                 }
-                android.content.Intent.ACTION_SCREEN_ON -> watchdog.removeCallbacks(screenOffStop)
+                android.content.Intent.ACTION_SCREEN_ON -> {
+                    watchdog.removeCallbacks(screenOffStop)
+                    runCatching {
+                        webRtc?.sendAnnotation(org.json.JSONObject().put("k", "screenon"))
+                    }
+                }
             }
         }
     }
@@ -242,7 +251,7 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
         const val ACTION_STOP = "com.soul2soul.app.action.STOP_SHARE"
         const val ACTION_TOGGLE_MUTE = "com.soul2soul.app.action.TOGGLE_MUTE"
         const val EXTRA_PROJECTION = "projection"
-        private const val NO_FRAME_TIMEOUT_MS = 30_000L
+        private const val SCREEN_OFF_TIMEOUT_MS = 15_000L
 
         // 会话级单例：生命周期与 ScreenShareService 完全绑定（onDestroy 清空），不构成泄漏
         @Suppress("StaticFieldLeak")
