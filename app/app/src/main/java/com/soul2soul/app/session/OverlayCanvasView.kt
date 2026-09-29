@@ -34,6 +34,9 @@ class OverlayCanvasView(context: Context) : View(context) {
         val bornAt: Long,
     ) {
         val points = mutableListOf<PointF>()
+
+        /** 收笔时刻（0 = 还在书写中）。淡出从收笔才开始计——网络延迟不影响显示 */
+        var endAt = 0L
     }
 
     private class Emoji(
@@ -80,7 +83,7 @@ class OverlayCanvasView(context: Context) : View(context) {
                 val s = strokes.lastOrNull { it.id == id } ?: return
                 s.points.add(PointF((json.optDouble("x") * width).toFloat(), (json.optDouble("y") * height).toFloat()))
             }
-            "e" -> Unit
+            "e" -> strokes.lastOrNull { it.id == id }?.let { if (it.endAt == 0L) it.endAt = SystemClock.uptimeMillis() }
         }
         invalidate()
     }
@@ -99,24 +102,21 @@ class OverlayCanvasView(context: Context) : View(context) {
         val now = SystemClock.uptimeMillis()
         val strokeW = 6f * resources.displayMetrics.density
 
-        // 笔迹
+        // 笔迹：收笔后才开始 2 秒淡出（书写中永不消失——高延迟下笔画后到也不会丢）
         val iter = strokes.iterator()
         while (iter.hasNext()) {
             val s = iter.next()
-            val age = now - s.bornAt
-            if (age > StrokeColors.FADE_MS) {
+            if (s.endAt == 0L) {
+                // 仍在书写中（或有迟到笔点未到）：只绘制不计时
+                paintStroke(canvas, s, 1f, strokeW, now)
+                continue
+            }
+            val sinceEnd = now - s.endAt
+            if (sinceEnd > StrokeColors.FADE_MS) {
                 iter.remove()
                 continue
             }
-            paint.style = Paint.Style.STROKE
-            paint.color = s.color
-            paint.alpha = (255f * (1f - age.toFloat() / StrokeColors.FADE_MS)).toInt().coerceIn(0, 255)
-            paint.strokeWidth = strokeW
-            var prev: PointF? = null
-            for (p in s.points) {
-                prev?.let { canvas.drawLine(it.x, it.y, p.x, p.y, paint) }
-                prev = p
-            }
+            paintStroke(canvas, s, 1f - sinceEnd.toFloat() / StrokeColors.FADE_MS, strokeW, now)
         }
 
         // 表情：从下往上飘 + 放大 + 淡出（1.6 秒生命周期）
@@ -138,6 +138,17 @@ class OverlayCanvasView(context: Context) : View(context) {
         }
 
         if (strokes.isNotEmpty() || emojis.isNotEmpty()) postInvalidateOnAnimation()
+    }
+
+    private fun paintStroke(canvas: Canvas, s: Stroke, fade: Float, strokeW: Float, now: Long) {
+        paint.color = s.color
+        paint.alpha = (255f * fade.coerceIn(0f, 1f)).toInt().coerceIn(0, 255)
+        paint.strokeWidth = strokeW
+        var prev: PointF? = null
+        for (p in s.points) {
+            prev?.let { canvas.drawLine(it.x, it.y, p.x, p.y, paint) }
+            prev = p
+        }
     }
 
     companion object {

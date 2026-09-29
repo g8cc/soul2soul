@@ -57,11 +57,12 @@ class WebRtcClient(
     private val eglContext = App.instance.eglBase.eglBaseContext
     private val audioModule: org.webrtc.audio.JavaAudioDeviceModule =
         org.webrtc.audio.JavaAudioDeviceModule.builder(context)
-            // 通话音源：路由到设备的通话音频通路（硬件 AEC/NS 在这条链路上生效）
+            // 通话音源：路由到设备的通话音频通路
             .setAudioSource(android.media.MediaRecorder.AudioSource.VOICE_COMMUNICATION)
-            // 优先使用设备硬件回声消除/噪声抑制（小米/华为均有硬件实现，
-            // 双机同室的啸叫与回声靠它解决；无硬件时 libwebrtc 软件处理自动兜底）
-            .setUseHardwareAcousticEchoCanceler(true)
+            // 声学策略：回声消除用软件 AEC3（稳定可控）；
+            // 噪声抑制走设备硬件 DSP（对稳态环境声压制更强，软件 NS 对键盘/磕碰类瞬态声无效——
+            // 那部分靠硬件 DSP + 增益控制，极端场景需耳机，微信亦如此）
+            .setUseHardwareAcousticEchoCanceler(false)
             .setUseHardwareNoiseSuppressor(true)
             .createAudioDeviceModule()
     private val factory: PeerConnectionFactory = PeerConnectionFactory.builder()
@@ -237,9 +238,11 @@ class WebRtcClient(
     // ---------- 标注 DataChannel ----------
 
     fun sendAnnotation(json: JSONObject) {
-        val dc = dataChannel ?: return
+        val dc = dataChannel ?: run { Log.w(TAG, "sendAnnotation: channel null"); return }
+        val state = try { dc.state().name } catch (e: Exception) { "?" }
         val bytes = json.toString().toByteArray(Charsets.UTF_8)
-        dc.send(DataChannel.Buffer(ByteBuffer.wrap(bytes), false))
+        val ok = dc.send(DataChannel.Buffer(ByteBuffer.wrap(bytes), false))
+        Log.d(TAG, "dc send k=${json.opt("k")} state=$state ok=$ok")
     }
 
     // ---------- PeerConnection.Observer ----------

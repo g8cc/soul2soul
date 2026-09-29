@@ -8,6 +8,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
+import android.util.Log
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
@@ -134,6 +135,7 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
     override fun onRemoteVideoSize(width: Int, height: Int) {}
 
     override fun onDataMessage(json: JSONObject) {
+        Log.d("S2S-DC", "recv k=${json.opt("k")} id=${json.opt("id")}")
         // 观看端清晰度切换 → 共享端；笔迹/清屏 → 悬浮窗服务（懒加载画布）
         when (json.optString("k")) {
             "res" -> webRtc?.setCaptureLongEdgeOnMain(json.optInt("edge", 1280))
