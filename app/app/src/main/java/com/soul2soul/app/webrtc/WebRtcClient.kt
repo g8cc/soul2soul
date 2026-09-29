@@ -200,9 +200,40 @@ class WebRtcClient(
                     960 -> 1_500_000
                     else -> 2_500_000
                 }
+                // 屏幕共享最佳实践（Zoom/Meet 同款）：带宽不足时保分辨率降帧率，文字不糊
+                runCatching {
+                    params.encodings[0].degradationPreference =
+                        org.webrtc.RtpParameters.DegradationPreference.MAINTAIN_RESOLUTION
+                }
                 sender.parameters = params
             }
         }.onFailure { Log.w(TAG, "bitrate set failed", it) }
+    }
+
+    /** 屏幕内容编码优化：将 offer 中 VP9 的载荷提到最前（同码率下 UI/文字清晰度显著优于 H.264） */
+    private fun preferVp9(sdp: String): String {
+        val lines = sdp.split("\r\n").toMutableList()
+        val vp9Pts = lines.filter { it.startsWith("a=rtpmap:") && it.contains("VP9/") }
+            .map { it.removePrefix("a=rtpmap:").substringBefore(" ") }
+        if (vp9Pts.isEmpty()) return s
+        val rtxPts = lines.filter { it.startsWith("a=fmtp:") && it.contains("apt=") }
+            .filter { fm -> vp9Pts.any { fm.contains("apt=$it ") || fm.endsWith("apt=$it") } }
+            .map { it.removePrefix("a=fmtp:").substringBefore(" ") }
+        val preferred = (vp9Pts + rtxPts).toSet()
+        val out = StringBuilder()
+        for (l in lines) {
+            if (l.startsWith("m=video")) {
+                val parts = l.split(" ").toMutableList()
+                val pts = parts.drop(4)
+                val ordered = pts.filter { preferred.contains(it) } + pts.filterNot { preferred.contains(it) }
+                out.append(parts.take(4).joinToString(" "))
+                for (pt in ordered) out.append(" ").append(pt)
+                out.append("\r\n")
+            } else {
+                out.append(l).append("\r\n")
+            }
+        }
+        return out.toString()
     }
 
     /** 切清晰度（线程安全入口：DataChannel 回调线程 → 主线程执行采集重启） */
@@ -453,6 +484,12 @@ class WebRtcClient(
     }
 
     private fun sendSdp(desc: SessionDescription) {
+        // 屏幕内容编码优化：offer 中将 VP9 载荷提前（对端按相同顺序应答）
+        val sdpText = if (desc.type == SessionDescription.Type.OFFER) {
+            preferVp9(desc.description)
+        } else {
+            desc.description
+        }
         listener.onSignalOut(
             JSONObject()
                 .put("type", "sdp")
@@ -460,7 +497,7 @@ class WebRtcClient(
                     "sdp",
                     JSONObject()
                         .put("type", desc.type.canonicalForm())
-                        .put("sdp", desc.description),
+                        .put("sdp", sdpText),
                 )
         )
     }
