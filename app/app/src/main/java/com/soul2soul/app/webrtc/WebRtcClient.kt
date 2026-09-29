@@ -194,8 +194,12 @@ class WebRtcClient(
         runCatching {
             val params = sender.parameters
             if (params.encodings.isNotEmpty()) {
-                params.encodings[0].maxBitrateBps =
-                    if (captureLongEdge >= 1920) 4_000_000 else 2_500_000
+                // 码率阶梯：分辨率越高上限越高；降档时同步压码率（弱网更流畅）
+                params.encodings[0].maxBitrateBps = when (captureLongEdge) {
+                    1920 -> 4_000_000
+                    960 -> 1_500_000
+                    else -> 2_500_000
+                }
                 sender.parameters = params
             }
         }.onFailure { Log.w(TAG, "bitrate set failed", it) }
@@ -300,7 +304,7 @@ class WebRtcClient(
             .onFailure { Log.w(TAG, "restartIce unsupported", it) }
     }
 
-    /** 每 2 秒取一次 candidate-pair 的 RTT（实时性可视化；P2P 与中继路径数值自动反映） */
+    /** 每 2 秒取一次 candidate-pair 的 RTT + 视频流质量统计（实时性可视化与诊断） */
     private fun startRttPolling() {
         rttHandler.post(object : Runnable {
             override fun run() {
@@ -319,6 +323,21 @@ class WebRtcClient(
                         }
                     }
                     if (best >= 0) listener.onRtt(best)
+
+                    // 视频流质量诊断（观看端）：丢包/抖动/帧率
+                    if (!isSharer) {
+                        for ((_, stats) in report.statsMap) {
+                            if (stats.type == "inbound-rtp" &&
+                                stats.members["kind"] == "video"
+                            ) {
+                                val lost = (stats.members["packetsLost"] as? Number)?.toLong() ?: 0L
+                                val recv = (stats.members["packetsReceived"] as? Number)?.toLong() ?: 1L
+                                val jitter = (stats.members["jitter"] as? Number)?.toDouble() ?: 0.0
+                                val fps = (stats.members["framesPerSecond"] as? Number)?.toDouble()
+                                Log.d(TAG, "video loss=${lost} recv=${recv} jitter=${"%.3f".format(jitter)}s fps=${"%.1f".format(fps ?: 0.0)}")
+                            }
+                        }
+                    }
 
                     // 共享端按 RTT 自动降级画质（弱网闪断的缓解）：持续高 RTT → 降采集分辨率
                     if (isSharer && best > 0) {
