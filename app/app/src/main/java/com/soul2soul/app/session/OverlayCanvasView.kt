@@ -37,6 +37,9 @@ class OverlayCanvasView(context: Context) : View(context) {
 
         /** 收笔时刻（0 = 还在书写中）。淡出从收笔才开始计——网络延迟不影响显示 */
         var endAt = 0L
+
+        /** 最后一个笔点的到达时刻：收笔信号丢失时的兜底依据 */
+        var lastPointAt = 0L
     }
 
     private class Emoji(
@@ -82,6 +85,7 @@ class OverlayCanvasView(context: Context) : View(context) {
             "p" -> {
                 val s = strokes.lastOrNull { it.id == id } ?: return
                 s.points.add(PointF((json.optDouble("x") * width).toFloat(), (json.optDouble("y") * height).toFloat()))
+                s.lastPointAt = SystemClock.uptimeMillis()
             }
             "e" -> strokes.lastOrNull { it.id == id }?.let { if (it.endAt == 0L) it.endAt = SystemClock.uptimeMillis() }
         }
@@ -102,21 +106,28 @@ class OverlayCanvasView(context: Context) : View(context) {
         val now = SystemClock.uptimeMillis()
         val strokeW = 6f * resources.displayMetrics.density
 
-        // 笔迹：收笔后才开始 2 秒淡出（书写中永不消失——高延迟下笔画后到也不会丢）
+        // 笔迹生命周期：
+        //  1) 书写中（未收笔）→ 完整显示，永不消失
+        //  2) 收笔后 → 2 秒淡出
+        //  3) 收笔信号丢失（容忍丢包通道会丢小消息）→ 以"最后笔点后 1.2 秒无新点"判定收笔，兜底淡出
         val iter = strokes.iterator()
         while (iter.hasNext()) {
             val s = iter.next()
-            if (s.endAt == 0L) {
-                // 仍在书写中（或有迟到笔点未到）：只绘制不计时
-                paintStroke(canvas, s, 1f, strokeW, now)
+            val fadeStart = when {
+                s.endAt > 0L -> s.endAt
+                s.lastPointAt > 0L && now - s.lastPointAt > STROKE_SILENCE_MS -> s.lastPointAt + STROKE_SILENCE_MS
+                else -> 0L // 仍在书写中：完整显示
+            }
+            if (fadeStart == 0L) {
+                paintStroke(canvas, s, 1f, strokeW)
                 continue
             }
-            val sinceEnd = now - s.endAt
+            val sinceEnd = now - fadeStart
             if (sinceEnd > StrokeColors.FADE_MS) {
                 iter.remove()
                 continue
             }
-            paintStroke(canvas, s, 1f - sinceEnd.toFloat() / StrokeColors.FADE_MS, strokeW, now)
+            paintStroke(canvas, s, 1f - sinceEnd.toFloat() / StrokeColors.FADE_MS, strokeW)
         }
 
         // 表情：从下往上飘 + 放大 + 淡出（1.6 秒生命周期）
@@ -140,7 +151,7 @@ class OverlayCanvasView(context: Context) : View(context) {
         if (strokes.isNotEmpty() || emojis.isNotEmpty()) postInvalidateOnAnimation()
     }
 
-    private fun paintStroke(canvas: Canvas, s: Stroke, fade: Float, strokeW: Float, now: Long) {
+    private fun paintStroke(canvas: Canvas, s: Stroke, fade: Float, strokeW: Float) {
         paint.color = s.color
         paint.alpha = (255f * fade.coerceIn(0f, 1f)).toInt().coerceIn(0, 255)
         paint.strokeWidth = strokeW
@@ -153,6 +164,10 @@ class OverlayCanvasView(context: Context) : View(context) {
 
     companion object {
         private const val EMOJI_LIFE_MS = 1600L
+
+        /** 收笔信号丢失的兜底：最后笔点后静默此时长即视为已收笔，开始淡出 */
+        const val STROKE_SILENCE_MS = 1200L
+
         private var instance: OverlayCanvasView? = null
 
         /** ScreenShareService.onDataMessage 回调入口（主线程投递） */

@@ -94,12 +94,19 @@ class DrawingOverlayView @JvmOverloads constructor(
                     hypot(event.x - downX, event.y - downY) > touchSlopPx
                 ) {
                     beginStroke(event) // 移动超过阈值：确认是画笔而非轻点
+                    strokeStarted = true
                 }
                 if (strokeStarted) appendPoint(event)
             }
             MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
                 if (strokeStarted) {
-                    current?.let { sink?.onStroke(strokeMsg("e", it.id)) }
+                    current?.let { s ->
+                        sink?.onStroke(strokeMsg("e", s.id))
+                        // 容忍丢包通道可能丢失收笔信号：补发一次（共享端幂等：endAt 只记一次）
+                        postDelayed({
+                            sink?.onStroke(strokeMsg("e", s.id))
+                        }, 300)
+                    }
                     current = null
                 } else if (event.actionMasked == MotionEvent.ACTION_UP &&
                     SystemClock.uptimeMillis() - downTime < 400
