@@ -137,14 +137,7 @@ class MainActivity : AppCompatActivity() {
         permMic.setOnClickListener {
             micPermission.launch(Manifest.permission.RECORD_AUDIO)
         }
-        permOverlay.setOnClickListener {
-            startActivity(
-                Intent(
-                    Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                    Uri.parse("package:$packageName"),
-                )
-            )
-        }
+        permOverlay.setOnClickListener { openOverlayPermissionPage() }
 
         lifecycleScope.launch {
             SignalBus.events.collect { handleSignal(it) }
@@ -230,6 +223,35 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /** 悬浮窗权限页：MIUI/华为有专属逐应用权限页（直达开关），其他品牌走标准页 */
+    private fun openOverlayPermissionPage() {
+        val brand = (Build.BRAND + " " + Build.MANUFACTURER).lowercase()
+        val miui = Intent().setClassName(
+            "com.miui.securitycenter",
+            "com.miui.permcenter.permissions.PermissionsEditorActivity"
+        ).putExtra("extra_pkgname", packageName)
+        val huawei = Intent().setClassName(
+            "com.huawei.systemmanager",
+            "com.huawei.permissionmanager.ui.SinglePermissionActivity"
+        ).putExtra("permission", "android.permission.SYSTEM_ALERT_WINDOW")
+        when {
+            brand.contains("xiaomi") || brand.contains("redmi") || brand.contains("poco") ->
+                runCatching { startActivity(miui) }.onFailure { fallBackOverlay() }
+            brand.contains("huawei") || brand.contains("honor") ->
+                runCatching { startActivity(huawei) }.onFailure { fallBackOverlay() }
+            else -> fallBackOverlay()
+        }
+    }
+
+    private fun fallBackOverlay() {
+        startActivity(
+            Intent(
+                Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                Uri.parse("package:$packageName")
+            )
+        )
+    }
+
     private fun onCallClicked() {
         if (outgoingPending) {
             // 二次点击 = 取消呼叫（对方已接听则发 bye，让 TA 别干等）
@@ -244,12 +266,7 @@ class MainActivity : AppCompatActivity() {
             return
         }
         if (!Settings.canDrawOverlays(this)) {
-            startActivity(
-                Intent(
-                    Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                    Uri.parse("package:$packageName"),
-                )
-            )
+            openOverlayPermissionPage()
             return
         }
         if (!Presence.client.isConnected) {
