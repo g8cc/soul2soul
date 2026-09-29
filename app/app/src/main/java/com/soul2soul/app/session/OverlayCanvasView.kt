@@ -1,0 +1,166 @@
+package com.soul2soul.app.session
+
+import android.content.Context
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.Paint
+import android.graphics.PointF
+import android.os.SystemClock
+import android.view.View
+import org.json.JSONObject
+
+/** 笔迹颜色（观看端/共享端共用） */
+object StrokeColors {
+    val COLORS = intArrayOf(
+        Color.parseColor("#FF3B5C"), // 粉红
+        Color.parseColor("#34C759"), // 绿
+        Color.parseColor("#1E90FF"), // 蓝
+    )
+    const val FADE_MS = 2000L
+}
+
+/**
+ * 共享端悬浮标注层（懒加载窗口内的绘制内容）：
+ *  - 笔迹（激光笔，2 秒淡出）
+ *  - 表情互动（观看端发来的 emoji，从下方飘起并放大淡出——直播式互动）
+ * 该窗口 FLAG_NOT_TOUCHABLE，不干扰共享端任何操作；内容会被屏幕采集进视频流，
+ * 观看端由此看到自己的笔迹/表情在对方屏幕上生效。
+ */
+class OverlayCanvasView(context: Context) : View(context) {
+
+    private class Stroke(
+        val id: String,
+        val color: Int,
+        val bornAt: Long,
+    ) {
+        val points = mutableListOf<PointF>()
+    }
+
+    private class Emoji(
+        val char: String,
+        val xN: Float,
+        val bornAt: Long,
+    )
+
+    private val strokes = mutableListOf<Stroke>()
+    private val emojis = mutableListOf<Emoji>()
+    private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+        strokeCap = Paint.Cap.ROUND
+        strokeJoin = Paint.Join.ROUND
+    }
+    private val emojiPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        textAlign = Paint.Align.CENTER
+    }
+
+    init {
+        instance = this
+    }
+
+    override fun onDetachedFromWindow() {
+        instance = null
+        super.onDetachedFromWindow()
+    }
+
+    fun applyStroke(json: JSONObject) {
+        val id = json.optString("id")
+        when (json.optString("k")) {
+            "clear" -> {
+                strokes.clear()
+                emojis.clear()
+            }
+            "s" -> strokes.add(
+                Stroke(
+                    id,
+                    StrokeColors.COLORS[json.optInt("c", 0).mod(StrokeColors.COLORS.size)],
+                    SystemClock.uptimeMillis(),
+                )
+            )
+            "p" -> {
+                val s = strokes.lastOrNull { it.id == id } ?: return
+                s.points.add(PointF((json.optDouble("x") * width).toFloat(), (json.optDouble("y") * height).toFloat()))
+            }
+            "e" -> Unit
+        }
+        invalidate()
+    }
+
+    fun applyEmoji(json: JSONObject) {
+        val e = json.optString("e")
+        if (e.isEmpty()) return
+        emojis.add(Emoji(e, json.optDouble("x", 0.5).toFloat(), SystemClock.uptimeMillis()))
+        invalidate()
+    }
+
+    fun hasVisibleContent(): Boolean = strokes.isNotEmpty() || emojis.isNotEmpty()
+
+    override fun onDraw(canvas: Canvas) {
+        super.onDraw(canvas)
+        val now = SystemClock.uptimeMillis()
+        val strokeW = 6f * resources.displayMetrics.density
+
+        // 笔迹
+        val iter = strokes.iterator()
+        while (iter.hasNext()) {
+            val s = iter.next()
+            val age = now - s.bornAt
+            if (age > StrokeColors.FADE_MS) {
+                iter.remove()
+                continue
+            }
+            paint.style = Paint.Style.STROKE
+            paint.color = s.color
+            paint.alpha = (255f * (1f - age.toFloat() / StrokeColors.FADE_MS)).toInt().coerceIn(0, 255)
+            paint.strokeWidth = strokeW
+            var prev: PointF? = null
+            for (p in s.points) {
+                prev?.let { canvas.drawLine(it.x, it.y, p.x, p.y, paint) }
+                prev = p
+            }
+        }
+
+        // 表情：从下往上飘 + 放大 + 淡出（1.6 秒生命周期）
+        val emojiIter = emojis.iterator()
+        while (emojiIter.hasNext()) {
+            val e = emojiIter.next()
+            val age = now - e.bornAt
+            if (age > EMOJI_LIFE_MS) {
+                emojiIter.remove()
+                continue
+            }
+            val t = age.toFloat() / EMOJI_LIFE_MS
+            val size = resources.displayMetrics.density * (56f + 40f * t)
+            emojiPaint.textSize = size
+            emojiPaint.alpha = (255f * (1f - t * t)).toInt().coerceIn(0, 255)
+            val x = e.xN * width
+            val y = height * 0.78f - t * height * 0.38f
+            canvas.drawText(e.char, x, y, emojiPaint)
+        }
+
+        if (strokes.isNotEmpty() || emojis.isNotEmpty()) postInvalidateOnAnimation()
+    }
+
+    companion object {
+        private const val EMOJI_LIFE_MS = 1600L
+        private var instance: OverlayCanvasView? = null
+
+        /** ScreenShareService.onDataMessage 回调入口（主线程投递） */
+        fun onStroke(json: JSONObject) {
+            instance?.post {
+                instance?.applyStroke(json)
+            }
+        }
+
+        /** 表情互动入口 */
+        fun onEmoji(json: JSONObject) {
+            instance?.post {
+                instance?.applyEmoji(json)
+            }
+        }
+
+        /** 服务销毁时清理静态引用与残留内容 */
+        fun discard() {
+            instance = null
+        }
+    }
+}

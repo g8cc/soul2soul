@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Android 7.0 的系统信任库不含 Let's Encrypt 的 ISRG Root X1（7.1.1 才内置），
+  wss 握手会失败。这里把该根证书打进应用，与系统信任库并存。
+-->
+<network-security-config>
+    <base-config>
+        <trust-anchors>
+            <certificates src="@raw/isrgrootx1" />
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

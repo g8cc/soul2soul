@@ -1,0 +1,23 @@
+# coturn STUN/TURN 中继（自建 WebRTC 必备兜底，国内移动网络 P2P 常打不通）
+# 使用: cp .env.example .env 修改 SECRET 后  docker compose up -d
+services:
+  coturn:
+    image: coturn/coturn:latest
+    network_mode: host          # 中继必须 host 网络，端口段在下方环境变量里收窄
+    restart: unless-stopped
+    environment:
+      # 安全组需放行: 3479/udp+tcp, 49160-49200/udp (3478 已被 derp 占用)
+      - TURN_SECRET=${TURN_STATIC_AUTH_SECRET}
+    command: >
+      -n
+      --realm=soul2soul
+      --fingerprint
+      --use-auth-secret
+      --static-auth-secret=${TURN_STATIC_AUTH_SECRET}
+      --no-cli
+      --no-tls
+      --listening-port=${TURN_PORT}
+      --min-port=49160
+      --max-port=49200
+      --external-ip=${TURN_HOST}
+      --no-multicast-peers
