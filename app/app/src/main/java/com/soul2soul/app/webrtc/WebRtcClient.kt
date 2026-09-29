@@ -352,6 +352,26 @@ class WebRtcClient(
                     }
                     if (best >= 0) listener.onRtt(best)
 
+                    // 编解码实现与帧率诊断：确认软硬编解码（性能调优的依据）
+                    for ((_, stats) in report.statsMap) {
+                        when (stats.type) {
+                            "outbound-rtp" -> if (stats.members["kind"] == "video") {
+                                val impl = stats.members["encoderImplementation"]?.toString() ?: "?"
+                                val fps = (stats.members["framesPerSecond"] as? Number)?.toDouble() ?: 0.0
+                                val sent = (stats.members["bytesSent"] as? Number)?.toLong() ?: 0L
+                                Log.d(TAG, "ENC impl=$impl fps=${"%.1f".format(fps)} bytes=$sent")
+                            }
+                            "inbound-rtp" -> if (stats.members["kind"] == "video") {
+                                val impl = stats.members["decoderImplementation"]?.toString() ?: "?"
+                                val fps = (stats.members["framesPerSecond"] as? Number)?.toDouble() ?: 0.0
+                                val lost = (stats.members["packetsLost"] as? Number)?.toLong() ?: 0L
+                                val recv = (stats.members["packetsReceived"] as? Number)?.toLong() ?: 1L
+                                val jitter = (stats.members["jitter"] as? Number)?.toDouble() ?: 0.0
+                                Log.d(TAG, "DEC impl=$impl fps=${"%.1f".format(fps)} loss=$lost recv=$recv jitter=${"%.1f".format(jitter * 1000)}ms")
+                            }
+                        }
+                    }
+
                     // 视频流质量诊断（观看端）：丢包/抖动/帧率
                     if (!isSharer) {
                         for ((_, stats) in report.statsMap) {
