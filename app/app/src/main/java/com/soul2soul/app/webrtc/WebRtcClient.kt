@@ -200,11 +200,8 @@ class WebRtcClient(
                     960 -> 1_500_000
                     else -> 2_500_000
                 }
-                // 屏幕共享最佳实践（Zoom/Meet 同款）：带宽不足时保分辨率降帧率，文字不糊
-                runCatching {
-                    params.encodings[0].degradationPreference =
-                        org.webrtc.RtpParameters.DegradationPreference.MAINTAIN_RESOLUTION
-                }
+                // 带宽不足时的降级策略：视频源 isScreencast=true 时 libwebrtc
+                // 默认即"保分辨率降帧率"（屏幕共享标准行为），无需显式设置
                 sender.parameters = params
             }
         }.onFailure { Log.w(TAG, "bitrate set failed", it) }
@@ -215,7 +212,7 @@ class WebRtcClient(
         val lines = sdp.split("\r\n").toMutableList()
         val vp9Pts = lines.filter { it.startsWith("a=rtpmap:") && it.contains("VP9/") }
             .map { it.removePrefix("a=rtpmap:").substringBefore(" ") }
-        if (vp9Pts.isEmpty()) return s
+        if (vp9Pts.isEmpty()) return sdp
         val rtxPts = lines.filter { it.startsWith("a=fmtp:") && it.contains("apt=") }
             .filter { fm -> vp9Pts.any { fm.contains("apt=$it ") || fm.endsWith("apt=$it") } }
             .map { it.removePrefix("a=fmtp:").substringBefore(" ") }
