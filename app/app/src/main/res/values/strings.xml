@@ -43,6 +43,11 @@
     <string name="unpair_title">解除配对？</string>
     <string name="unpair_message">解除后你们俩都无法互相呼叫，需要重新走一次配对码流程才能再次绑定。确定解除吗？</string>
     <string name="unpair_confirm">解除</string>
+    <string name="update_available_short">⬆️ 发现新版本，点此更新</string>
+    <string name="update_confirm_title">发现新版本 v%s</string>
+    <string name="update_confirm_msg">下载并安装新版本？（约 45MB，建议 WiFi 下进行）</string>
+    <string name="update_download_failed">下载失败，请稍后再试</string>
+    <string name="update_starting">下载完成，正在拉起安装…</string>
     <string name="peer_canceled">对方取消了</string>
     <string name="connect_timeout">连接超时，对方可能已掉线</string>
     <string name="countdown_hint">不接听的话 %d 秒后自动挂断</string>

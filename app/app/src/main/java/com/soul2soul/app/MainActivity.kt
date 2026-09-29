@@ -36,6 +36,8 @@ import org.json.JSONObject
 class MainActivity : AppCompatActivity() {
 
     private var peerOnline = false
+    private var pendingUpdateInfo: com.soul2soul.app.util.Updater.Info? = null
+    private var pendingInstallFile: java.io.File? = null
     private val callTimeout = Handler(Looper.getMainLooper())
 
     /** 主叫状态标记（PresenceService 撞车裁决也要读，故放伴生对象） */
@@ -129,6 +131,8 @@ class MainActivity : AppCompatActivity() {
         }
         btnCall.setOnClickListener { onCallClicked() }
         findViewById<View>(R.id.btnUnpair).setOnClickListener { showUnpairDialog() }
+        findViewById<View>(R.id.btnUpdate).setOnClickListener { showUpdateDialog() }
+        checkForUpdate()
         permNotification.setOnClickListener { requestNotificationPermissionIfNeeded(force = true) }
         permMic.setOnClickListener {
             micPermission.launch(Manifest.permission.RECORD_AUDIO)
@@ -271,6 +275,97 @@ class MainActivity : AppCompatActivity() {
             .show()
     }
 
+    // ---------- 自动更新 ----------
+
+    private fun checkForUpdate() {
+        lifecycleScope.launch {
+            val info = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                com.soul2soul.app.util.Updater.checkAsync()
+            } ?: return@launch
+            if (com.soul2soul.app.util.Updater.hasUpdate(info)) {
+                pendingUpdateInfo = info
+                findViewById<View>(R.id.btnUpdate).visibility = View.VISIBLE
+                findViewById<TextView>(R.id.btnUpdate).text =
+                    getString(R.string.update_available_short) + " v" + info.versionName
+            }
+        }
+    }
+
+    private fun showUpdateDialog() {
+        val info = pendingUpdateInfo ?: return
+        AlertDialog.Builder(this)
+            .setTitle(getString(R.string.update_confirm_title, info.versionName))
+            .setMessage(R.string.update_confirm_msg)
+            .setPositiveButton(R.string.ok) { _, _ -> downloadAndInstall(info) }
+            .setNegativeButton(R.string.cancel, null)
+            .show()
+    }
+
+    private fun downloadAndInstall(info: com.soul2soul.app.util.Updater.Info) {
+        val container = android.widget.LinearLayout(this).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+            setPadding(48, 24, 48, 24)
+        }
+        val bar = android.widget.ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
+            max = 100; progress = 0
+        }
+        val pct = TextView(this).apply { text = "0%"; gravity = android.view.Gravity.CENTER }
+        container.addView(bar)
+        container.addView(pct)
+        val dialog = AlertDialog.Builder(this)
+            .setTitle(getString(R.string.update_confirm_title, info.versionName))
+            .setView(container)
+            .setCancelable(false)
+            .create()
+        dialog.show()
+        lifecycleScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            val file = com.soul2soul.app.util.Updater.download(
+                info.url,
+                java.io.File(getExternalFilesDir("apk"), "update-${info.versionCode}.apk"),
+            ) { p ->
+                runOnUiThread {
+                    bar.progress = p
+                    pct.text = "$p%"
+                }
+            }
+            runOnUiThread {
+                dialog.dismiss()
+                if (file != null) {
+                    toast(R.string.update_starting)
+                    installApk(file)
+                } else {
+                    toast(R.string.update_download_failed)
+                }
+            }
+        }
+    }
+
+    private fun installApk(file: java.io.File) {
+        if (Build.VERSION.SDK_INT >= 26 && !packageManager.canRequestPackageInstalls()) {
+            pendingInstallFile = file
+            startActivity(
+                Intent(
+                    Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                    Uri.parse("package:$packageName")
+                )
+            )
+            return
+        }
+        doInstall(file)
+    }
+
+    private fun doInstall(file: java.io.File) {
+        val uri = androidx.core.content.FileProvider.getUriForFile(
+            this, "$packageName.fileprovider", file
+        )
+        val i = Intent(android.content.Intent.ACTION_INSTALL_PACKAGE).apply {
+            setDataAndType(uri, "application/vnd.android.package-archive")
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        runCatching { startActivity(i) }
+            .onFailure { Log.w(TAG, "install start failed", it) }
+    }
+
     private fun requestScreenCapture() {
         val mpm = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as android.media.projection.MediaProjectionManager
         projectionLauncher.launch(mpm.createScreenCaptureIntent())
@@ -359,6 +454,13 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
+        // 从"安装未知应用"授权页返回后，继续刚才搁置的安装
+        pendingInstallFile?.let { file ->
+            if (Build.VERSION.SDK_INT < 26 || packageManager.canRequestPackageInstalls()) {
+                pendingInstallFile = null
+                doInstall(file)
+            }
+        }
         updateUi()
     }
 
