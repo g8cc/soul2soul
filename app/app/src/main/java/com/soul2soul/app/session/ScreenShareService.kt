@@ -160,7 +160,6 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
         liveState = false
         Presence.sessionBusy = false
         setSpeakerphone(false)
-        setMicMute(false)
         com.soul2soul.app.util.WifiKeeper.release()
         pendingSignals.clear()
         webRtc?.close()

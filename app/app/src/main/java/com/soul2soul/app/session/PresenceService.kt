@@ -146,7 +146,7 @@ class PresenceService : Service() {
                     MainActivity.acceptedReceived = true
                     MainActivity.projectionData?.let { projection ->
                         runCatching {
-                            ScreenShareService.start(this, MainActivity.projectionCode, projection)
+                            ScreenShareService.start(this, projection)
                         }.onFailure {
                             Log.e("PresenceService", "unable to start share service", it)
                             Presence.client.send("bye")
