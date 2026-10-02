@@ -210,7 +210,7 @@ class OverlayCanvasView @JvmOverloads constructor(
     fun hasEmojiOrFx(): Boolean = emojis.isNotEmpty() || fx.isNotEmpty()
 
     fun hasVisibleContent(): Boolean =
-        strokes.isNotEmpty() || emojis.isNotEmpty() || fx.isNotEmpty()
+        strokes.any { it.points.isNotEmpty() } || emojis.isNotEmpty() || fx.isNotEmpty()
 
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
@@ -238,6 +238,12 @@ class OverlayCanvasView @JvmOverloads constructor(
         val iter = strokes.iterator()
         while (iter.hasNext()) {
             val s = iter.next()
+            // 病态笔画自愈：只收到"s"而笔点/收笔全被丢包 → 到龄直接清除，
+            // 否则窗口会被一笔"隐形"内容永久钉住（全屏玻璃罩回归）
+            if (s.points.isEmpty()) {
+                if (now - s.bornAt > STROKE_SILENCE_MS) iter.remove()
+                continue
+            }
             val fadeStart = when {
                 s.endAt > 0L -> s.endAt
                 s.lastPointAt > 0L && now - s.lastPointAt > STROKE_SILENCE_MS -> s.lastPointAt + STROKE_SILENCE_MS

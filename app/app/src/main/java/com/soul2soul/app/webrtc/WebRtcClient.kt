@@ -176,6 +176,13 @@ class WebRtcClient(
             pc.addTrack(track, listOf(STREAM))
         }
 
+        // 远程操控手势：整笔一条消息，可靠有序（丢半截手势比延迟更致命）
+        // 注意创建顺序：0.2.8 观看端 onDataChannel 是后到者覆盖；ctl 先建、anno 后建，
+        // 保证旧观看端最终持有 anno（丢包容忍），笔迹不会被可靠通道的队头阻塞拖死
+        val ctlInit = DataChannel.Init().apply { ordered = true }
+        ctlChannel = pc.createDataChannel("ctl", ctlInit)?.also {
+            it.registerObserver(this)
+        }
         // 共享端是 offerer，负责创建 DataChannel
         // 笔迹是激光笔范式：容忍丢包、不要队头阻塞（reliable-ordered 在弱网下会堵死整队笔迹）
         val dcInit = DataChannel.Init().apply {
@@ -183,11 +190,6 @@ class WebRtcClient(
             maxRetransmits = 1
         }
         dataChannel = pc.createDataChannel("anno", dcInit)?.also {
-            it.registerObserver(this)
-        }
-        // 远程操控手势：整笔一条消息，可靠有序（丢半截手势比延迟更致命）
-        val ctlInit = DataChannel.Init().apply { ordered = true }
-        ctlChannel = pc.createDataChannel("ctl", ctlInit)?.also {
             it.registerObserver(this)
         }
 
@@ -359,14 +361,18 @@ class WebRtcClient(
         Log.d(TAG, "dc send k=${json.opt("k")} state=$state ok=$ok")
     }
 
+    /** 操控能力握手即通道本身：只有新版共享端会创建 ctl。旧版对端 = null，观看端据此禁用操控 */
+    val controlSupported: Boolean get() = ctlChannel != null
+
     /** 远程操控手势出口（观看端 → 共享端）；ctl 通道未建时退回 anno 通道保兼容 */
     fun sendControl(json: JSONObject) {
         val dc = ctlChannel ?: dataChannel ?: run {
             Log.w(TAG, "sendControl: no channel"); return
         }
+        val state = try { dc.state().name } catch (e: Exception) { "?" }
         val bytes = json.toString().toByteArray(Charsets.UTF_8)
         val ok = dc.send(DataChannel.Buffer(ByteBuffer.wrap(bytes), false))
-        Log.d(TAG, "ctl send k=${json.opt("k")} ok=$ok")
+        Log.d(TAG, "ctl send k=${json.opt("k")} state=$state ok=$ok")
     }
 
     // ---------- PeerConnection.Observer ----------

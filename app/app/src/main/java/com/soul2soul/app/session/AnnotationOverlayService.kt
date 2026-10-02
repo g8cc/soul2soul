@@ -59,7 +59,7 @@ class AnnotationOverlayService : Service() {
         super.onDestroy()
     }
 
-    /** 收到互动内容：应用 → 依内容形态布置窗口（懒加载、只涨不缩、表情/特效满屏）→ 安排淡出后移除 */
+    /** 收到互动内容：应用 → 依内容形态布置窗口（懒加载、按需收缩）→ 安排淡出后移除 */
     private fun acceptInteraction(json: JSONObject) {
         if (!Settings.canDrawOverlays(this)) return
         val k = json.optString("k")
@@ -69,11 +69,33 @@ class AnnotationOverlayService : Service() {
             "fx" -> cv.applyFx(json)
             else -> cv.applyStroke(json)
         }
-        layoutWindow(cv, fullWanted = k == "emoji" || k == "fx" || cv.hasEmojiOrFx())
+        val fullWanted = k == "emoji" || k == "fx" || cv.hasEmojiOrFx()
+        // 空消息（迟到的清屏/收笔、只有"s"没有笔点）不挂窗——连一帧全屏暴露都不给
+        if (!fullWanted && cv.parent == null && !cv.hasVisibleContent()) return
+        layoutWindow(cv, fullWanted)
         canvasRemoval?.let { mainHandler.removeCallbacks(it) }
         val removal = Runnable { maybeRemoveCanvas() }
         canvasRemoval = removal
         mainHandler.postDelayed(removal, CONTENT_LIFE_MS + 800)
+    }
+
+    /** 旋转后 displayMetrics 变了：按新屏幕重排窗口与视口 */
+    override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
+        super.onConfigurationChanged(newConfig)
+        // post 一拍：部分机型回调内 Resources 指标尚未刷新完
+        mainHandler.post {
+            val cv = canvas ?: return@post
+            if (cv.parent == null) return@post // 未挂窗就别借旋转之机挂上去
+            if (!cv.hasVisibleContent()) {
+                // 无可绘内容（如仅剩隐形空笔迹）：直接拆窗，别走全屏兜底把玻璃罩又立起来
+                runCatching { wm.removeView(cv) }
+                canvas = null
+                winRect = null
+                return@post
+            }
+            winRect = null
+            layoutWindow(cv, fullWanted = cv.hasEmojiOrFx())
+        }
     }
 
     private fun layoutWindow(cv: OverlayCanvasView, fullWanted: Boolean) {
@@ -99,9 +121,9 @@ class AnnotationOverlayService : Service() {
             x = rect.left
             y = rect.top
         }
-        cv.setViewport(rect.left, rect.top, screenW, screenH)
-        winRect = rect
         if (!attached) {
+            cv.setViewport(rect.left, rect.top, screenW, screenH)
+            winRect = rect
             runCatching { wm.addView(cv, lp) }.onFailure {
                 android.util.Log.e("Overlay", "canvas addView failed", it)
                 canvas = null
@@ -111,7 +133,12 @@ class AnnotationOverlayService : Service() {
                 ).show()
             }
         } else if (!same) {
+            // 失败时视口/缓存留在旧矩形（窗口实际没动）：内容不错位，下次消息自然重试
             runCatching { wm.updateViewLayout(cv, lp) }
+                .onSuccess {
+                    cv.setViewport(rect.left, rect.top, screenW, screenH)
+                    winRect = rect
+                }
                 .onFailure { android.util.Log.w("Overlay", "updateViewLayout failed", it) }
         }
     }
@@ -139,8 +166,11 @@ class AnnotationOverlayService : Service() {
     private fun maybeRemoveCanvas() {
         val cv = canvas ?: return
         if (cv.hasVisibleContent()) {
-            canvasRemoval?.let { mainHandler.removeCallbacks(it) }
-            mainHandler.postDelayed({ maybeRemoveCanvas() }, 800)
+            // 复查也要登记：新消息（如落笔"s"还没来笔点）才能取消这一发，
+            // 否则会在"上一笔淡出→新一笔首点"的空隙里把窗口从正在画的人手里拆掉
+            val r = Runnable { maybeRemoveCanvas() }
+            canvasRemoval = r
+            mainHandler.postDelayed(r, 800)
             return
         }
         runCatching { wm.removeView(cv) }

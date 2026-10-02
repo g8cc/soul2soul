@@ -164,6 +164,11 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
             setControlsVisible(true)
         }
         findViewById<View>(R.id.btnCtl).setOnClickListener { v ->
+            if (!overlay.controlMode && client?.controlSupported != true) {
+                // 旧版对端不会创建 ctl 通道：不进操控模式，否则手势只会淹没对方悬浮窗
+                android.widget.Toast.makeText(this, R.string.ctl_peer_unsupported, android.widget.Toast.LENGTH_SHORT).show()
+                return@setOnClickListener
+            }
             overlay.controlMode = !overlay.controlMode
             (v as android.widget.Button).setText(
                 if (overlay.controlMode) R.string.ctl_on else R.string.ctl_off
@@ -550,7 +555,8 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
         overlay.visibility = if (inPip || !live) View.GONE else View.VISIBLE
         if (!inPip && live) {
             mainHandler.removeCallbacks(hideControls)
-            mainHandler.postDelayed(hideControls, 5000)
+            // 操控模式不收纳：控件一旦藏起，轻点全变成远控点击，再也切不回画笔/挂断
+            if (!overlay.controlMode) mainHandler.postDelayed(hideControls, 5000)
         }
     }
 

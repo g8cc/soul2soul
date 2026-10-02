@@ -40,7 +40,7 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
 
     /** 远程操控授权开关：默认关，通知栏「允许TA操控」手动开，会话结束自动收回 */
     @Volatile private var ctlAllowed = false
-    private var lastCtlWarnAt = 0L
+    @Volatile private var lastCtlWarnAt = 0L
     @Volatile private var live = false
     private val pendingSignals = mutableListOf<JSONObject>()
 
@@ -53,6 +53,10 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
         override fun onReceive(context: Context, intent: android.content.Intent) {
             when (intent.action) {
                 android.content.Intent.ACTION_SCREEN_OFF -> if (live) {
+                    if (ctlAllowed) {
+                        ctlAllowed = false // 清醒时给的授权不跨锁屏存续，解锁后需重新点「允许TA操控」
+                        updateNotification(if (micMuted) getString(R.string.sharing_muted) else getString(R.string.sharing_live))
+                    }
                     runCatching {
                         webRtc?.sendAnnotation(org.json.JSONObject().put("k", "screenoff"))
                     }
@@ -80,18 +84,20 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
                 return START_NOT_STICKY
             }
             ACTION_TOGGLE_MUTE -> {
+                if (webRtc == null) { stopSelf(); return START_NOT_STICKY } // 会话已结束：迟到的通知动作别挂尸
                 micMuted = !micMuted
                 webRtc?.muteLocalAudio(micMuted)
                 updateNotification(if (micMuted) getString(R.string.sharing_muted) else getString(R.string.sharing_live))
                 return START_NOT_STICKY
             }
             ACTION_TOGGLE_CTL -> {
+                if (webRtc == null) { stopSelf(); return START_NOT_STICKY }
                 if (!ctlAllowed && !RemoteControlService.isReady()) {
                     ctlToast(R.string.ctl_need_acc)
                 } else {
                     ctlAllowed = !ctlAllowed
                     ctlToast(if (ctlAllowed) R.string.ctl_enabled_toast else R.string.ctl_disabled_toast)
-                    updateNotification(getString(R.string.sharing_live))
+                    updateNotification(if (micMuted) getString(R.string.sharing_muted) else getString(R.string.sharing_live))
                 }
                 return START_NOT_STICKY
             }
@@ -170,6 +176,8 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
 
     override fun onDestroy() {
         watchdog.removeCallbacks(screenOffStop)
+        watchdog.removeCallbacksAndMessages(null) // 排队中的手势注入一并作废（服务已亡不再代表会话授权）
+        ctlAllowed = false
         runCatching { unregisterReceiver(screenReceiver) }
         scope.cancel()
         live = false
@@ -217,6 +225,8 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
         if (!ctlAllowed) return
         // dispatchGesture 要求带 Looper 的线程；WebRTC 回调在 signaling 线程
         watchdog.post {
+            // 收回授权可能发生在入队之后：注入前必须以主线程上的最新状态再判一次
+            if (!ctlAllowed) return@post
             val pts = json.optJSONArray("pts") ?: return@post
             if (!RemoteControlService.isReady()) {
                 ctlAllowed = false

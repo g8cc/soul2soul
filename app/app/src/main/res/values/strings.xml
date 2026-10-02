@@ -68,6 +68,7 @@
     <string name="ctl_enabled_toast">已开启：TA 可以操控你的屏幕了</string>
     <string name="ctl_disabled_toast">已收回屏幕操控</string>
     <string name="ctl_need_acc">请先在 系统设置→无障碍→已下载服务 里开启「陪着你」远程操控</string>
+    <string name="ctl_peer_unsupported">TA 的 App 版本太旧，不支持被操控（让 TA 更新后再试）</string>
     <string name="acc_service_desc">开启后，在屏幕共享会话内由你决定是否允许伴侣远程操控你的屏幕（通知栏一键收回）</string>
     <string name="clear_strokes">清屏</string>
     <string name="emoji_toggle">😊+</string>

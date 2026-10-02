@@ -13,8 +13,8 @@ android {
         // <26 适配点：通知渠道/VibrationEffect/PiP/前台服务守卫 + LE 根证书代码级信任链(TlsTrust)
         minSdk = 23
         targetSdk = 34
-        versionCode = 9
-        versionName = "0.2.9"
+        versionCode = 10
+        versionName = "0.2.10"
         // 正式入口：wss 加密信令（nginx 反代 443 → 127.0.0.1:8080，证书 Let's Encrypt 自动续期）
         buildConfigField("String", "SIGNALING_URL", "\"wss://soul.lumi666.cloud\"")
     }
