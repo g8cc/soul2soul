@@ -28,6 +28,7 @@
     <string name="sharing_muted">已静音（对方听不到你）</string>
     <string name="peer_offline">对方不在线</string>
     <string name="peer_declined">对方拒绝了</string>
+    <string name="peer_ended_call">对方结束了呼叫（未接听）</string>
     <string name="projection_denied">没有授权屏幕录制，共享未开始</string>
     <string name="color_red">红</string>
     <string name="color_green">绿</string>

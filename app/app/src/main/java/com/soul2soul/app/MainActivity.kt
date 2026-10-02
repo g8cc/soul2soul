@@ -216,6 +216,16 @@ class MainActivity : AppCompatActivity() {
                 toast(R.string.peer_declined)
                 updateUi()
             }
+            "bye" -> {
+                // 对端在未接听前就结束（旧版本秒挂/异常退出兜底）：主叫端立即复位，
+                // 否则界面停留在"呼叫中"，只能干等 45s 超时
+                if (outgoingPending && !acceptedReceived) {
+                    callTimeout.removeCallbacksAndMessages(null)
+                    cancelOutgoing()
+                    toast(R.string.peer_ended_call)
+                    updateUi()
+                }
+            }
             "call.canceled" -> {
                 callTimeout.removeCallbacksAndMessages(null)
                 cancelOutgoing()
