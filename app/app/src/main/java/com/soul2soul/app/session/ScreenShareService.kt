@@ -7,6 +7,7 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.content.pm.ServiceInfo
 import android.os.Build
 import android.util.Log
 import android.os.IBinder
@@ -20,6 +21,7 @@ import com.soul2soul.app.webrtc.WebRtcClient
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import org.json.JSONObject
@@ -34,6 +36,7 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
     private val watchdog = android.os.Handler(android.os.Looper.getMainLooper())
     @Volatile private var micMuted = false
     @Volatile private var live = false
+    private val pendingSignals = mutableListOf<JSONObject>()
 
     /**
      * 锁屏看门狗（PRD FR-8）：锁屏后 VirtualDisplay 停止出帧，15 秒后自动结束防挂死。
@@ -81,26 +84,25 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
 
         val projection: Intent? = intent?.let { it.getProjectionExtra(EXTRA_PROJECTION) }
         if (projection == null) {
+            MainActivity.cancelOutgoing()
+            SignalBus.emit(JSONObject().put("type", "local.sessionEnded"))
             stopSelf()
             return START_NOT_STICKY
         }
 
         Notif.ensureChannels(this)
-        startForeground(Notif.ID_SESSION, buildNotification(getString(R.string.sharing_starting)))
+        try {
+            startSessionForeground()
+        } catch (e: Exception) {
+            Log.e("ScreenShareService", "start foreground failed", e)
+            Presence.client.send("bye")
+            MainActivity.cancelOutgoing()
+            SignalBus.emit(JSONObject().put("type", "local.sessionEnded"))
+            stopSelf()
+            return START_NOT_STICKY
+        }
         Presence.sessionBusy = true // 会话期间自动拒接新呼叫
         com.soul2soul.app.util.WifiKeeper.acquire(this) // WiFi 高性能锁：防省电断流
-
-        // FGS 已激活，此时才允许 getMediaProjection（ScreenCapturerAndroid 构造时内部调用）
-        val client = WebRtcClient(
-            context = this,
-            isSharer = true,
-            iceServers = IceServerParser.parse(Presence.iceServersJson),
-            listener = this,
-        )
-        webRtc = client
-        client.startSharer(projection)
-
-        startService(Intent(this, AnnotationOverlayService::class.java))
 
         androidx.core.content.ContextCompat.registerReceiver(
             this,
@@ -111,14 +113,40 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
             androidx.core.content.ContextCompat.RECEIVER_NOT_EXPORTED,
         )
 
-        scope.launch {
+        // 必须先订阅再创建 offer，否则极快返回的 answer/ICE 可能在 collector 建立前被 SharedFlow 丢弃。
+        scope.launch(start = CoroutineStart.UNDISPATCHED) {
             SignalBus.events.collect { json ->
                 when (json.optString("type")) {
-                    "sdp" -> webRtc?.onRemoteSdp(json.getJSONObject("sdp"))
-                    "ice" -> webRtc?.onRemoteIce(json.getJSONObject("candidate"))
+                    "sdp", "ice" -> {
+                        val client = webRtc
+                        if (client == null) {
+                            pendingSignals += json
+                        } else {
+                            dispatchSignal(client, json)
+                        }
+                    }
                     "bye", "peer.gone" -> stopSession(sendBye = false)
                 }
             }
+        }
+
+        // FGS 已激活，此时才允许 getMediaProjection（ScreenCapturerAndroid 构造时内部调用）。
+        // 构造或启动失败时要主动结束双方会话，不能让观看端永久停在“连接中”。
+        try {
+            val client = WebRtcClient(
+                context = this,
+                isSharer = true,
+                iceServers = IceServerParser.parse(Presence.iceServersJson),
+                listener = this,
+            )
+            webRtc = client
+            client.startSharer(projection)
+            pendingSignals.forEach { dispatchSignal(client, it) }
+            pendingSignals.clear()
+            startService(Intent(this, AnnotationOverlayService::class.java))
+        } catch (e: Exception) {
+            Log.e("ScreenShareService", "start WebRTC failed", e)
+            stopSession(sendBye = true)
         }
         // 系统若杀掉会话进程，不做无意义的复活（屏幕授权意图已失效）
         return START_NOT_STICKY
@@ -128,12 +156,28 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
         watchdog.removeCallbacks(screenOffStop)
         runCatching { unregisterReceiver(screenReceiver) }
         scope.cancel()
+        live = false
+        liveState = false
+        Presence.sessionBusy = false
+        setSpeakerphone(false)
+        setMicMute(false)
+        com.soul2soul.app.util.WifiKeeper.release()
+        pendingSignals.clear()
         webRtc?.close()
         webRtc = null
         super.onDestroy()
     }
 
     // ---------- WebRtcClient.Listener ----------
+
+    private fun dispatchSignal(client: WebRtcClient, json: JSONObject) {
+        runCatching {
+            when (json.optString("type")) {
+                "sdp" -> client.onRemoteSdp(json.getJSONObject("sdp"))
+                "ice" -> client.onRemoteIce(json.getJSONObject("candidate"))
+            }
+        }.onFailure { Log.w("ScreenShareService", "bad media signal", it) }
+    }
 
     override fun onSignalOut(json: JSONObject) {
         Presence.client.sendRaw(json)
@@ -154,6 +198,8 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
 
     override fun onLive() {
         live = true
+        liveState = true
+        SignalBus.emit(JSONObject().put("type", "local.sessionLive"))
         updateNotification(getString(R.string.sharing_live))
         setSpeakerphone(true)
     }
@@ -168,6 +214,7 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
 
     private fun stopSession(sendBye: Boolean) {
         live = false
+        liveState = false
         Presence.sessionBusy = false
         watchdog.removeCallbacks(screenOffStop)
         setSpeakerphone(false)
@@ -213,6 +260,28 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
         }
     }
 
+    /** Android 14 会校验 FGS 类型对应的运行时权限；无麦克风权限时只声明屏幕采集。 */
+    private fun startSessionForeground() {
+        val type = if (Build.VERSION.SDK_INT >= 29) {
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION or
+                if (checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) ==
+                    PackageManager.PERMISSION_GRANTED
+                ) {
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+                } else {
+                    0
+                }
+        } else {
+            0
+        }
+        ServiceCompat.startForeground(
+            this,
+            Notif.ID_SESSION,
+            buildNotification(getString(R.string.sharing_starting)),
+            type,
+        )
+    }
+
     private fun buildNotification(text: String): Notification {
         val stopIntent = PendingIntent.getService(
             this, 21,
@@ -254,7 +323,12 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
         var webRtc: WebRtcClient? = null
             private set
 
+        @Volatile
+        private var liveState = false
+
         fun isRunning(): Boolean = webRtc != null
+
+        fun isLive(): Boolean = liveState
 
         fun start(ctx: Context, projectionData: Intent) {
             val intent = Intent(ctx, ScreenShareService::class.java)

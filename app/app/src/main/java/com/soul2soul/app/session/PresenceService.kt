@@ -16,6 +16,7 @@ import com.soul2soul.app.signaling.SignalBus
 import com.soul2soul.app.signaling.SignalingClient
 import com.soul2soul.app.util.Prefs
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
@@ -80,10 +81,11 @@ class PresenceService : Service() {
                     }
                 }
             }
-            connect()
-            scope.launch {
+            // 先建立总线订阅，再打开 WebSocket，避免服务刚启动时丢掉 registered/paired/accepted。
+            scope.launch(start = CoroutineStart.UNDISPATCHED) {
                 SignalBus.events.collect { handleSignal(it) }
             }
+            connect()
         }
     }
 
@@ -92,6 +94,8 @@ class PresenceService : Service() {
     override fun onDestroy() {
         handler.removeCallbacksAndMessages(null)
         scope.cancel()
+        Presence.sessionBusy = false
+        com.soul2soul.app.util.WifiKeeper.release()
         Presence.client.close()
         started = false
         super.onDestroy()
@@ -135,7 +139,21 @@ class PresenceService : Service() {
             }
             "accepted" -> {
                 // 主叫切到了后台时对方接听：把 TA 拉回来（offer 由已启动的共享服务处理）
+                // accepted 与主页共用 SharedFlow，主页可能在后台重建而错过这条事件；
+                // 常驻服务必须自己启动共享端，不能把媒体建立依赖在 Activity 是否及时订阅。
                 Presence.iceServersJson = json.optJSONArray("iceServers")
+                if (MainActivity.outgoingPending) {
+                    MainActivity.acceptedReceived = true
+                    MainActivity.projectionData?.let { projection ->
+                        runCatching {
+                            ScreenShareService.start(this, MainActivity.projectionCode, projection)
+                        }.onFailure {
+                            Log.e("PresenceService", "unable to start share service", it)
+                            Presence.client.send("bye")
+                            MainActivity.cancelOutgoing()
+                        }
+                    }
+                }
                 runCatching {
                     startActivity(
                         Intent(this, MainActivity::class.java)

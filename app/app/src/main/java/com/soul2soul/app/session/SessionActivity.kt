@@ -350,7 +350,7 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
         boxIncoming.visibility = View.GONE
         tvState.visibility = View.VISIBLE
         tvState.setText(R.string.connecting)
-        // 30 秒没等到 offer（对方崩溃/掉线）就自动结束，别让人对着"连接中"发呆
+        // 30 秒内 ICE 仍未连通（对方崩溃/协商失败/网络不可达）就自动结束。
         val timeout = Runnable {
             if (!live) {
                 android.widget.Toast.makeText(this, R.string.connect_timeout, android.widget.Toast.LENGTH_LONG).show()
@@ -364,7 +364,6 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
     private fun handleSignal(json: JSONObject) {
         when (json.optString("type")) {
             "sdp" -> {
-                acceptTimeout?.let { mainHandler.removeCallbacks(it) }
                 if (client == null) pendingSignals += json else dispatchToClient(json)
             }
             "ice" -> if (client == null) pendingSignals += json else dispatchToClient(json)
@@ -446,6 +445,8 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
 
     override fun onLive() {
         runOnUiThread {
+            acceptTimeout?.let { mainHandler.removeCallbacks(it) }
+            acceptTimeout = null
             tvState.visibility = View.GONE
             setControlsVisible(true)
             overlay.visibility = View.VISIBLE // 接听并连通前不显示/不响应画笔层
@@ -459,8 +460,9 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
 
     override fun onEnded(reason: String) {
         runOnUiThread {
-            endedRemotely = true
-            finishWithCleanup(sendBye = false, notice = R.string.peer_lost)
+            // 这是本端 PeerConnection 报告的失败/超时，需要通知共享端立即收口；
+            // 远端主动挂断仍由 bye/peer.gone 信令分支处理。
+            finishWithCleanup(sendBye = true, notice = R.string.peer_lost)
         }
     }
 
