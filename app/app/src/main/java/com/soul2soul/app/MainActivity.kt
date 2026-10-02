@@ -138,7 +138,7 @@ class MainActivity : AppCompatActivity() {
         btnCall.setOnClickListener { onCallClicked() }
         findViewById<View>(R.id.btnUnpair).setOnClickListener { showUnpairDialog() }
         findViewById<View>(R.id.btnUpdate).setOnClickListener { showUpdateDialog() }
-        checkForUpdate()
+        // 更新检查统一在 onResume（冷启动也会走到）
         permNotification.setOnClickListener { requestNotificationPermissionIfNeeded(force = true) }
         permMic.setOnClickListener {
             micPermission.launch(Manifest.permission.RECORD_AUDIO)
@@ -499,6 +499,8 @@ class MainActivity : AppCompatActivity() {
             .show()
     }
 
+    private var lastUpdateCheckAt = 0L
+
     override fun onResume() {
         super.onResume()
         // 从"安装未知应用"授权页返回后，继续刚才搁置的安装
@@ -507,6 +509,11 @@ class MainActivity : AppCompatActivity() {
                 pendingInstallFile = null
                 doInstall(file)
             }
+        }
+        // 进程常驻时 onCreate 不再触发：回前台补查更新（10 分钟节流，避免频繁打服务器）
+        if (android.os.SystemClock.elapsedRealtime() - lastUpdateCheckAt > 10 * 60 * 1000L) {
+            lastUpdateCheckAt = android.os.SystemClock.elapsedRealtime()
+            checkForUpdate()
         }
         updateUi()
     }
