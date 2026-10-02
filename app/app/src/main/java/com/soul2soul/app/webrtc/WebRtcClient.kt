@@ -85,7 +85,17 @@ class WebRtcClient(
     private var iceRestartCount = 0
     @Volatile private var established = false
     @Volatile private var renegoInFlight = false
+    private val endedNotified = java.util.concurrent.atomic.AtomicBoolean(false)
+    @Volatile private var remoteDescriptionSet = false
+    private val pendingRemoteIce = mutableListOf<IceCandidate>()
     private var videoSender: org.webrtc.RtpSender? = null
+
+    private val connectTimeoutRunner = Runnable {
+        if (!closed && !established) notifyEnded("connect_TIMEOUT")
+    }
+    private val disconnectTimeoutRunner = Runnable {
+        if (!closed) notifyEnded("ice_DISCONNECTED_TIMEOUT")
+    }
 
     /** 当前采集长边上限（观看端可通过 DataChannel 切 1280/1920） */
     @Volatile
@@ -101,6 +111,7 @@ class WebRtcClient(
     fun startSharer(projectionData: Intent) {
         val pc = createPeerConnection()
         this.pc = pc
+        startConnectTimeout()
 
         val capturer: VideoCapturer = ScreenCapturerAndroid(
             projectionData,
@@ -125,7 +136,10 @@ class WebRtcClient(
                 upstream.onFrameCaptured(frame)
             }
 
-            override fun onCapturerStarted(success: Boolean) = upstream.onCapturerStarted(success)
+            override fun onCapturerStarted(success: Boolean) {
+                upstream.onCapturerStarted(success)
+                if (!success) notifyEnded("capture_START_FAILED")
+            }
 
             override fun onCapturerStopped() = upstream.onCapturerStopped()
         }
@@ -153,9 +167,9 @@ class WebRtcClient(
             it.registerObserver(this)
         }
 
-        pc.createOffer(object : SdpAdapter("createOffer") {
+        pc.createOffer(object : SdpAdapter("createOffer", ::onSdpFailure) {
             override fun onCreateSuccess(desc: SessionDescription) {
-                pc.setLocalDescription(object : SdpAdapter("setLocalOffer") {
+                pc.setLocalDescription(object : SdpAdapter("setLocalOffer", ::onSdpFailure) {
                     override fun onSetSuccess() = sendSdp(desc)
                 }, desc)
             }
@@ -166,6 +180,7 @@ class WebRtcClient(
     fun startViewer() {
         val pc = createPeerConnection()
         this.pc = pc
+        startConnectTimeout()
 
         if (hasAudioPermission()) {
             val audio = factory.createAudioSource(MediaConstraints())
@@ -241,14 +256,28 @@ class WebRtcClient(
     /** 信令收到 sdp：观看端应答 offer；共享端收到 answer */
     fun onRemoteSdp(sdpJson: JSONObject) {
         val pc = pc ?: return
+        if (closed || endedNotified.get()) return
         val type = sdpJson.optString("type")
-        val remote = SessionDescription(SessionDescription.Type.fromCanonicalForm(type), sdpJson.getString("sdp"))
-        pc.setRemoteDescription(object : SdpAdapter("setRemote") {
+        val remote = try {
+            SessionDescription(
+                SessionDescription.Type.fromCanonicalForm(type),
+                sdpJson.getString("sdp"),
+            )
+        } catch (e: Exception) {
+            Log.w(TAG, "bad remote sdp", e)
+            notifyEnded("sdp_INVALID")
+            return
+        }
+        synchronized(pendingRemoteIce) {
+            remoteDescriptionSet = false
+        }
+        pc.setRemoteDescription(object : SdpAdapter("setRemote", ::onSdpFailure) {
             override fun onSetSuccess() {
+                flushPendingRemoteIce(pc)
                 if (type == "offer") {
-                    pc.createAnswer(object : SdpAdapter("createAnswer") {
+                    pc.createAnswer(object : SdpAdapter("createAnswer", ::onSdpFailure) {
                         override fun onCreateSuccess(answer: SessionDescription) {
-                            pc.setLocalDescription(object : SdpAdapter("setLocalAnswer") {
+                            pc.setLocalDescription(object : SdpAdapter("setLocalAnswer", ::onSdpFailure) {
                                 override fun onSetSuccess() = sendSdp(answer)
                             }, answer)
                         }
@@ -259,12 +288,34 @@ class WebRtcClient(
     }
 
     fun onRemoteIce(candidateJson: JSONObject) {
-        val candidate = IceCandidate(
-            candidateJson.optString("sdpMid"),
-            candidateJson.optInt("sdpMLineIndex"),
-            candidateJson.getString("candidate"),
-        )
-        pc?.addIceCandidate(candidate)
+        if (closed || endedNotified.get()) return
+        val candidate = try {
+            IceCandidate(
+                candidateJson.optString("sdpMid"),
+                candidateJson.optInt("sdpMLineIndex"),
+                candidateJson.getString("candidate"),
+            )
+        } catch (e: Exception) {
+            Log.w(TAG, "bad remote ICE candidate", e)
+            return
+        }
+        val peer = pc ?: return
+        synchronized(pendingRemoteIce) {
+            if (!remoteDescriptionSet) {
+                pendingRemoteIce += candidate
+                return
+            }
+        }
+        peer.addIceCandidate(candidate)
+    }
+
+    /** addIceCandidate 在 setRemoteDescription 完成前会失败；按 WebRTC 规范顺序缓存并补交。 */
+    private fun flushPendingRemoteIce(peer: PeerConnection) {
+        val queued = synchronized(pendingRemoteIce) {
+            remoteDescriptionSet = true
+            pendingRemoteIce.toList().also { pendingRemoteIce.clear() }
+        }
+        queued.forEach { peer.addIceCandidate(it) }
     }
 
     // ---------- 标注 DataChannel ----------
@@ -280,6 +331,7 @@ class WebRtcClient(
     // ---------- PeerConnection.Observer ----------
 
     override fun onIceCandidate(candidate: IceCandidate) {
+        if (closed || endedNotified.get()) return
         listener.onSignalOut(
             JSONObject()
                 .put("type", "ice")
@@ -295,25 +347,37 @@ class WebRtcClient(
 
     override fun onIceConnectionChange(state: PeerConnection.IceConnectionState) {
         Log.d(TAG, "ice state: $state")
+        if (endedNotified.get()) return
         when (state) {
             PeerConnection.IceConnectionState.CONNECTED,
             PeerConnection.IceConnectionState.COMPLETED -> {
+                val firstConnection = !established
                 established = true
+                iceHandler.removeCallbacks(connectTimeoutRunner)
+                iceHandler.removeCallbacks(disconnectTimeoutRunner)
                 iceHandler.removeCallbacks(iceRestartRunner)
-                listener.onLive()
-                startRttPolling()
+                if (firstConnection) {
+                    listener.onLive()
+                    startRttPolling()
+                }
             }
-            PeerConnection.IceConnectionState.DISCONNECTED ->
+            PeerConnection.IceConnectionState.DISCONNECTED -> {
                 // 闪断恢复器：短暂断开先自动重启 ICE 尝试原地复活，
                 // 而不是等 FAILED 把整场会话判死（微信式韧性）
-                if (isSharer) iceHandler.postDelayed(iceRestartRunner, ICE_RESTART_AFTER_MS)
+                if (isSharer) {
+                    iceHandler.removeCallbacks(iceRestartRunner)
+                    iceHandler.postDelayed(iceRestartRunner, ICE_RESTART_AFTER_MS)
+                }
+                iceHandler.removeCallbacks(disconnectTimeoutRunner)
+                iceHandler.postDelayed(disconnectTimeoutRunner, DISCONNECT_TIMEOUT_MS)
+            }
             PeerConnection.IceConnectionState.FAILED -> {
                 iceHandler.removeCallbacks(iceRestartRunner)
-                listener.onEnded("ice_FAILED")
+                notifyEnded("ice_FAILED")
             }
             PeerConnection.IceConnectionState.CLOSED -> if (!closed) {
                 iceHandler.removeCallbacks(iceRestartRunner)
-                listener.onEnded("ice_CLOSED")
+                notifyEnded("ice_CLOSED")
             }
             else -> Unit
         }
@@ -438,9 +502,9 @@ class WebRtcClient(
         if (!established || closed || renegoInFlight || isSharer.not()) return
         val pc = pc ?: return
         renegoInFlight = true
-        pc.createOffer(object : SdpAdapter("renego") {
+        pc.createOffer(object : SdpAdapter("renego", ::onSdpFailure) {
             override fun onCreateSuccess(desc: SessionDescription) {
-                pc.setLocalDescription(object : SdpAdapter("setLocalRenego") {
+                pc.setLocalDescription(object : SdpAdapter("setLocalRenego", ::onSdpFailure) {
                     override fun onSetSuccess() {
                         renegoInFlight = false
                         sendSdp(desc)
@@ -449,6 +513,7 @@ class WebRtcClient(
                     override fun onSetFailure(error: String?) {
                         renegoInFlight = false
                         Log.w(TAG, "renego setLocal failed: $error")
+                        onSdpFailure("setLocalRenego_SET")
                     }
                 }, desc)
             }
@@ -477,7 +542,12 @@ class WebRtcClient(
     fun close() {
         if (closed) return
         closed = true
+        iceHandler.removeCallbacksAndMessages(null)
         stopRttPolling()
+        synchronized(pendingRemoteIce) {
+            pendingRemoteIce.clear()
+            remoteDescriptionSet = false
+        }
         try {
             capturer?.stopCapture()
         } catch (_: Exception) {}
@@ -500,7 +570,27 @@ class WebRtcClient(
         return factory.createPeerConnection(config, this) ?: error("createPeerConnection failed")
     }
 
+    private fun startConnectTimeout() {
+        iceHandler.removeCallbacks(connectTimeoutRunner)
+        iceHandler.postDelayed(connectTimeoutRunner, CONNECT_TIMEOUT_MS)
+    }
+
+    private fun onSdpFailure(stage: String) {
+        renegoInFlight = false
+        notifyEnded("sdp_$stage")
+    }
+
+    private fun notifyEnded(reason: String) {
+        if (closed || !endedNotified.compareAndSet(false, true)) return
+        iceHandler.removeCallbacks(connectTimeoutRunner)
+        iceHandler.removeCallbacks(disconnectTimeoutRunner)
+        iceHandler.removeCallbacks(iceRestartRunner)
+        Log.w(TAG, "session ended: $reason")
+        listener.onEnded(reason)
+    }
+
     private fun sendSdp(desc: SessionDescription) {
+        if (closed || endedNotified.get()) return
         // 屏幕内容编码优化：offer 中将 VP9 载荷提前（对端按相同顺序应答）
         val sdpText = if (desc.type == SessionDescription.Type.OFFER) {
             preferVp9(desc.description)
@@ -524,15 +614,20 @@ class WebRtcClient(
             android.content.pm.PackageManager.PERMISSION_GRANTED
 
     /** 只覆盖用到的回调，其余留空的 SdpObserver 基类 */
-    private abstract class SdpAdapter(private val tag: String) : SdpObserver {
+    private abstract class SdpAdapter(
+        private val tag: String,
+        private val failure: ((String) -> Unit)? = null,
+    ) : SdpObserver {
         override fun onCreateSuccess(desc: SessionDescription) {}
         override fun onSetSuccess() {}
         override fun onCreateFailure(error: String?) {
             Log.w(TAG, "sdp create failed ($tag): $error")
+            failure?.invoke("${tag}_CREATE")
         }
 
         override fun onSetFailure(error: String?) {
             Log.w(TAG, "sdp set failed ($tag): $error")
+            failure?.invoke("${tag}_SET")
         }
     }
 
@@ -541,6 +636,8 @@ class WebRtcClient(
         private const val STREAM = "soul"
         private const val CAPTURE_FPS = 30
         private const val RTT_POLL_MS = 2000L
+        private const val CONNECT_TIMEOUT_MS = 30_000L
+        private const val DISCONNECT_TIMEOUT_MS = 15_000L
         private const val ICE_RESTART_AFTER_MS = 6000L
         private const val MAX_ICE_RESTARTS = 3
     }

@@ -44,6 +44,7 @@ class MainActivity : AppCompatActivity() {
     companion object {
         private const val TAG = "S2S-Main"
         private const val CALL_TIMEOUT_MS = 30_000L
+        private const val MEDIA_CONNECT_TIMEOUT_MS = 45_000L
 
         @Volatile var outgoingPending = false
         @Volatile var acceptedReceived = false
@@ -70,18 +71,24 @@ class MainActivity : AppCompatActivity() {
         registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
             val data = result.data
             if (result.resultCode == Activity.RESULT_OK && data != null) {
-                // 授权成功 → 此时才发邀请；对方接听后 accepted 到达即启动共享服务
-                projectionCode = result.resultCode
-                projectionData = data
-                Presence.client.send("invite")
-                Log.d(TAG, "invite sent")
-                callTimeout.postDelayed({
-                    if (outgoingPending) {
-                        cancelOutgoing()
-                        toast(R.string.call_timeout)
-                        updateUi()
-                    }
-                }, CALL_TIMEOUT_MS)
+                // 用户可能在系统授权页期间点了取消，或主叫等待超时；不要让迟到的授权结果重新发起邀请。
+                if (!outgoingPending) {
+                    projectionData = null
+                    updateUi()
+                } else {
+                    // 授权成功 → 此时才发邀请；对方接听后 accepted 到达即启动共享服务
+                    projectionCode = result.resultCode
+                    projectionData = data
+                    Presence.client.send("invite")
+                    Log.d(TAG, "invite sent")
+                    callTimeout.postDelayed({
+                        if (outgoingPending) {
+                            cancelOutgoing()
+                            toast(R.string.call_timeout)
+                            updateUi()
+                        }
+                    }, CALL_TIMEOUT_MS)
+                }
             } else {
                 toast(R.string.projection_denied)
                 cancelOutgoing()
@@ -177,6 +184,7 @@ class MainActivity : AppCompatActivity() {
                 updateUi()
             }
             "accepted" -> {
+                if (!outgoingPending) return
                 // 对方接听：屏幕授权已在邀请前完成，此刻直接启动共享服务（offer 即刻发出）
                 callTimeout.removeCallbacksAndMessages(null)
                 acceptedReceived = true
@@ -184,6 +192,22 @@ class MainActivity : AppCompatActivity() {
                 projectionData?.let {
                     ScreenShareService.start(this, projectionCode, it)
                 }
+                // accepted 只代表对方点击了接听；媒体仍可能卡在授权、SDP 或 ICE。
+                // 给主叫端也留一个总出口，避免共享服务异常时主页永久显示“呼叫中”。
+                callTimeout.postDelayed({
+                    if (outgoingPending && acceptedReceived) {
+                        if (ScreenShareService.isLive()) {
+                            // 主页可能在后台错过 local.sessionLive；服务状态才是权威来源。
+                            cancelOutgoing()
+                            updateUi()
+                        } else {
+                            Presence.client.send("bye")
+                            cancelOutgoing()
+                            toast(R.string.connect_timeout)
+                            updateUi()
+                        }
+                    }
+                }, MEDIA_CONNECT_TIMEOUT_MS)
             }
             "declined" -> {
                 callTimeout.removeCallbacksAndMessages(null)
@@ -218,6 +242,11 @@ class MainActivity : AppCompatActivity() {
                 // 会话因任何原因结束时，共享服务广播此本地事件：复位主叫"呼叫中"状态
                 callTimeout.removeCallbacksAndMessages(null)
                 cancelOutgoing()
+                updateUi()
+            }
+            "local.sessionLive" -> {
+                // ICE 真正连通后取消媒体建立兜底；会话状态仍由共享服务持有。
+                callTimeout.removeCallbacksAndMessages(null)
                 updateUi()
             }
         }

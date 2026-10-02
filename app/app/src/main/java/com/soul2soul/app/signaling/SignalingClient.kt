@@ -26,14 +26,19 @@ class SignalingClient : WebSocketListener() {
             .build()
     }
 
+    @Volatile
     private var ws: WebSocket? = null
+    @Volatile
+    private var socketOpen = false
     private var deviceId: String? = null
     private var pairToken: String? = null
 
-    val isConnected: Boolean get() = ws != null
+    /** 只有 WebSocket 已完成握手后才算可发送，CONNECTING 状态不能作为在线依据。 */
+    val isConnected: Boolean get() = socketOpen && ws != null
 
     /** 更新配对令牌（配对成功/启动时注入）；若已连接，立即携带新令牌重连 */
     fun setPairToken(token: String?) {
+        if (pairToken == token) return
         pairToken = token
         if (token != null && ws != null) {
             val id = deviceId
@@ -45,6 +50,7 @@ class SignalingClient : WebSocketListener() {
     fun connect(id: String) {
         deviceId = id
         if (ws != null) return
+        socketOpen = false
         Log.d(TAG, "connecting ${BuildConfig.SIGNALING_URL}")
         val request = Request.Builder().url(BuildConfig.SIGNALING_URL).build()
         ws = client.newWebSocket(request, this)
@@ -58,26 +64,37 @@ class SignalingClient : WebSocketListener() {
     }
 
     fun sendRaw(json: JSONObject): Boolean {
-        val socket = ws ?: return false
+        val socket = ws
+        if (!socketOpen || socket == null) return false
         return socket.send(json.toString())
     }
 
     fun close() {
-        ws?.close(1000, "bye")
+        val socket = ws
         ws = null
+        socketOpen = false
+        socket?.close(1000, "bye")
     }
 
     override fun onOpen(webSocket: WebSocket, response: Response) {
+        // token 更新/重连时，旧 socket 的回调可能晚于新 socket 到达；旧连接不能污染当前状态。
+        if (ws !== webSocket) {
+            webSocket.close(1000, "stale")
+            return
+        }
         Log.d(TAG, "ws open")
         val id = deviceId
-        if (id != null) send("hello") {
-            put("deviceId", id)
-            pairToken?.let { put("token", it) }
+        socketOpen = true
+        if (id != null) {
+            val hello = JSONObject().put("type", "hello").put("deviceId", id)
+            pairToken?.let { hello.put("token", it) }
+            webSocket.send(hello.toString())
         }
         stateListener?.onState(true)
     }
 
     override fun onMessage(webSocket: WebSocket, text: String) {
+        if (ws !== webSocket) return
         try {
             SignalBus.emit(JSONObject(text))
         } catch (e: Exception) {
@@ -86,13 +103,17 @@ class SignalingClient : WebSocketListener() {
     }
 
     override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+        if (ws !== webSocket) return
         ws = null
+        socketOpen = false
         stateListener?.onState(false)
     }
 
     override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+        if (ws !== webSocket) return
         Log.w(TAG, "ws failed: ${t.message}")
         ws = null
+        socketOpen = false
         stateListener?.onState(false)
     }
 
