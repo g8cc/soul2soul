@@ -59,6 +59,16 @@
     <string name="peer_lost">连接断开，共玩已结束</string>
     <string name="peer_screen_off">对方锁屏了，共玩稍后自动结束</string>
     <string name="overlay_permission_missing">悬浮窗权限未生效——请在 系统设置→授权管理→应用权限管理→陪着你 里开启「显示悬浮窗」，否则对方看不到你的画笔</string>
+    <string name="perm_accessibility">远程操控（无障碍，可选）</string>
+    <string name="ctl_off">操控</string>
+    <string name="ctl_on">操控中</string>
+    <string name="ctl_mode_hint">操控模式：点击/滑动将直接作用在 TA 的屏幕上（TA 需在通知栏点「允许TA操控」）</string>
+    <string name="ctl_allow">允许TA操控</string>
+    <string name="ctl_disallow">收回操控</string>
+    <string name="ctl_enabled_toast">已开启：TA 可以操控你的屏幕了</string>
+    <string name="ctl_disabled_toast">已收回屏幕操控</string>
+    <string name="ctl_need_acc">请先在 系统设置→无障碍→已下载服务 里开启「陪着你」远程操控</string>
+    <string name="acc_service_desc">开启后，在屏幕共享会话内由你决定是否允许伴侣远程操控你的屏幕（通知栏一键收回）</string>
     <string name="clear_strokes">清屏</string>
     <string name="emoji_toggle">😊+</string>
     <string name="hd_on">高清 ✓</string>

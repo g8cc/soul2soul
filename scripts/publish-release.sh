@@ -3,7 +3,8 @@
 # 用法: ./scripts/publish-release.sh <versionName> <versionCode>
 set -e
 VN=${1:?版本名，如 0.2.5}; VC=${2:?版本号(递增整数)}
-cd "$(dirname "$0")/../app"
+REPO="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$REPO/app"
 export JAVA_HOME=${JAVA_HOME:-/Users/wardonguo/tools/jdk17/jdk-17.0.2.jdk/Contents/Home}
 ~/tools/gradle-8.7/bin/gradle :app:assembleProdRelease --no-daemon -q
 APK=app/build/outputs/apk/prod/release/app-prod-release.apk
@@ -18,7 +19,7 @@ ssh guo "node -e 'JSON.parse(require(\"fs\").readFileSync(\"/opt/soul2soul/apk/v
   || curl -s https://soul.lumi666.cloud/apk/version.json | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>JSON.parse(s))' \
   || { echo "❌ version.json 非法 JSON，请检查服务器"; exit 1; }
 # 本地归档: 拷贝发版产物到 dist/，只保留最近 2 个版本
-DIST="$(cd "$(dirname "$0")/.." && pwd)/dist"
+DIST="$REPO/dist"
 mkdir -p "$DIST"
 cp "$APK" "$DIST/Soul2Soul-v$VN-release.apk"
 ls -1t "$DIST"/Soul2Soul-v*.apk 2>/dev/null | tail -n +3 | xargs rm -f

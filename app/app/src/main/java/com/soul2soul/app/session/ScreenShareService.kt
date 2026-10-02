@@ -8,7 +8,9 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
+import android.graphics.PointF
 import android.os.Build
+import android.os.SystemClock
 import android.util.Log
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
@@ -35,6 +37,10 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
     private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
     private val watchdog = android.os.Handler(android.os.Looper.getMainLooper())
     @Volatile private var micMuted = false
+
+    /** 远程操控授权开关：默认关，通知栏「允许TA操控」手动开，会话结束自动收回 */
+    @Volatile private var ctlAllowed = false
+    private var lastCtlWarnAt = 0L
     @Volatile private var live = false
     private val pendingSignals = mutableListOf<JSONObject>()
 
@@ -77,6 +83,16 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
                 micMuted = !micMuted
                 webRtc?.muteLocalAudio(micMuted)
                 updateNotification(if (micMuted) getString(R.string.sharing_muted) else getString(R.string.sharing_live))
+                return START_NOT_STICKY
+            }
+            ACTION_TOGGLE_CTL -> {
+                if (!ctlAllowed && !RemoteControlService.isReady()) {
+                    ctlToast(R.string.ctl_need_acc)
+                } else {
+                    ctlAllowed = !ctlAllowed
+                    ctlToast(if (ctlAllowed) R.string.ctl_enabled_toast else R.string.ctl_disabled_toast)
+                    updateNotification(getString(R.string.sharing_live))
+                }
                 return START_NOT_STICKY
             }
         }
@@ -188,10 +204,40 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
 
     override fun onDataMessage(json: JSONObject) {
         Log.d("S2S-DC", "recv k=${json.opt("k")} id=${json.opt("id")}")
-        // 观看端清晰度切换 → 共享端；笔迹/清屏 → 悬浮窗服务（懒加载画布）
+        // 观看端清晰度切换 → 共享端；笔迹/表情/特效 → 悬浮窗服务（懒加载画布）
         when (json.optString("k")) {
             "res" -> webRtc?.setCaptureLongEdgeOnMain(json.optInt("edge", 1280))
+            "g" -> handleGesture(json)
             else -> AnnotationOverlayService.hook?.invoke(json)
+        }
+    }
+
+    /** 远程操控手势（可靠 ctl 通道，整笔一条）：仅在用户允许时注入 */
+    private fun handleGesture(json: JSONObject) {
+        if (!ctlAllowed) return
+        // dispatchGesture 要求带 Looper 的线程；WebRTC 回调在 signaling 线程
+        watchdog.post {
+            val pts = json.optJSONArray("pts") ?: return@post
+            if (!RemoteControlService.isReady()) {
+                ctlAllowed = false
+                ctlToast(R.string.ctl_need_acc)
+                return@post
+            }
+            val list = ArrayList<PointF>(pts.length())
+            for (i in 0 until pts.length()) {
+                val p = pts.optJSONArray(i) ?: continue
+                list.add(PointF(p.optDouble(0).toFloat(), p.optDouble(1).toFloat()))
+            }
+            RemoteControlService.dispatchNormalized(list, json.optLong("dur", 120L))
+        }
+    }
+
+    private fun ctlToast(res: Int) {
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastCtlWarnAt < 3000L) return // 手势连发时别把屏幕糊满 toast
+        lastCtlWarnAt = now
+        watchdog.post {
+            android.widget.Toast.makeText(this, res, android.widget.Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -218,6 +264,7 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
         watchdog.removeCallbacks(screenOffStop)
         setSpeakerphone(false)
         micMuted = false
+        ctlAllowed = false // 会话结束立即收回操控授权
         // 静音是发送轨属性，随 AudioSource 销毁而复位，无需再全局恢复系统麦克风
         com.soul2soul.app.util.WifiKeeper.release()
         if (sendBye) Presence.client.send("bye")
@@ -292,12 +339,18 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
             Intent(this, ScreenShareService::class.java).setAction(ACTION_TOGGLE_MUTE),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
+        val ctlIntent = PendingIntent.getService(
+            this, 23,
+            Intent(this, ScreenShareService::class.java).setAction(ACTION_TOGGLE_CTL),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
         return NotificationCompat.Builder(this, Notif.CH_SESSION)
             .setSmallIcon(R.drawable.ic_heart)
             .setContentTitle(getString(R.string.sharing_title))
             .setContentText(text)
             .setOngoing(true)
             .addAction(0, if (micMuted) getString(R.string.action_unmute) else getString(R.string.action_mute), muteIntent)
+            .addAction(0, if (ctlAllowed) getString(R.string.ctl_disallow) else getString(R.string.ctl_allow), ctlIntent)
             .addAction(0, getString(R.string.action_end), stopIntent)
             .build()
     }
@@ -313,6 +366,7 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
     companion object {
         const val ACTION_STOP = "com.soul2soul.app.action.STOP_SHARE"
         const val ACTION_TOGGLE_MUTE = "com.soul2soul.app.action.TOGGLE_MUTE"
+        const val ACTION_TOGGLE_CTL = "com.soul2soul.app.action.TOGGLE_CTL"
         const val EXTRA_PROJECTION = "projection"
         private const val SCREEN_OFF_TIMEOUT_MS = 15_000L
 

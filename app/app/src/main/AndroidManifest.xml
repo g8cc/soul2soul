@@ -76,6 +76,20 @@
         <service
             android:name=".session.AnnotationOverlayService"
             android:exported="false" />
+
+        <!-- 远程操控: 观看端手势经无障碍服务注入本机屏幕（需用户手动开启 + 会话内允许） -->
+        <service
+            android:name=".session.RemoteControlService"
+            android:exported="false"
+            android:label="@string/app_name"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/remote_control_accessibility" />
+        </service>
     </application>
 
 </manifest>

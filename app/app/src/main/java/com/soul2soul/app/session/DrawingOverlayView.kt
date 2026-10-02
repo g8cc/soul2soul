@@ -39,6 +39,20 @@ class DrawingOverlayView @JvmOverloads constructor(
     var videoWidth = 0
     var videoHeight = 0
 
+    /**
+     * 操控模式：滑动/点击不再产生画笔，而是攒成一条完整手势，抬指时整体发送
+     * {k:"g", pts, dur} → 对方经无障碍服务 dispatchGesture 注入。
+     * 一笔一消息（而非逐点流式）：可靠通道下单条消息丢失即整笔重发，不存在半截手势。
+     */
+    var controlMode = false
+        set(value) {
+            field = value
+            if (!value) {
+                gesturePts.clear()
+            }
+            invalidate()
+        }
+
     private class Stroke(
         val id: String,
         val color: Int,
@@ -51,6 +65,9 @@ class DrawingOverlayView @JvmOverloads constructor(
 
     private val strokes = mutableListOf<Stroke>()
     private var current: Stroke? = null
+    private val gesturePts = mutableListOf<PointF>() // 操控模式进行中手势（视图像素）
+    private var gestureDownAt = 0L
+    private var gestureLastAt = 0L
 
     /** 当前画笔颜色索引（UI 读取以显示选中态） */
     var colorIndex = 0
@@ -70,6 +87,13 @@ class DrawingOverlayView @JvmOverloads constructor(
         strokeWidth = 6f * resources.displayMetrics.density
     }
 
+    private val gesturePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+        strokeCap = Paint.Cap.ROUND
+        strokeJoin = Paint.Join.ROUND
+        color = Color.WHITE
+    }
+
     fun setColor(index: Int) {
         colorIndex = index.mod(StrokeColors.COLORS.size)
     }
@@ -84,6 +108,11 @@ class DrawingOverlayView @JvmOverloads constructor(
     }
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
+        if (controlMode) {
+            handleControlTouch(event)
+            invalidate()
+            return true
+        }
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
                 downTime = SystemClock.uptimeMillis()
@@ -120,6 +149,54 @@ class DrawingOverlayView @JvmOverloads constructor(
         }
         invalidate()
         return true
+    }
+
+    // ---------- 操控模式 ----------
+
+    private fun handleControlTouch(event: MotionEvent) {
+        when (event.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                gesturePts.clear()
+                gesturePts.add(PointF(event.x, event.y))
+                gestureDownAt = SystemClock.uptimeMillis()
+                gestureLastAt = gestureDownAt
+            }
+            MotionEvent.ACTION_MOVE -> {
+                val now = SystemClock.uptimeMillis()
+                val last = gesturePts.lastOrNull()
+                val moved = last != null &&
+                    hypot(event.x - last.x, event.y - last.y) > GESTURE_MIN_PX
+                if ((moved || now - gestureLastAt > GESTURE_MIN_MS) &&
+                    gesturePts.size < GESTURE_MAX_PTS
+                ) {
+                    gesturePts.add(PointF(event.x, event.y))
+                    gestureLastAt = now
+                }
+            }
+            MotionEvent.ACTION_UP -> {
+                if (gesturePts.isNotEmpty()) {
+                    sink?.onStroke(gestureMsg(SystemClock.uptimeMillis() - gestureDownAt))
+                }
+                gesturePts.clear()
+            }
+            MotionEvent.ACTION_CANCEL -> gesturePts.clear()
+        }
+    }
+
+    /** 手势消息：归一化到 letterbox 视频矩形（点哪里 = 点对方屏幕的哪里） */
+    private fun gestureMsg(durMs: Long): JSONObject {
+        val rect = videoRect()
+        val arr = org.json.JSONArray()
+        for (p in gesturePts) {
+            val xn = ((p.x - rect.left) / rect.width()).coerceIn(0f, 1f)
+            val yn = ((p.y - rect.top) / rect.height()).coerceIn(0f, 1f)
+            arr.put(
+                org.json.JSONArray()
+                    .put((xn * 10000).toInt() / 10000.0)
+                    .put((yn * 10000).toInt() / 10000.0)
+            )
+        }
+        return JSONObject().put("k", "g").put("pts", arr).put("dur", durMs)
     }
 
     private fun beginStroke(event: MotionEvent) {
@@ -178,5 +255,25 @@ class DrawingOverlayView @JvmOverloads constructor(
             }
         }
         if (strokes.isNotEmpty()) postInvalidateOnAnimation()
+
+        // 操控模式：正在攒的手势画成白色虚影，抬手即发给对方
+        if (controlMode && gesturePts.isNotEmpty()) {
+            gesturePaint.strokeWidth = 5f * resources.displayMetrics.density
+            gesturePaint.alpha = 160
+            var prev: PointF? = null
+            for (p in gesturePts) {
+                prev?.let { canvas.drawLine(it.x, it.y, p.x, p.y, gesturePaint) }
+                prev = p
+            }
+            val tip = gesturePts.last()
+            canvas.drawCircle(tip.x, tip.y, 12f * resources.displayMetrics.density, gesturePaint)
+            postInvalidateOnAnimation()
+        }
+    }
+
+    companion object {
+        private const val GESTURE_MIN_PX = 12f
+        private const val GESTURE_MIN_MS = 60L
+        private const val GESTURE_MAX_PTS = 64
     }
 }

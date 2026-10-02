@@ -14,6 +14,12 @@
         android:layout_width="match_parent"
         android:layout_height="match_parent" />
 
+    <!-- 特效本地回显层（View 默认不消费触摸，点击会穿透到下层画笔/操控层） -->
+    <com.soul2soul.app.session.OverlayCanvasView
+        android:id="@+id/fxLayer"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent" />
+
     <!-- 表情互动的本地回显层 -->
     <FrameLayout
         android:id="@+id/emojiLayer"
@@ -190,6 +196,44 @@
                 android:textSize="28sp" />
         </LinearLayout>
 
+        <!-- 第二行：满屏特效（微信群礼物式玩法） -->
+        <LinearLayout
+            android:id="@+id/fxRow"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center_horizontal"
+            android:layout_marginTop="6dp"
+            android:background="@drawable/bg_bubble"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:paddingHorizontal="8dp"
+            android:visibility="gone">
+
+            <TextView
+                android:id="@+id/fxBomb"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:padding="10dp"
+                android:text="💥"
+                android:textSize="28sp" />
+
+            <TextView
+                android:id="@+id/fxGift"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:padding="10dp"
+                android:text="🎁"
+                android:textSize="28sp" />
+
+            <TextView
+                android:id="@+id/fxRocket"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:padding="10dp"
+                android:text="🚀"
+                android:textSize="28sp" />
+        </LinearLayout>
+
         <LinearLayout
             android:id="@+id/boxLive"
             android:layout_width="match_parent"
@@ -262,6 +306,16 @@
                 android:paddingHorizontal="12dp"
                 android:text="@string/emoji_toggle"
                 android:textSize="14sp" />
+
+            <Button
+                android:id="@+id/btnCtl"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="6dp"
+                android:minWidth="0dp"
+                android:paddingHorizontal="10dp"
+                android:text="@string/ctl_off"
+                android:textSize="12sp" />
 
             <Space
                 android:layout_width="0dp"

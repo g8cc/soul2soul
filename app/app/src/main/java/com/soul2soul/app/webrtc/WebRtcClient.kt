@@ -77,6 +77,7 @@ class WebRtcClient(
     private var audioSource: AudioSource? = null
     private var audioTrack: AudioTrack? = null
     private var dataChannel: DataChannel? = null
+    private var ctlChannel: DataChannel? = null
     private var surfaceHelper: SurfaceTextureHelper? = null
     private var closed = false
     private val frameCount = java.util.concurrent.atomic.AtomicLong()
@@ -182,6 +183,11 @@ class WebRtcClient(
             maxRetransmits = 1
         }
         dataChannel = pc.createDataChannel("anno", dcInit)?.also {
+            it.registerObserver(this)
+        }
+        // 远程操控手势：整笔一条消息，可靠有序（丢半截手势比延迟更致命）
+        val ctlInit = DataChannel.Init().apply { ordered = true }
+        ctlChannel = pc.createDataChannel("ctl", ctlInit)?.also {
             it.registerObserver(this)
         }
 
@@ -353,6 +359,16 @@ class WebRtcClient(
         Log.d(TAG, "dc send k=${json.opt("k")} state=$state ok=$ok")
     }
 
+    /** 远程操控手势出口（观看端 → 共享端）；ctl 通道未建时退回 anno 通道保兼容 */
+    fun sendControl(json: JSONObject) {
+        val dc = ctlChannel ?: dataChannel ?: run {
+            Log.w(TAG, "sendControl: no channel"); return
+        }
+        val bytes = json.toString().toByteArray(Charsets.UTF_8)
+        val ok = dc.send(DataChannel.Buffer(ByteBuffer.wrap(bytes), false))
+        Log.d(TAG, "ctl send k=${json.opt("k")} ok=$ok")
+    }
+
     // ---------- PeerConnection.Observer ----------
 
     override fun onIceCandidate(candidate: IceCandidate) {
@@ -501,8 +517,8 @@ class WebRtcClient(
     }
 
     override fun onDataChannel(dc: DataChannel) {
-        // 观看端：channel 由共享端创建
-        dataChannel = dc
+        // 观看端：channel 均由共享端创建，按 label 分流
+        if (dc.label() == "ctl") ctlChannel = dc else dataChannel = dc
         dc.registerObserver(this)
     }
 
@@ -587,6 +603,7 @@ class WebRtcClient(
         audioTrack?.dispose(); audioTrack = null
         audioSource?.dispose(); audioSource = null
         dataChannel?.close(); dataChannel = null
+        ctlChannel?.close(); ctlChannel = null
         pc?.close(); pc = null
         surfaceHelper?.dispose(); surfaceHelper = null
         factory.dispose()

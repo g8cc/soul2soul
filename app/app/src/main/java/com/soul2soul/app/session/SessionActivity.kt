@@ -43,8 +43,10 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
     private lateinit var tvRtt: TextView
     private lateinit var boxLive: View
     private lateinit var emojiPanel: View
+    private lateinit var fxRow: View
     private lateinit var controlsContainer: View
     private lateinit var emojiLayer: android.widget.FrameLayout
+    private lateinit var fxLayer: OverlayCanvasView
     private var emojiOpen = false
     private val hideControls = Runnable { setControlsVisible(false) }
 
@@ -110,6 +112,8 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
         tvRtt = findViewById(R.id.tvRtt)
         emojiLayer = findViewById(R.id.emojiLayer)
         emojiPanel = findViewById(R.id.emojiPanel)
+        fxRow = findViewById(R.id.fxRow)
+        fxLayer = findViewById(R.id.fxLayer)
         controlsContainer = findViewById(R.id.controlsContainer)
         boxLive = findViewById(R.id.boxLive)
 
@@ -119,7 +123,9 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
         overlay.visibility = View.GONE // 接听并连通前不显示/不响应画笔层
         overlay.sink = object : DrawingOverlayView.StrokeSink {
             override fun onStroke(json: JSONObject) {
-                client?.sendAnnotation(json)
+                // 操控手势走可靠 ctl 通道，其余（笔迹/表情/指令）走容忍丢包的 anno 通道
+                if (json.optString("k") == "g") client?.sendControl(json)
+                else client?.sendAnnotation(json)
             }
         }
 
@@ -154,13 +160,29 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
         findViewById<View>(R.id.btnEmoji).setOnClickListener {
             emojiOpen = !emojiOpen
             emojiPanel.visibility = if (emojiOpen) View.VISIBLE else View.GONE
+            fxRow.visibility = if (emojiOpen) View.VISIBLE else View.GONE
             setControlsVisible(true)
+        }
+        findViewById<View>(R.id.btnCtl).setOnClickListener { v ->
+            overlay.controlMode = !overlay.controlMode
+            (v as android.widget.Button).setText(
+                if (overlay.controlMode) R.string.ctl_on else R.string.ctl_off
+            )
+            if (overlay.controlMode) {
+                android.widget.Toast.makeText(this, R.string.ctl_mode_hint, android.widget.Toast.LENGTH_SHORT).show()
+            }
+            setControlsVisible(true) // 操控期间控件不再自动收纳，随时可切回画笔
         }
         listOf(
             R.id.emoji0 to "❤️", R.id.emoji1 to "😂", R.id.emoji2 to "👍",
             R.id.emoji3 to "😮", R.id.emoji4 to "🥺", R.id.emoji5 to "🔥",
         ).forEach { (id, e) ->
             findViewById<View>(id).setOnClickListener { sendEmoji(e) }
+        }
+        listOf(
+            R.id.fxBomb to "bomb", R.id.fxGift to "gift", R.id.fxRocket to "rocket",
+        ).forEach { (id, t) ->
+            findViewById<View>(id).setOnClickListener { sendFx(t) }
         }
         // 轻点画面 = 呼出/收纳控件；滑动 = 画笔（DrawingOverlayView 内部区分）
         overlay.onTap = { toggleControls() }
@@ -204,8 +226,9 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
     private fun setControlsVisible(visible: Boolean) {
         boxLive.visibility = if (visible) View.VISIBLE else View.GONE
         emojiPanel.visibility = if (visible && emojiOpen) View.VISIBLE else View.GONE
+        fxRow.visibility = if (visible && emojiOpen) View.VISIBLE else View.GONE
         mainHandler.removeCallbacks(hideControls)
-        if (visible) mainHandler.postDelayed(hideControls, 5000) // 5 秒无操作自动收纳
+        if (visible && !overlay.controlMode) mainHandler.postDelayed(hideControls, 5000) // 5 秒无操作自动收纳
     }
 
     // ---------- 表情互动 ----------
@@ -218,6 +241,13 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
             JSONObject().put("k", "emoji").put("e", e).put("x", x)
         )
         showLocalEmoji(e)
+    }
+
+    /** 满屏特效：发给对方 + 本地回显（fxLayer 不消费触摸，不挡操控） */
+    private fun sendFx(t: String) {
+        val json = JSONObject().put("k", "fx").put("t", t)
+        client?.sendAnnotation(json)
+        fxLayer.applyFx(json)
     }
 
     /** 本地回显：让对方屏幕飘表情的同时，自己也能立刻看到（正反馈） */
@@ -516,6 +546,7 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
         val inPip = isInPictureInPictureMode
         controlsContainer?.visibility = if (inPip || !live) View.GONE else View.VISIBLE
         emojiPanel.visibility = if (inPip || !live || !emojiOpen) View.GONE else View.VISIBLE
+        fxRow.visibility = if (inPip || !live || !emojiOpen) View.GONE else View.VISIBLE
         overlay.visibility = if (inPip || !live) View.GONE else View.VISIBLE
         if (!inPip && live) {
             mainHandler.removeCallbacks(hideControls)

@@ -66,6 +66,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var permNotification: View
     private lateinit var permMic: View
     private lateinit var permOverlay: View
+    private lateinit var permAccessibility: View
 
     private val projectionLauncher =
         registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
@@ -122,6 +123,7 @@ class MainActivity : AppCompatActivity() {
         permNotification = findViewById(R.id.permNotification)
         permMic = findViewById(R.id.permMic)
         permOverlay = findViewById(R.id.permOverlay)
+        permAccessibility = findViewById(R.id.permAccessibility)
 
         findViewById<View>(R.id.btnShowCode).setOnClickListener {
             if (Presence.client.isConnected) {
@@ -144,6 +146,13 @@ class MainActivity : AppCompatActivity() {
             micPermission.launch(Manifest.permission.RECORD_AUDIO)
         }
         permOverlay.setOnClickListener { openOverlayPermissionPage() }
+        permAccessibility.setOnClickListener {
+            runCatching {
+                startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+            }.onFailure {
+                toast(R.string.ctl_need_acc)
+            }
+        }
 
         lifecycleScope.launch {
             SignalBus.events.collect { handleSignal(it) }
@@ -481,9 +490,20 @@ class MainActivity : AppCompatActivity() {
         val micOk = checkSelfPermission(Manifest.permission.RECORD_AUDIO) ==
             android.content.pm.PackageManager.PERMISSION_GRANTED
         val overlayOk = Settings.canDrawOverlays(this)
+        val accOk = isAppAccessibilityEnabled()
         bindPermRow(permNotification, R.id.permStateNotif, notifOk)
         bindPermRow(permMic, R.id.permStateMic, micOk)
         bindPermRow(permOverlay, R.id.permStateOverlay, overlayOk)
+        bindPermRow(permAccessibility, R.id.permStateAcc, accOk)
+    }
+
+    /** 无障碍服务是否已被用户手动开启（无法程序化授权，只能引导） */
+    private fun isAppAccessibilityEnabled(): Boolean {
+        val am = getSystemService(Context.ACCESSIBILITY_SERVICE) as
+            android.view.accessibility.AccessibilityManager
+        return am.getEnabledAccessibilityServiceList(
+            android.accessibilityservice.AccessibilityServiceInfo.FEEDBACK_ALL_MASK
+        ).any { it.resolveInfo.serviceInfo.packageName == packageName }
     }
 
     private fun bindPermRow(row: View, stateId: Int, ok: Boolean) {
