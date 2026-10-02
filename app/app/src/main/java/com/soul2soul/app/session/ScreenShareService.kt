@@ -72,7 +72,7 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
             }
             ACTION_TOGGLE_MUTE -> {
                 micMuted = !micMuted
-                setMicMute(micMuted)
+                webRtc?.muteLocalAudio(micMuted)
                 updateNotification(if (micMuted) getString(R.string.sharing_muted) else getString(R.string.sharing_live))
                 return START_NOT_STICKY
             }
@@ -172,7 +172,7 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
         watchdog.removeCallbacks(screenOffStop)
         setSpeakerphone(false)
         micMuted = false
-        setMicMute(false)
+        // 静音是发送轨属性，随 AudioSource 销毁而复位，无需再全局恢复系统麦克风
         com.soul2soul.app.util.WifiKeeper.release()
         if (sendBye) Presence.client.send("bye")
         val client = webRtc
@@ -201,11 +201,6 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
             am.isSpeakerphoneOn = false
             am.mode = android.media.AudioManager.MODE_NORMAL
         }
-    }
-
-    private fun setMicMute(muted: Boolean) {
-        val am = getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager
-        am.isMicrophoneMute = muted
     }
 
     private fun updateNotification(text: String) {
@@ -261,9 +256,8 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
 
         fun isRunning(): Boolean = webRtc != null
 
-        fun start(ctx: Context, resultCode: Int, projectionData: Intent) {
+        fun start(ctx: Context, projectionData: Intent) {
             val intent = Intent(ctx, ScreenShareService::class.java)
-                .putExtra("resultCode", resultCode)
                 .putExtra(EXTRA_PROJECTION, projectionData)
             // 调用点在授权回调（前台），24/25 用 startService 合法
             if (android.os.Build.VERSION.SDK_INT >= 26) {

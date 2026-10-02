@@ -9,5 +9,12 @@ export JAVA_HOME=${JAVA_HOME:-/Users/wardonguo/tools/jdk17/jdk-17.0.2.jdk/Conten
 APK=app/build/outputs/apk/prod/release/app-prod-release.apk
 [ -f "$APK" ] || { echo "APK 未生成"; exit 1; }
 scp "$APK" guo:/opt/soul2soul/apk/soul2soul-latest.apk
-ssh guo "printf '{\"versionCode\": %s, \"versionName\": \"%s\", \"url\": \"https://soul.lumi666.cloud/apk/soul2soul-latest.apk\"}' $VC "'\"'"$VN"'\"'" > /opt/soul2soul/apk/version.json"
+# 用 heredoc 生成清单：printf 内嵌引号在 ssh 双层解析下会产出非法 JSON（""0.2.5""），App 端静默解析失败=更新渠道失效
+ssh guo "cat > /opt/soul2soul/apk/version.json" <<EOF
+{"versionCode": $VC, "versionName": "$VN", "url": "https://soul.lumi666.cloud/apk/soul2soul-latest.apk"}
+EOF
+# 远端校验清单合法性，坏 JSON 立即失败而不是静默上线
+ssh guo "node -e 'JSON.parse(require(\"fs\").readFileSync(\"/opt/soul2soul/apk/version.json\",\"utf8\"))'" 2>/dev/null \
+  || curl -s https://soul.lumi666.cloud/apk/version.json | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>JSON.parse(s))' \
+  || { echo "❌ version.json 非法 JSON，请检查服务器"; exit 1; }
 echo "✅ v$VN (code $VC) 已发布——已安装的 App 会在下次打开时看到更新"

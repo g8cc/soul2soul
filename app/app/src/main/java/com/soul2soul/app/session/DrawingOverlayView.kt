@@ -42,9 +42,11 @@ class DrawingOverlayView @JvmOverloads constructor(
     private class Stroke(
         val id: String,
         val color: Int,
-        val bornAt: Long,
     ) {
         val points = mutableListOf<PointF>() // 视图内绝对坐标，便于本地绘制
+
+        /** 收笔时刻（0 = 还在书写中）。淡出从收笔才开始计——长笔画不会被中途擦掉 */
+        var endAt = 0L
     }
 
     private val strokes = mutableListOf<Stroke>()
@@ -101,6 +103,7 @@ class DrawingOverlayView @JvmOverloads constructor(
             MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
                 if (strokeStarted) {
                     current?.let { s ->
+                        s.endAt = SystemClock.uptimeMillis()
                         sink?.onStroke(strokeMsg("e", s.id))
                         // 容忍丢包通道可能丢失收笔信号：补发一次（共享端幂等：endAt 只记一次）
                         postDelayed({
@@ -123,7 +126,6 @@ class DrawingOverlayView @JvmOverloads constructor(
         val s = Stroke(
             UUID.randomUUID().toString(),
             StrokeColors.COLORS[colorIndex],
-            SystemClock.uptimeMillis(),
         )
         strokes.add(s)
         current = s
@@ -155,14 +157,14 @@ class DrawingOverlayView @JvmOverloads constructor(
         val iter = strokes.iterator()
         while (iter.hasNext()) {
             val s = iter.next()
-            val age = now - s.bornAt
-            if (age > StrokeColors.FADE_MS && s !== current) {
+            // 书写中永不淡出；收笔后 2 秒淡出（与共享端 OverlayCanvasView 行为一致）
+            if (s !== current && s.endAt > 0L && now - s.endAt > StrokeColors.FADE_MS) {
                 iter.remove()
                 continue
             }
             paint.color = s.color
-            val fade = if (s === current) 1f
-            else (1f - age.toFloat() / StrokeColors.FADE_MS).coerceIn(0f, 1f)
+            val fade = if (s === current || s.endAt == 0L) 1f
+            else (1f - (now - s.endAt).toFloat() / StrokeColors.FADE_MS).coerceIn(0f, 1f)
             paint.alpha = (255f * fade).toInt()
             var prev: PointF? = null
             for (p in s.points) {

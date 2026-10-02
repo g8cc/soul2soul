@@ -75,15 +75,20 @@ class OverlayCanvasView(context: Context) : View(context) {
                 strokes.clear()
                 emojis.clear()
             }
-            "s" -> strokes.add(
-                Stroke(
-                    id,
-                    StrokeColors.COLORS[json.optInt("c", 0).mod(StrokeColors.COLORS.size)],
-                    SystemClock.uptimeMillis(),
+            "s" -> {
+                // 幂等：同 id 重复落笔（极端重发场景）不产生双笔画
+                if (strokes.none { it.id == id }) strokes.add(
+                    Stroke(
+                        id,
+                        StrokeColors.COLORS[json.optInt("c", 0).mod(StrokeColors.COLORS.size)],
+                        SystemClock.uptimeMillis(),
+                    )
                 )
-            )
+            }
             "p" -> {
-                val s = strokes.lastOrNull { it.id == id } ?: return
+                // 自愈：容忍丢包通道丢了落笔"s"时，凭笔点现场建笔，整笔不再凭空消失
+                val s = strokes.lastOrNull { it.id == id }
+                    ?: Stroke(id, StrokeColors.COLORS[0], SystemClock.uptimeMillis()).also { strokes.add(it) }
                 s.points.add(PointF((json.optDouble("x") * width).toFloat(), (json.optDouble("y") * height).toFloat()))
                 s.lastPointAt = SystemClock.uptimeMillis()
             }

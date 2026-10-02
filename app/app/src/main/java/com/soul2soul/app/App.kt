@@ -1,7 +1,9 @@
 package com.soul2soul.app
 
 import android.app.Application
+import android.util.Log
 import org.webrtc.EglBase
+import org.webrtc.Logging
 import org.webrtc.PeerConnectionFactory
 
 class App : Application() {
@@ -20,6 +22,10 @@ class App : Application() {
         instance = this
         PeerConnectionFactory.initialize(
             PeerConnectionFactory.InitializationOptions.builder(this)
+                // 原生日志只透出错误级：SDP 解析失败等能直接从 logcat 定位
+                .setInjectableLogger({ message, severity, tag ->
+                    Log.w("WEBRTC-N", "$severity [$tag] $message")
+                }, Logging.Severity.LS_ERROR)
                 .setEnableInternalTracer(false)
                 .createInitializationOptions()
         )

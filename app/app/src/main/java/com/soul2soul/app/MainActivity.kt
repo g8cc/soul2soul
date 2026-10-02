@@ -47,12 +47,12 @@ class MainActivity : AppCompatActivity() {
 
         @Volatile var outgoingPending = false
         @Volatile var acceptedReceived = false
-        var projectionCode = 0
         var projectionData: Intent? = null
 
         fun cancelOutgoing() {
             outgoingPending = false
             acceptedReceived = false
+            projectionData = null // 呼叫撤销/超时后旧授权一并作废
         }
     }
 
@@ -71,7 +71,6 @@ class MainActivity : AppCompatActivity() {
             val data = result.data
             if (result.resultCode == Activity.RESULT_OK && data != null) {
                 // 授权成功 → 此时才发邀请；对方接听后 accepted 到达即启动共享服务
-                projectionCode = result.resultCode
                 projectionData = data
                 Presence.client.send("invite")
                 Log.d(TAG, "invite sent")
@@ -181,8 +180,10 @@ class MainActivity : AppCompatActivity() {
                 callTimeout.removeCallbacksAndMessages(null)
                 acceptedReceived = true
                 Presence.iceServersJson = json.optJSONArray("iceServers")
+                // 录屏授权 token 即用即清：不留驻静态字段（异常时序也不复用旧授权）
                 projectionData?.let {
-                    ScreenShareService.start(this, projectionCode, it)
+                    ScreenShareService.start(this, it)
+                    projectionData = null
                 }
             }
             "declined" -> {

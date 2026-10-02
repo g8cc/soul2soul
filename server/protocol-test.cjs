@@ -62,8 +62,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   junk.send('not json at all');
   junk.send('');
   junk.send('{"type":');
-  junk.send(JSON.stringify({ type: 'sdp', sdp: { type: 'offer', sdp: 'x'.repeat(1024 * 1024) } })); // 1MB 巨包
-  junk.send('{"type":"hello"}'); // 无 deviceId
+  junk.send(JSON.stringify({ type: 'hello', deviceId: '' })); // 无 deviceId
   junk.send('null');
   junk.send('[]');
   junk.send('{"type":"unknown_type","whatever":1}');
@@ -72,6 +71,44 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   A.send({ type: 'invite' });
   const inc = await B.waitFor((m) => m.type === 'incoming', 3000, 'invite after junk');
   check('对照组在轰炸后仍正常工作', inc.type === 'incoming');
+
+  // 1b. 巨包在传输层拒收：超过 maxPayload(256KB) 的连接被 ws 断开，进程零暴露
+  const bigPkt = mk('advBig');
+  await sleep(300);
+  let bigClosed = false;
+  bigPkt.ws.on('close', () => { bigClosed = true; });
+  bigPkt.send(JSON.stringify({ type: 'sdp', sdp: { type: 'offer', sdp: 'x'.repeat(300 * 1024) } }));
+  await sleep(600);
+  check('巨包连接被传输层拒收断开', bigClosed);
+  await sleep(2100); // 冷却 invite 限频窗口
+  A.send({ type: 'invite' });
+  const incBig = await B.waitFor((m) => m.type === 'incoming', 3000, 'invite after big packet');
+  check('巨包拒收后服务器仍正常', A.alive() && incBig.type === 'incoming');
+
+  // 1c. pair.request 限速 + 每设备仅一个有效码
+  const PR = mk('advPairReq');
+  await sleep(300);
+  PR.send({ type: 'pair.request' });
+  const code1 = (await PR.waitFor((m) => m.type === 'pair.code', 3000, 'pair.code1')).code;
+  PR.send({ type: 'pair.request' }); // 5 秒窗口内立即申请
+  const prLimited = await PR.waitFor(
+    (m) => m.type === 'pair.failed' && m.reason === 'too_fast', 3000, 'pair.request rate limit');
+  check('pair.request 限速生效', prLimited.reason === 'too_fast');
+  await sleep(5100);
+  PR.send({ type: 'pair.request' });
+  const code2 = (await PR.waitFor((m) => m.type === 'pair.code', 3000, 'pair.code2')).code;
+  // 新码签发后旧码应作废（每设备最多一个有效码）
+  const PRPeer = mk('advPairReqPeer');
+  await sleep(300);
+  PRPeer.send({ type: 'pair.enter', code: code1 });
+  const stale = await PRPeer.waitFor((m) => m.type === 'pair.failed', 3000, 'old code invalid');
+  check('旧配对码被新码撤销作废', stale.reason === 'code_invalid');
+  PRPeer.send({ type: 'pair.enter', code: code2 });
+  const pairedNew = await PR.waitFor((m) => m.type === 'paired', 3000, 'paired with code2');
+  check('新配对码正常可用', pairedNew.type === 'paired');
+  await PRPeer.waitFor((m) => m.type === 'paired', 3000, 'peer paired');
+  PR.send({ type: 'unpair' }); // 清理配对，避免污染 pairings 数据文件
+  await sleep(300);
 
   // 2. 未 hello 直接发媒体消息：被忽略
   const ghost = mk('advGhost', null); // 未配对设备，hello 即注册
@@ -150,7 +187,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   check('风暴后业务正常', inc2.type === 'incoming');
 
   console.log(failures === 0 ? '== 对抗测试全部通过 ==' : `== ${failures} 项失败 ==`);
-  [A, B, junk, ghost, brute, s1, s2, s3, B2, storm].forEach((c) => c.ws.close?.());
+  [A, B, junk, bigPkt, PR, PRPeer, ghost, brute, s1, s2, s3, B2, storm].forEach((c) => c.ws.close?.());
   process.exit(failures === 0 ? 0 : 1);
 })().catch((e) => {
   console.error('PROTOCOL-TEST ERROR:', e.message);

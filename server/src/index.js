@@ -17,10 +17,12 @@ const PORT = Number(process.env.PORT || 8080);
 const TURN_STATIC_AUTH_SECRET = process.env.TURN_STATIC_AUTH_SECRET || 'change_me';
 const TURN_HOST = process.env.TURN_HOST || 'YOUR_SERVER_PUBLIC_IP';
 const TURN_PORT = process.env.TURN_PORT || '3478';
-const DATA_FILE = path.join(process.cwd(), 'data', 'pairings.json');
-const PAIR_CODE_TTL_MS = 10 * 60 * 1000;
+const DATA_FILE = process.env.S2S_DATA_FILE || path.join(process.cwd(), 'data', 'pairings.json');
+const PAIR_CODE_TTL_MS = Number(process.env.PAIR_CODE_TTL_MS || 10 * 60 * 1000);
 const PAIR_ENTER_MAX_ATTEMPTS = 5;
+const PAIR_REQUEST_MIN_INTERVAL_MS = 5000;
 const INVITE_MIN_INTERVAL_MS = 2000;
+const MAX_MESSAGE_BYTES = 256 * 1024; // SDP offer 最大约 50KB，256KB 封顶（巨包在传输层即断连，不进业务代码）
 
 // ---------- 配对关系持久化 ----------
 // pairings[deviceId] = { peer: 对端deviceId, token: 配对令牌 }
@@ -46,6 +48,15 @@ function savePairings() {
 const online = new Map();           // deviceId -> WebSocket
 const pendingPairCodes = new Map(); // code -> { deviceId, expires }
 const lastInviteAt = new Map();     // deviceId -> 上次 invite 时间戳
+const lastPairRequestAt = new Map();// deviceId -> 上次 pair.request 时间戳
+
+// 清扫过期配对码：只在 enter 时判断过期的话，从不再使用的码会永久滞留（慢性内存泄漏）
+setInterval(() => {
+  const now = Date.now();
+  for (const [code, entry] of pendingPairCodes) {
+    if (entry.expires < now) pendingPairCodes.delete(code);
+  }
+}, 60 * 1000).unref();
 
 function pairingOf(deviceId) { return pairings[deviceId] || null; }
 function peerDeviceId(deviceId) { return pairings[deviceId]?.peer || null; }
@@ -80,12 +91,17 @@ const server = http.createServer((req, res) => {
   if (req.url === '/health') { res.writeHead(200); res.end('ok'); return; }
   res.writeHead(404); res.end();
 });
-const wss = new WebSocketServer({ server });
+const wss = new WebSocketServer({ server, maxPayload: MAX_MESSAGE_BYTES });
 
 wss.on('connection', (ws) => {
   ws.deviceId = null;
   ws.authed = false;      // hello 令牌校验通过 / 刚完成配对
   ws.pairAttempts = 0;
+
+  // ws 层协议错误（含巨包拒收 1009）默认以 'error' 事件抛出——无人监听会崩进程
+  ws.on('error', (err) => {
+    console.log(`[ws] ${ws.deviceId || '?'} error: ${err.message}`);
+  });
 
   ws.on('message', (raw) => {
     let msg;
@@ -130,6 +146,16 @@ wss.on('connection', (ws) => {
     switch (type) {
       // ---- 配对 ----
       case 'pair.request': {
+        const now = Date.now();
+        if (now - (lastPairRequestAt.get(ws.deviceId) || 0) < PAIR_REQUEST_MIN_INTERVAL_MS) {
+          send(ws, { type: 'pair.failed', reason: 'too_fast' });
+          break;
+        }
+        lastPairRequestAt.set(ws.deviceId, now);
+        // 每设备最多 1 个有效码：申请新码即撤销旧码（码表规模有上界）
+        for (const [c, e] of pendingPairCodes) {
+          if (e.deviceId === ws.deviceId) pendingPairCodes.delete(c);
+        }
         const code = String(crypto.randomInt(0, 1000000)).padStart(6, '0');
         pendingPairCodes.set(code, { deviceId: ws.deviceId, expires: Date.now() + PAIR_CODE_TTL_MS });
         send(ws, { type: 'pair.code', code });
@@ -225,6 +251,8 @@ wss.on('connection', (ws) => {
   ws.on('close', () => {
     if (ws.deviceId && online.get(ws.deviceId) === ws) {
       online.delete(ws.deviceId);
+      lastPairRequestAt.delete(ws.deviceId);
+      lastInviteAt.delete(ws.deviceId);
       const peer = peerDeviceId(ws.deviceId);
       if (peer) send(online.get(peer), { type: 'peer.gone' });
     }

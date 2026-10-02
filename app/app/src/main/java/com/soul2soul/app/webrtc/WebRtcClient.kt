@@ -75,12 +75,14 @@ class WebRtcClient(
     private var capturer: VideoCapturer? = null
     private var videoSource: VideoSource? = null
     private var audioSource: AudioSource? = null
+    private var audioTrack: AudioTrack? = null
     private var dataChannel: DataChannel? = null
     private var surfaceHelper: SurfaceTextureHelper? = null
     private var closed = false
     private val frameCount = java.util.concurrent.atomic.AtomicLong()
     private val rttHandler = android.os.Handler(android.os.Looper.getMainLooper())
     private var highRttStreak = 0
+    private var lowRttStreak = 0
     private val iceHandler = android.os.Handler(android.os.Looper.getMainLooper())
     private var iceRestartCount = 0
     @Volatile private var established = false
@@ -91,6 +93,16 @@ class WebRtcClient(
     @Volatile
     var captureLongEdge = 1280
         private set
+
+    /** 用户意图档位（观看端 HD 开关设定）：弱网自动降档后，RTT 好转回升到这里 */
+    @Volatile
+    private var preferredLongEdge = 1280
+
+    /** 静音本端上行音轨（只影响本会话，不像 AudioManager.isMicrophoneMute 那样全局关麦） */
+    fun muteLocalAudio(muted: Boolean) {
+        runCatching { audioTrack?.setEnabled(!muted) }
+            .onFailure { Log.w(TAG, "muteLocalAudio failed", it) }
+    }
 
     /** 共享端已采集的帧数（统计用；锁屏看门狗走 SCREEN_OFF 广播，见 ScreenShareService） */
     fun framesReceived(): Long = frameCount.get()
@@ -104,7 +116,12 @@ class WebRtcClient(
 
         val capturer: VideoCapturer = ScreenCapturerAndroid(
             projectionData,
-            object : android.media.projection.MediaProjection.Callback() {},
+            object : android.media.projection.MediaProjection.Callback() {
+                // 用户在系统隐私提示里"停止"录屏：授权被撤销，会话必须体面结束而非黑屏挂着
+                override fun onStop() {
+                    if (!closed) listener.onEnded("projection_stopped")
+                }
+            },
         )
         this.capturer = capturer
         val source = factory.createVideoSource(true) // isScreencast: 启用内容编码模式
@@ -139,8 +156,9 @@ class WebRtcClient(
         if (hasAudioPermission()) {
             val audio = factory.createAudioSource(MediaConstraints())
             audioSource = audio
-            val audioTrack: AudioTrack = factory.createAudioTrack("a0", audio)
-            pc.addTrack(audioTrack, listOf(STREAM))
+            val track: AudioTrack = factory.createAudioTrack("a0", audio)
+            audioTrack = track
+            pc.addTrack(track, listOf(STREAM))
         }
 
         // 共享端是 offerer，负责创建 DataChannel
@@ -170,13 +188,20 @@ class WebRtcClient(
         if (hasAudioPermission()) {
             val audio = factory.createAudioSource(MediaConstraints())
             audioSource = audio
-            pc.addTrack(factory.createAudioTrack("a1", audio), listOf(STREAM))
+            val track = factory.createAudioTrack("a1", audio)
+            audioTrack = track
+            pc.addTrack(track, listOf(STREAM))
         }
     }
 
-    /** 观看端切清晰度：重启采集 + 调整码率上限（1280≈2.5Mbps，1920≈4Mbps） */
+    /** 观看端切清晰度（用户意图）：记录档位并立即重启采集 + 调整码率上限 */
     fun setCaptureLongEdge(edge: Int) {
-        captureLongEdge = edge.coerceIn(720, 1920)
+        preferredLongEdge = edge.coerceIn(720, 1920)
+        applyCaptureLongEdge(preferredLongEdge)
+    }
+
+    private fun applyCaptureLongEdge(edge: Int) {
+        captureLongEdge = edge
         val capturer = capturer ?: return
         val metrics = context.resources.displayMetrics
         val longEdge = maxOf(metrics.widthPixels, metrics.heightPixels)
@@ -210,6 +235,8 @@ class WebRtcClient(
     /** 屏幕内容编码优化：将 offer 中 VP9 的载荷提到最前（同码率下 UI/文字清晰度显著优于 H.264） */
     private fun preferVp9(sdp: String): String {
         val lines = sdp.split("\r\n").toMutableList()
+        val mIdx = lines.indexOfFirst { it.startsWith("m=video") }
+        if (mIdx < 0) return sdp
         val vp9Pts = lines.filter { it.startsWith("a=rtpmap:") && it.contains("VP9/") }
             .map { it.removePrefix("a=rtpmap:").substringBefore(" ") }
         if (vp9Pts.isEmpty()) return sdp
@@ -217,20 +244,14 @@ class WebRtcClient(
             .filter { fm -> vp9Pts.any { fm.contains("apt=$it ") || fm.endsWith("apt=$it") } }
             .map { it.removePrefix("a=fmtp:").substringBefore(" ") }
         val preferred = (vp9Pts + rtxPts).toSet()
-        val out = StringBuilder()
-        for (l in lines) {
-            if (l.startsWith("m=video")) {
-                val parts = l.split(" ").toMutableList()
-                val pts = parts.drop(4)
-                val ordered = pts.filter { preferred.contains(it) } + pts.filterNot { preferred.contains(it) }
-                out.append(parts.take(4).joinToString(" "))
-                for (pt in ordered) out.append(" ").append(pt)
-                out.append("\r\n")
-            } else {
-                out.append(l).append("\r\n")
-            }
-        }
-        return out.toString()
+        val parts = lines[mIdx].split(" ")
+        if (parts.size <= 3) return sdp
+        val pts = parts.drop(3)
+        val ordered = pts.filter { preferred.contains(it) } + pts.filterNot { preferred.contains(it) }
+        lines[mIdx] = (parts.take(3) + ordered).joinToString(" ")
+        // join 是 split 的严格逆操作：完整保留原行尾结构（含末尾 CRLF），
+        // 否则多出的空行会被对端 libwebrtc 判为 "Invalid SDP line" 整份拒收
+        return lines.joinToString("\r\n")
     }
 
     /** 切清晰度（线程安全入口：DataChannel 回调线程 → 主线程执行采集重启） */
@@ -242,7 +263,12 @@ class WebRtcClient(
     fun onRemoteSdp(sdpJson: JSONObject) {
         val pc = pc ?: return
         val type = sdpJson.optString("type")
-        val remote = SessionDescription(SessionDescription.Type.fromCanonicalForm(type), sdpJson.getString("sdp"))
+        val sdpText = sdpJson.optString("sdp")
+        Log.d(TAG, "remote sdp: type=$type len=${sdpText.length}")
+        // 兼容旧版(0.2.5 preferVp9 末尾多空行)发来的 offer：规整为单一结尾 CRLF，
+        // 否则对端 libwebrtc 严格解析器会整份拒收("Invalid SDP line")
+        val normalized = sdpText.trimEnd('\r', '\n') + "\r\n"
+        val remote = SessionDescription(SessionDescription.Type.fromCanonicalForm(type), normalized)
         pc.setRemoteDescription(object : SdpAdapter("setRemote") {
             override fun onSetSuccess() {
                 if (type == "offer") {
@@ -387,12 +413,18 @@ class WebRtcClient(
                         }
                     }
 
-                    // 共享端按 RTT 自动降级画质（弱网闪断的缓解）：持续高 RTT → 降采集分辨率
+                    // 共享端按 RTT 自动调画质（弱网闪断的缓解）：
+                    // 持续高 RTT → 降到 960 保流畅；持续好转 → 回升到用户意图档位
                     if (isSharer && best > 0) {
                         if (best > 350) highRttStreak += 1 else highRttStreak = 0
+                        if (best < 150) lowRttStreak += 1 else lowRttStreak = 0
                         if (highRttStreak >= 3 && captureLongEdge > 960) {
                             Log.d(TAG, "high rtt ${best}ms, degrade to 960")
-                            setCaptureLongEdge(960)
+                            applyCaptureLongEdge(960)
+                        } else if (lowRttStreak >= 10 && captureLongEdge < preferredLongEdge) {
+                            Log.d(TAG, "rtt recovered, restore $preferredLongEdge")
+                            applyCaptureLongEdge(preferredLongEdge)
+                            lowRttStreak = 0
                         }
                     }
                 }
@@ -483,6 +515,7 @@ class WebRtcClient(
         } catch (_: Exception) {}
         capturer?.dispose(); capturer = null
         videoSource?.dispose(); videoSource = null
+        audioTrack?.dispose(); audioTrack = null
         audioSource?.dispose(); audioSource = null
         dataChannel?.close(); dataChannel = null
         pc?.close(); pc = null
@@ -507,6 +540,7 @@ class WebRtcClient(
         } else {
             desc.description
         }
+        Log.d(TAG, "send sdp: type=${desc.type.canonicalForm()} len=${sdpText.length}")
         listener.onSignalOut(
             JSONObject()
                 .put("type", "sdp")
