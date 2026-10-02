@@ -17,4 +17,9 @@ EOF
 ssh guo "node -e 'JSON.parse(require(\"fs\").readFileSync(\"/opt/soul2soul/apk/version.json\",\"utf8\"))'" 2>/dev/null \
   || curl -s https://soul.lumi666.cloud/apk/version.json | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>JSON.parse(s))' \
   || { echo "❌ version.json 非法 JSON，请检查服务器"; exit 1; }
+# 本地归档: 拷贝发版产物到 dist/，只保留最近 2 个版本
+DIST="$(cd "$(dirname "$0")/.." && pwd)/dist"
+mkdir -p "$DIST"
+cp "$APK" "$DIST/Soul2Soul-v$VN-release.apk"
+ls -1t "$DIST"/Soul2Soul-v*.apk 2>/dev/null | tail -n +3 | xargs rm -f
 echo "✅ v$VN (code $VC) 已发布——已安装的 App 会在下次打开时看到更新"
