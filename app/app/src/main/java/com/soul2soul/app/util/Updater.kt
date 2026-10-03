@@ -1,6 +1,8 @@
 package com.soul2soul.app.util
 
 import android.content.Context
+import android.content.pm.PackageManager
+import android.os.Build
 import android.util.Log
 import com.soul2soul.app.BuildConfig
 import kotlinx.coroutines.Dispatchers
@@ -39,7 +41,19 @@ object Updater {
         }
     }.onFailure { Log.w(TAG, "check failed", it) }.getOrNull()
 
-    fun hasUpdate(info: Info): Boolean = info.versionCode > BuildConfig.VERSION_CODE
+    /**
+     * 运行时真实 versionCode。绝不能用 BuildConfig.VERSION_CODE 做判定：
+     * Kotlin 会把 Java static-final 常量内联进调用方字节码，版本升级不触碰判定文件时
+     * 增量编译复用旧产物——0.2.12 线上 dex 实锤 hasUpdate 被焊死成 `remote > 8`，全员永久提示更新。
+     */
+    fun localVersionCode(context: Context): Int = try {
+        @Suppress("DEPRECATION")
+        val pi: android.content.pm.PackageInfo = context.packageManager
+            .getPackageInfo(context.packageName, 0)
+        if (Build.VERSION.SDK_INT >= 26) pi.longVersionCode.toInt() else pi.versionCode
+    } catch (e: PackageManager.NameNotFoundException) {
+        BuildConfig.VERSION_CODE // 同包直读，理论上不可能发生
+    }
 
     /** 下载 APK 到应用外部缓存目录（onProgress: 0-100） */
     fun download(url: String, dest: File, onProgress: (Int) -> Unit): File? = runCatching {

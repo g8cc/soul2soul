@@ -125,7 +125,7 @@ class MainActivity : AppCompatActivity() {
         permOverlay = findViewById(R.id.permOverlay)
         permAccessibility = findViewById(R.id.permAccessibility)
         findViewById<TextView>(R.id.tvAppVersion).text =
-            "v${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})"
+            "v${BuildConfig.VERSION_NAME} (${com.soul2soul.app.util.Updater.localVersionCode(this)})"
 
         findViewById<View>(R.id.btnShowCode).setOnClickListener {
             if (Presence.client.isConnected) {
@@ -350,18 +350,41 @@ class MainActivity : AppCompatActivity() {
             val info = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
                 com.soul2soul.app.util.Updater.checkAsync()
             } ?: return@launch
-            Log.d(TAG, "update check: remote=${info.versionCode} local=${BuildConfig.VERSION_CODE}")
+            val local = com.soul2soul.app.util.Updater.localVersionCode(this@MainActivity)
+            Log.d(TAG, "update check: remote=${info.versionCode} local=$local")
+            reportVersionDiag(info, local)
             val btn = findViewById<TextView>(R.id.btnUpdate)
-            if (com.soul2soul.app.util.Updater.hasUpdate(info)) {
+            if (info.versionCode > local) {
                 pendingUpdateInfo = info
                 btn.visibility = View.VISIBLE
-                btn.text = getString(R.string.update_available_short) + " v" + info.versionName
+                btn.text = getString(R.string.update_available_short) + " v" + info.versionName +
+                    "（本机 $local）"
             } else {
                 // 无更新必须撤掉提示：否则安装成功后旧进程/后续场景里按钮永久残留
                 pendingUpdateInfo = null
                 btn.visibility = View.GONE
             }
         }
+    }
+
+    /**
+     * 更新判定自检上报信令服务器（服务端 [diag.version] 日志落盘）。
+     * 用于诊断"系统设置版本 / 运行进程版本 / 服务器清单版本"三者错位——设备侧无需肉眼读数。
+     */
+    private fun reportVersionDiag(info: com.soul2soul.app.util.Updater.Info, local: Int) {
+        val send = Runnable {
+            if (Presence.client.isConnected) {
+                Presence.client.send("app.version") {
+                    put("localCode", local)
+                    put("localName", BuildConfig.VERSION_NAME)
+                    put("remoteCode", info.versionCode)
+                    put("remoteName", info.versionName)
+                    put("hasUpdate", info.versionCode > local)
+                }
+            }
+        }
+        if (Presence.client.isConnected) send.run()
+        else findViewById<View>(R.id.tvAppVersion).postDelayed(send, 8000)
     }
 
     private fun showUpdateDialog() {

@@ -6,6 +6,9 @@ VN=${1:?版本名，如 0.2.5}; VC=${2:?版本号(递增整数)}
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO/app"
 export JAVA_HOME=${JAVA_HOME:-/Users/wardonguo/tools/jdk17/jdk-17.0.2.jdk/Contents/Home}
+# 必须 clean：Kotlin 会把 BuildConfig 的 static-final 常量内联进引用方字节码，
+# 版本 bump 不触碰引用文件时增量编译复用旧 class（0.2.12 实锤 hasUpdate 焊死 `> 8`）
+~/tools/gradle-8.7/bin/gradle :app:clean --no-daemon -q
 ~/tools/gradle-8.7/bin/gradle :app:assembleProdRelease --no-daemon -q
 APK=app/build/outputs/apk/prod/release/app-prod-release.apk
 [ -f "$APK" ] || { echo "APK 未生成"; exit 1; }

@@ -244,6 +244,10 @@ wss.on('connection', (ws) => {
         if (peer) send(online.get(peer), msg);
         break;
       }
+      case 'app.version': {
+        console.log(`[diag.version] ${ws.deviceId} code=${msg.localCode} name=${msg.localName} remote=${msg.remoteCode}/${msg.remoteName} update=${msg.hasUpdate}`);
+        break;
+      }
       default: break;
     }
   });
