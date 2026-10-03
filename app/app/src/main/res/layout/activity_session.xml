@@ -234,119 +234,145 @@
                 android:textSize="28sp" />
         </LinearLayout>
 
+        <!-- 操控模式横幅：MIUI 会吞 toast，模式状态必须持久可见 -->
+        <TextView
+            android:id="@+id/tvCtlMode"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center_horizontal"
+            android:layout_marginBottom="6dp"
+            android:background="@drawable/bg_chip_active"
+            android:paddingHorizontal="12dp"
+            android:paddingVertical="6dp"
+            android:text="@string/ctl_banner"
+            android:textColor="@color/white"
+            android:textSize="12sp"
+            android:visibility="gone" />
+
+        <!-- 第一行：画笔工具（小色点+短标签，Mi5 小屏也放得下） -->
         <LinearLayout
             android:id="@+id/boxLive"
-            android:layout_width="match_parent"
+            android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:layout_margin="10dp"
+            android:layout_gravity="center_horizontal"
+            android:layout_marginBottom="6dp"
             android:background="@drawable/bg_bubble"
             android:gravity="center_vertical"
             android:orientation="horizontal"
             android:paddingHorizontal="10dp"
             android:paddingVertical="6dp">
 
-            <Button
+            <View
                 android:id="@+id/btnColor0"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:minWidth="0dp"
-                android:paddingHorizontal="12dp"
-                android:text="@string/color_red"
-                android:textColor="@color/primary"
-                android:textSize="12sp" />
+                android:layout_width="28dp"
+                android:layout_height="28dp"
+                android:background="@drawable/bg_dot"
+                android:backgroundTint="@color/primary" />
 
-            <Button
+            <View
                 android:id="@+id/btnColor1"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginStart="6dp"
-                android:minWidth="0dp"
-                android:paddingHorizontal="12dp"
-                android:text="@string/color_green"
-                android:textColor="@color/green"
-                android:textSize="12sp" />
+                android:layout_width="28dp"
+                android:layout_height="28dp"
+                android:layout_marginStart="8dp"
+                android:background="@drawable/bg_dot"
+                android:backgroundTint="@color/green" />
 
-            <Button
+            <View
                 android:id="@+id/btnColor2"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginStart="6dp"
-                android:minWidth="0dp"
-                android:paddingHorizontal="12dp"
-                android:text="@string/color_blue"
-                android:textColor="@color/blue"
-                android:textSize="12sp" />
+                android:layout_width="28dp"
+                android:layout_height="28dp"
+                android:layout_marginStart="8dp"
+                android:background="@drawable/bg_dot"
+                android:backgroundTint="@color/blue" />
 
-            <Button
+            <TextView
                 android:id="@+id/btnClear"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:layout_marginStart="6dp"
-                android:minWidth="0dp"
-                android:paddingHorizontal="12dp"
+                android:layout_marginStart="10dp"
+                android:background="@drawable/bg_chip"
+                android:paddingHorizontal="10dp"
+                android:paddingVertical="6dp"
                 android:text="@string/clear_strokes"
+                android:textColor="@color/white"
                 android:textSize="12sp" />
 
-            <Button
+            <TextView
                 android:id="@+id/btnHd"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:layout_marginStart="6dp"
-                android:minWidth="0dp"
-                android:paddingHorizontal="12dp"
+                android:background="@drawable/bg_chip"
+                android:paddingHorizontal="10dp"
+                android:paddingVertical="6dp"
                 android:text="@string/hd_on"
+                android:textColor="@color/white"
                 android:textSize="12sp" />
 
-            <Button
+            <TextView
                 android:id="@+id/btnEmoji"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:layout_marginStart="6dp"
-                android:minWidth="0dp"
-                android:paddingHorizontal="12dp"
+                android:background="@drawable/bg_chip"
+                android:paddingHorizontal="10dp"
+                android:paddingVertical="6dp"
                 android:text="@string/emoji_toggle"
-                android:textSize="14sp" />
+                android:textColor="@color/white"
+                android:textSize="12sp" />
 
-            <Button
+            <TextView
                 android:id="@+id/btnCtl"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:layout_marginStart="6dp"
-                android:minWidth="0dp"
+                android:background="@drawable/bg_chip"
                 android:paddingHorizontal="10dp"
+                android:paddingVertical="6dp"
                 android:text="@string/ctl_off"
+                android:textColor="@color/white"
                 android:textSize="12sp" />
+        </LinearLayout>
 
-            <Space
-                android:layout_width="0dp"
-                android:layout_height="1dp"
-                android:layout_weight="1" />
-
-            <TextView
-                android:id="@+id/tvRtt"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginEnd="10dp"
-                android:textColor="@color/green"
-                android:textSize="12sp" />
+        <!-- 第二行：通话状态 + 挂断 -->
+        <LinearLayout
+            android:id="@+id/boxStatus"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center_horizontal"
+            android:layout_marginBottom="10dp"
+            android:background="@drawable/bg_bubble"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:paddingHorizontal="12dp"
+            android:paddingVertical="6dp">
 
             <TextView
                 android:id="@+id/tvElapsed"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:layout_marginEnd="10dp"
                 android:textColor="@color/white"
                 android:textSize="13sp" />
 
-            <Button
+            <TextView
+                android:id="@+id/tvRtt"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="10dp"
+                android:textColor="@color/green"
+                android:textSize="12sp" />
+
+            <TextView
                 android:id="@+id/btnHangup"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:backgroundTint="@color/primary"
-                android:minWidth="0dp"
-                android:paddingHorizontal="16dp"
+                android:layout_marginStart="14dp"
+                android:background="@drawable/bg_chip"
+                android:paddingHorizontal="12dp"
+                android:paddingVertical="6dp"
                 android:text="@string/action_end"
-                android:textColor="@color/white" />
+                android:textColor="@color/primary"
+                android:textSize="12sp" />
         </LinearLayout>
     </LinearLayout>
 </FrameLayout>

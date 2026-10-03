@@ -30,9 +30,6 @@
     <string name="peer_declined">对方拒绝了</string>
     <string name="peer_ended_call">对方结束了呼叫（未接听）</string>
     <string name="projection_denied">没有授权屏幕录制，共享未开始</string>
-    <string name="color_red">红</string>
-    <string name="color_green">绿</string>
-    <string name="color_blue">蓝</string>
     <string name="presence_title">在线待命</string>
     <string name="presence_body">想你了就召唤我</string>
     <string name="call_timeout">对方没有响应</string>
@@ -62,6 +59,7 @@
     <string name="perm_accessibility">远程操控（无障碍，可选）</string>
     <string name="ctl_off">操控</string>
     <string name="ctl_on">操控中</string>
+    <string name="ctl_banner">操控中 · 你的滑动会直接操作 TA 的手机，再点「操控中」退出</string>
     <string name="ctl_mode_hint">操控模式：点击/滑动将直接作用在 TA 的屏幕上（TA 需在通知栏点「允许TA操控」）</string>
     <string name="ctl_allow">允许TA操控</string>
     <string name="ctl_disallow">收回操控</string>

@@ -145,7 +145,7 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
         }
         findViewById<View>(R.id.btnHd).setOnClickListener { v ->
             hdOn = !hdOn
-            (v as android.widget.Button).setText(if (hdOn) R.string.hd_on else R.string.hd_off)
+            (v as android.widget.TextView).setText(if (hdOn) R.string.hd_on else R.string.hd_off)
             client?.sendAnnotation(JSONObject().put("k", "res").put("edge", if (hdOn) 1920 else 1280))
         }
         findViewById<View>(R.id.btnColor0).setOnClickListener {
@@ -164,15 +164,24 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
             setControlsVisible(true)
         }
         findViewById<View>(R.id.btnCtl).setOnClickListener { v ->
+            Log.d(
+                "S2S-Ctl",
+                "btnCtl click: controlMode=${overlay.controlMode} supported=${client?.controlSupported}"
+            )
             if (!overlay.controlMode && client?.controlSupported != true) {
                 // 旧版对端不会创建 ctl 通道：不进操控模式，否则手势只会淹没对方悬浮窗
                 android.widget.Toast.makeText(this, R.string.ctl_peer_unsupported, android.widget.Toast.LENGTH_SHORT).show()
                 return@setOnClickListener
             }
             overlay.controlMode = !overlay.controlMode
-            (v as android.widget.Button).setText(
+            (v as android.widget.TextView).setText(
                 if (overlay.controlMode) R.string.ctl_on else R.string.ctl_off
             )
+            v.setBackgroundResource(
+                if (overlay.controlMode) R.drawable.bg_chip_active else R.drawable.bg_chip
+            )
+            findViewById<View>(R.id.tvCtlMode).visibility =
+                if (overlay.controlMode) View.VISIBLE else View.GONE
             if (overlay.controlMode) {
                 android.widget.Toast.makeText(this, R.string.ctl_mode_hint, android.widget.Toast.LENGTH_SHORT).show()
             }
@@ -229,6 +238,8 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
     }
 
     private fun setControlsVisible(visible: Boolean) {
+        // 容器曾默认 gone 且只有 PiP 回调会点亮它——正常通话里整套控件永远弹不出
+        controlsContainer.visibility = if (visible) View.VISIBLE else View.GONE
         boxLive.visibility = if (visible) View.VISIBLE else View.GONE
         emojiPanel.visibility = if (visible && emojiOpen) View.VISIBLE else View.GONE
         fxRow.visibility = if (visible && emojiOpen) View.VISIBLE else View.GONE
