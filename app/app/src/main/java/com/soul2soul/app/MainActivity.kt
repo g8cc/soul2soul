@@ -124,6 +124,8 @@ class MainActivity : AppCompatActivity() {
         permMic = findViewById(R.id.permMic)
         permOverlay = findViewById(R.id.permOverlay)
         permAccessibility = findViewById(R.id.permAccessibility)
+        findViewById<TextView>(R.id.tvAppVersion).text =
+            "v${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})"
 
         findViewById<View>(R.id.btnShowCode).setOnClickListener {
             if (Presence.client.isConnected) {
@@ -348,11 +350,16 @@ class MainActivity : AppCompatActivity() {
             val info = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
                 com.soul2soul.app.util.Updater.checkAsync()
             } ?: return@launch
+            Log.d(TAG, "update check: remote=${info.versionCode} local=${BuildConfig.VERSION_CODE}")
+            val btn = findViewById<TextView>(R.id.btnUpdate)
             if (com.soul2soul.app.util.Updater.hasUpdate(info)) {
                 pendingUpdateInfo = info
-                findViewById<View>(R.id.btnUpdate).visibility = View.VISIBLE
-                findViewById<TextView>(R.id.btnUpdate).text =
-                    getString(R.string.update_available_short) + " v" + info.versionName
+                btn.visibility = View.VISIBLE
+                btn.text = getString(R.string.update_available_short) + " v" + info.versionName
+            } else {
+                // 无更新必须撤掉提示：否则安装成功后旧进程/后续场景里按钮永久残留
+                pendingUpdateInfo = null
+                btn.visibility = View.GONE
             }
         }
     }
