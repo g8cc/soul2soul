@@ -263,8 +263,8 @@
             android:textColor="@color/text_secondary"
             android:textSize="13sp" />
 
-        <!-- 运行时自检：显示"当前进程"的版本号。系统设置显示的是磁盘上的包，
-             两者不一致 = 跑的还是旧进程（更新未生效），可当场识破 -->
+        <!-- 版本号展示。更新判定的运行时自检(防 BuildConfig 常量内联)已改为
+             后台遥测上报服务器 [diag.version]，不再占用 UI -->
         <TextView
             android:id="@+id/tvAppVersion"
             android:layout_width="match_parent"

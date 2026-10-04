@@ -124,8 +124,7 @@ class MainActivity : AppCompatActivity() {
         permMic = findViewById(R.id.permMic)
         permOverlay = findViewById(R.id.permOverlay)
         permAccessibility = findViewById(R.id.permAccessibility)
-        findViewById<TextView>(R.id.tvAppVersion).text =
-            "v${BuildConfig.VERSION_NAME} (${com.soul2soul.app.util.Updater.localVersionCode(this)})"
+        findViewById<TextView>(R.id.tvAppVersion).text = "v${BuildConfig.VERSION_NAME}"
 
         findViewById<View>(R.id.btnShowCode).setOnClickListener {
             if (Presence.client.isConnected) {
@@ -357,8 +356,7 @@ class MainActivity : AppCompatActivity() {
             if (info.versionCode > local) {
                 pendingUpdateInfo = info
                 btn.visibility = View.VISIBLE
-                btn.text = getString(R.string.update_available_short) + " v" + info.versionName +
-                    "（本机 $local）"
+                btn.text = getString(R.string.update_available_short) + " v" + info.versionName
             } else {
                 // 无更新必须撤掉提示：否则安装成功后旧进程/后续场景里按钮永久残留
                 pendingUpdateInfo = null
