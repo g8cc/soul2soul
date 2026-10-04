@@ -38,8 +38,7 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
     private val watchdog = android.os.Handler(android.os.Looper.getMainLooper())
     @Volatile private var micMuted = false
 
-    /** 远程操控授权开关：默认关，通知栏「允许TA操控」手动开，会话结束自动收回 */
-    @Volatile private var ctlAllowed = false
+    /** 远程操控授权开关：默认关，通知栏/授权对话框手动开，会话结束自动收回（companion 态：会话级单例） */
     @Volatile private var lastCtlWarnAt = 0L
     @Volatile private var lastCtlDenyAt = 0L
     @Volatile private var live = false
@@ -103,6 +102,21 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
                 } else {
                     ctlAllowed = !ctlAllowed
                     ctlToast(if (ctlAllowed) R.string.ctl_enabled_toast else R.string.ctl_disabled_toast)
+                    if (!ctlAllowed) notifyCtlDenied() // 中途收回：正在操控的观看端立刻知道原因
+                    updateNotification(if (micMuted) getString(R.string.sharing_muted) else getString(R.string.sharing_live))
+                }
+                return START_NOT_STICKY
+            }
+            ACTION_SET_CTL -> {
+                // 授权对话框的确定性开关（比 toggle 更适合"当前状态→目标状态"）
+                if (webRtc == null) { stopSelf(); return START_NOT_STICKY }
+                val on = intent.getBooleanExtra(EXTRA_CTL_ON, false)
+                if (on && !RemoteControlService.isReady()) {
+                    ctlToast(R.string.ctl_need_acc)
+                } else {
+                    ctlAllowed = on
+                    ctlToast(if (on) R.string.ctl_enabled_toast else R.string.ctl_disabled_toast)
+                    if (!on) notifyCtlDenied()
                     updateNotification(if (micMuted) getString(R.string.sharing_muted) else getString(R.string.sharing_live))
                 }
                 return START_NOT_STICKY
@@ -378,10 +392,18 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
             Intent(this, ScreenShareService::class.java).setAction(ACTION_TOGGLE_CTL),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
+        // HyperOS/Android13+ 默认折叠 FGS 通知，动作按钮经常根本看不见——
+        // 把"点通知整体"变成授权对话框入口，授权路径不再依赖按钮可见性
+        val consentIntent = PendingIntent.getActivity(
+            this, 24,
+            Intent(this, CtlConsentActivity::class.java),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
         return NotificationCompat.Builder(this, Notif.CH_SESSION)
             .setSmallIcon(R.drawable.ic_heart)
             .setContentTitle(getString(R.string.sharing_title))
             .setContentText(text)
+            .setContentIntent(consentIntent)
             .setOngoing(true)
             .addAction(0, if (micMuted) getString(R.string.action_unmute) else getString(R.string.action_mute), muteIntent)
             .addAction(0, if (ctlAllowed) getString(R.string.ctl_disallow) else getString(R.string.ctl_allow), ctlIntent)
@@ -401,8 +423,14 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
         const val ACTION_STOP = "com.soul2soul.app.action.STOP_SHARE"
         const val ACTION_TOGGLE_MUTE = "com.soul2soul.app.action.TOGGLE_MUTE"
         const val ACTION_TOGGLE_CTL = "com.soul2soul.app.action.TOGGLE_CTL"
+        const val ACTION_SET_CTL = "com.soul2soul.app.action.SET_CTL"
+        const val EXTRA_CTL_ON = "ctl_on"
         const val EXTRA_PROJECTION = "projection"
         private const val SCREEN_OFF_TIMEOUT_MS = 15_000L
+
+        /** 操控授权（会话级）：通知按钮与授权对话框都写这里，跨 Activity/Service 读取 */
+        @Volatile
+        var ctlAllowed = false
 
         // 会话级单例：生命周期与 ScreenShareService 完全绑定（onDestroy 清空），不构成泄漏
         @Suppress("StaticFieldLeak")

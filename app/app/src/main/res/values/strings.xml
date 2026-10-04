@@ -21,7 +21,7 @@
     <string name="connecting">连接中…</string>
     <string name="sharing_title">正在共享屏幕</string>
     <string name="sharing_starting">等待对方接听…</string>
-    <string name="sharing_live">陪玩中，随时可以结束</string>
+    <string name="sharing_live">陪玩中 · 点通知可允许/收回TA操控</string>
     <string name="action_end">结束</string>
     <string name="action_mute">静音</string>
     <string name="action_unmute">取消静音</string>
@@ -67,6 +67,15 @@
     <string name="ctl_disabled_toast">已收回屏幕操控</string>
     <string name="ctl_need_acc">请先在 系统设置→无障碍→已下载服务 里开启「陪着你」远程操控</string>
     <string name="ctl_peer_unsupported">TA 的 App 版本太旧，不支持被操控（让 TA 更新后再试）</string>
+    <string name="ctl_consent_title">让 TA 远程操控你的手机？</string>
+    <string name="ctl_consent_off">当前：未允许 —— TA 发来的操作不会生效</string>
+    <string name="ctl_consent_on">当前：已允许 —— TA 的点击滑动正作用在你手机上</string>
+    <string name="ctl_consent_no_session">会话已结束，无需授权</string>
+    <string name="ctl_consent_need_acc">未开启「无障碍」服务，无法操控：系统设置→无障碍→已下载的服务→陪着你→开启。开启前对方无法控制你的手机。</string>
+    <string name="ctl_consent_open_acc">去开启无障碍设置</string>
+    <string name="ctl_consent_on_enable">允许TA操控</string>
+    <string name="ctl_consent_on_disable">收回操控</string>
+    <string name="ctl_consent_close">关闭</string>
     <string name="acc_service_desc">开启后，在屏幕共享会话内由你决定是否允许伴侣远程操控你的屏幕（通知栏一键收回）</string>
     <string name="clear_strokes">清屏</string>
     <string name="emoji_toggle">😊+</string>

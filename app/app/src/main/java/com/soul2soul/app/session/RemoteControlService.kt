@@ -20,7 +20,12 @@ class RemoteControlService : AccessibilityService() {
         instance = this
     }
 
-    override fun onAccessibilityEvent(event: AccessibilityEvent?) {}
+    override fun onAccessibilityEvent(event: AccessibilityEvent?) {
+        // 追踪前台包名（配置已订阅 typeWindowStateChanged）：供"返回键打在自己通话界面上"的保护用
+        if (event?.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
+            lastForegroundPkg = event.packageName?.toString()
+        }
+    }
 
     override fun onInterrupt() {}
 
@@ -34,6 +39,9 @@ class RemoteControlService : AccessibilityService() {
 
         @Volatile
         private var instance: RemoteControlService? = null
+
+        @Volatile
+        private var lastForegroundPkg: String? = null
 
         /** dispatchGesture 是 API 24（本应用 minSdk 23，必须运行时判级） */
         fun isReady(): Boolean = instance != null && Build.VERSION.SDK_INT >= 24
@@ -49,8 +57,13 @@ class RemoteControlService : AccessibilityService() {
             // y=1px 也让系统边缘手势区不认，硬模仿只会画出四不像。识别意图后改走
             // performGlobalAction —— 本机播放真·系统动画，动画再随视频回显给观看端。
             edgeGlobalAction(pts, durMs)?.let { action ->
-                val ok = runCatching { svc.performGlobalAction(action) }.getOrDefault(false)
-                Log.d(TAG, "performGlobalAction action=$action ok=$ok")
+                // 返回键打在我们自己的通话界面上 = 退出会话断线（实测踩坑）。
+                // 共享进行中改按 HOME：通话界面退到后台、共享继续，她立刻落到桌面接着操作
+                val target = if (action == GLOBAL_ACTION_BACK &&
+                    ScreenShareService.isLive() && lastForegroundPkg == svc.packageName
+                ) GLOBAL_ACTION_HOME else action
+                val ok = runCatching { svc.performGlobalAction(target) }.getOrDefault(false)
+                Log.d(TAG, "performGlobalAction action=$target (raw=$action) ok=$ok")
                 return ok
             }
             val dm = svc.resources.displayMetrics

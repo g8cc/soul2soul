@@ -60,6 +60,14 @@
             android:supportsPictureInPicture="true"
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden" />
 
+        <!-- 操控授权对话框：共享通知的点击入口（FGS 通知动作按钮在 HyperOS 上常被折叠看不见） -->
+        <activity
+            android:name=".session.CtlConsentActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:launchMode="singleTask"
+            android:theme="@style/Theme.AppCompat.DayNight.Dialog" />
+
         <!-- 在线待命: 持有信令长连接 -->
         <service
             android:name=".session.PresenceService"

@@ -110,6 +110,23 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
+        // 会话进行中按返回 = 退到后台而不是退出：共享/待话状态绝不能被一次误触拆掉
+        // （无会话时才走系统默认返回退出应用）
+        onBackPressedDispatcher.addCallback(
+            this,
+            object : androidx.activity.OnBackPressedCallback(true) {
+                override fun handleOnBackPressed() {
+                    if (com.soul2soul.app.session.ScreenShareService.isRunning()) {
+                        moveTaskToBack(true)
+                    } else {
+                        isEnabled = false
+                        onBackPressedDispatcher.onBackPressed()
+                        isEnabled = true
+                    }
+                }
+            },
+        )
+
         Notif.ensureChannels(this)
         Presence.ensureStarted(this)
         requestNotificationPermissionIfNeeded()
