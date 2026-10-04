@@ -101,6 +101,7 @@ class DrawingOverlayView @JvmOverloads constructor(
     private var downX = 0f
     private var downY = 0f
     private var strokeStarted = false
+    private var activePointerId = MotionEvent.INVALID_POINTER_ID // 多指同屏只认首指：第二根手指不该把线甩走/污染手势
     private val touchSlopPx = android.view.ViewConfiguration.get(context).scaledTouchSlop
 
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -143,21 +144,26 @@ class DrawingOverlayView @JvmOverloads constructor(
         }
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
+                activePointerId = event.getPointerId(0)
                 downTime = SystemClock.uptimeMillis()
                 downX = event.x
                 downY = event.y
                 strokeStarted = false
             }
             MotionEvent.ACTION_MOVE -> {
-                if (!strokeStarted &&
-                    hypot(event.x - downX, event.y - downY) > touchSlopPx
-                ) {
-                    beginStroke(event) // 移动超过阈值：确认是画笔而非轻点
-                    strokeStarted = true
+                val idx = event.findPointerIndex(activePointerId)
+                if (idx >= 0) {
+                    val x = event.getX(idx)
+                    val y = event.getY(idx)
+                    if (!strokeStarted && hypot(x - downX, y - downY) > touchSlopPx) {
+                        beginStroke(x, y) // 移动超过阈值：确认是画笔而非轻点
+                        strokeStarted = true
+                    }
+                    if (strokeStarted) appendPoint(x, y)
                 }
-                if (strokeStarted) appendPoint(event)
             }
             MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                activePointerId = MotionEvent.INVALID_POINTER_ID
                 if (strokeStarted) {
                     current?.let { s ->
                         s.endAt = SystemClock.uptimeMillis()
@@ -186,6 +192,7 @@ class DrawingOverlayView @JvmOverloads constructor(
             MotionEvent.ACTION_DOWN -> {
                 removeCallbacks(ctlLongPress)
                 gestureLongPressFired = false
+                activePointerId = event.getPointerId(0)
                 gesturePts.clear()
                 gestureTimes.clear()
                 val now = SystemClock.uptimeMillis()
@@ -198,26 +205,31 @@ class DrawingOverlayView @JvmOverloads constructor(
             }
             MotionEvent.ACTION_MOVE -> {
                 if (gestureLongPressFired) return // 已转为本端菜单手势，放弃注入
+                val idx = event.findPointerIndex(activePointerId)
+                if (idx < 0) return // 首指已抬起：多余手指的移动不进点序
+                val x = event.getX(idx)
+                val y = event.getY(idx)
                 val first = gesturePts.firstOrNull()
                 if (first != null &&
-                    hypot(event.x - first.x, event.y - first.y) > touchSlopPx
+                    hypot(x - first.x, y - first.y) > touchSlopPx
                 ) {
                     removeCallbacks(ctlLongPress) // 滑起来了就不是长按
                 }
                 val now = SystemClock.uptimeMillis()
                 val last = gesturePts.lastOrNull()
                 val moved = last != null &&
-                    hypot(event.x - last.x, event.y - last.y) > GESTURE_MIN_PX
+                    hypot(x - last.x, y - last.y) > GESTURE_MIN_PX
                 if ((moved || now - gestureLastAt > GESTURE_MIN_MS) &&
                     gesturePts.size < GESTURE_MAX_PTS
                 ) {
-                    gesturePts.add(PointF(event.x, event.y))
+                    gesturePts.add(PointF(x, y))
                     gestureTimes.add(now)
                     gestureLastAt = now
                 }
             }
             MotionEvent.ACTION_UP -> {
                 removeCallbacks(ctlLongPress)
+                activePointerId = MotionEvent.INVALID_POINTER_ID
                 if (!gestureLongPressFired && gesturePts.isNotEmpty()) {
                     sink?.onStroke(gestureMsg(SystemClock.uptimeMillis() - gestureDownAt))
                     tailPts.clear()
@@ -231,6 +243,7 @@ class DrawingOverlayView @JvmOverloads constructor(
             }
             MotionEvent.ACTION_CANCEL -> {
                 removeCallbacks(ctlLongPress)
+                activePointerId = MotionEvent.INVALID_POINTER_ID
                 gestureActive = false
                 gesturePts.clear()
                 gestureTimes.clear()
@@ -254,7 +267,7 @@ class DrawingOverlayView @JvmOverloads constructor(
         return JSONObject().put("k", "g").put("pts", arr).put("dur", durMs)
     }
 
-    private fun beginStroke(event: MotionEvent) {
+    private fun beginStroke(x: Float, y: Float) {
         val s = Stroke(
             UUID.randomUUID().toString(),
             StrokeColors.COLORS[colorIndex],
@@ -262,15 +275,15 @@ class DrawingOverlayView @JvmOverloads constructor(
         strokes.add(s)
         current = s
         sink?.onStroke(strokeMsg("s", s.id).put("c", colorIndex))
-        appendPoint(event)
+        appendPoint(x, y)
     }
 
-    private fun appendPoint(event: MotionEvent) {
+    private fun appendPoint(x: Float, y: Float) {
         val s = current ?: return
         val rect = videoRect()
-        val xn = ((event.x - rect.left) / rect.width()).coerceIn(0f, 1f)
-        val yn = ((event.y - rect.top) / rect.height()).coerceIn(0f, 1f)
-        s.points.add(PointF(event.x, event.y))
+        val xn = ((x - rect.left) / rect.width()).coerceIn(0f, 1f)
+        val yn = ((y - rect.top) / rect.height()).coerceIn(0f, 1f)
+        s.points.add(PointF(x, y))
         sink?.onStroke(strokeMsg("p", s.id).put("x", xn.toDouble()).put("y", yn.toDouble()))
     }
 
