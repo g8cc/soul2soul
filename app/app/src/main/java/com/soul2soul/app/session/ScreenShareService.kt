@@ -124,6 +124,10 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
             return START_NOT_STICKY
         }
         Presence.sessionBusy = true // 会话期间自动拒接新呼叫
+        // 每次新会话必须从零开始收授权：服务实例若跨会话存活(onDestroy 未及时跑)，
+        // 上一通话的"允许TA操控"绝不能带进这一通
+        ctlAllowed = false
+        updateNotification(if (micMuted) getString(R.string.sharing_muted) else getString(R.string.sharing_live))
         com.soul2soul.app.util.WifiKeeper.acquire(this) // WiFi 高性能锁：防省电断流
 
         androidx.core.content.ContextCompat.registerReceiver(

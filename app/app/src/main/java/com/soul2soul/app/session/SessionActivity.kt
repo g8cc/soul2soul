@@ -48,7 +48,12 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
     private lateinit var emojiLayer: android.widget.FrameLayout
     private lateinit var fxLayer: OverlayCanvasView
     private var emojiOpen = false
-    private val hideControls = Runnable { setControlsVisible(false) }
+    // 收纳时连"面板打开"这个状态一起归零：否则下次轻点画面会把表情图层原样弹回来，
+    // 用户感觉它永远关不掉，只能手动点 😊+ 收起
+    private val hideControls = Runnable {
+        emojiOpen = false
+        setControlsVisible(false)
+    }
 
     private var client: WebRtcClient? = null
     private val pendingSignals = mutableListOf<JSONObject>() // client 就绪前缓存 offer/ice
@@ -257,6 +262,8 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
             JSONObject().put("k", "emoji").put("e", e).put("x", x)
         )
         showLocalEmoji(e)
+        // 重置收纳计时：还在连续挑表情就别中途收起，停手 5 秒后整套自动消失
+        setControlsVisible(true)
     }
 
     /** 满屏特效：发给对方 + 本地回显（fxLayer 不消费触摸，不挡操控） */
@@ -264,6 +271,7 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
         val json = JSONObject().put("k", "fx").put("t", t)
         client?.sendAnnotation(json)
         fxLayer.applyFx(json)
+        setControlsVisible(true)
     }
 
     /** 本地回显：让对方屏幕飘表情的同时，自己也能立刻看到（正反馈） */

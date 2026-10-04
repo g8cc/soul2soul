@@ -234,14 +234,16 @@ class DrawingOverlayView @JvmOverloads constructor(
         val iter = strokes.iterator()
         while (iter.hasNext()) {
             val s = iter.next()
-            // 书写中永不淡出；收笔后 2 秒淡出（与共享端 OverlayCanvasView 行为一致）
-            if (s !== current && s.endAt > 0L && now - s.endAt > StrokeColors.FADE_MS) {
+            // 书写中永不淡出；收笔后本地笔迹只做短暂留存(GHOST_FADE_MS)快速淡出。
+            // 持久的那一条交给「共享端悬浮层渲染→录屏→回灌本端视频」的回显，
+            // 它落在 TA 屏幕的真实位置且只有一份。本地留太长会与回显叠成"两条线"。
+            if (s !== current && s.endAt > 0L && now - s.endAt > GHOST_FADE_MS) {
                 iter.remove()
                 continue
             }
             paint.color = s.color
             val fade = if (s === current || s.endAt == 0L) 1f
-            else (1f - (now - s.endAt).toFloat() / StrokeColors.FADE_MS).coerceIn(0f, 1f)
+            else (1f - (now - s.endAt).toFloat() / GHOST_FADE_MS).coerceIn(0f, 1f)
             paint.alpha = (255f * fade).toInt()
             var prev: PointF? = null
             for (p in s.points) {
@@ -256,17 +258,17 @@ class DrawingOverlayView @JvmOverloads constructor(
         }
         if (strokes.isNotEmpty()) postInvalidateOnAnimation()
 
-        // 操控模式：正在攒的手势画成白色虚影，抬手即发给对方
+        // 操控模式：正在攒的手势画成白色半透明虚影（是"预览"不是墨迹），抬手即发给对方
         if (controlMode && gesturePts.isNotEmpty()) {
             gesturePaint.strokeWidth = 5f * resources.displayMetrics.density
-            gesturePaint.alpha = 160
+            gesturePaint.alpha = 110
             var prev: PointF? = null
             for (p in gesturePts) {
                 prev?.let { canvas.drawLine(it.x, it.y, p.x, p.y, gesturePaint) }
                 prev = p
             }
             val tip = gesturePts.last()
-            canvas.drawCircle(tip.x, tip.y, 12f * resources.displayMetrics.density, gesturePaint)
+            canvas.drawCircle(tip.x, tip.y, 10f * resources.displayMetrics.density, gesturePaint)
             postInvalidateOnAnimation()
         }
     }
@@ -275,5 +277,8 @@ class DrawingOverlayView @JvmOverloads constructor(
         private const val GESTURE_MIN_PX = 12f
         private const val GESTURE_MIN_MS = 60L
         private const val GESTURE_MAX_PTS = 64
+        // 本地笔迹收笔后的留存时长：只做落笔即时反馈的短驻留，
+        // 之后由共享端回显（真实位置、仅一份）接管，避免"一条线画成两条"。
+        private const val GHOST_FADE_MS = 600L
     }
 }

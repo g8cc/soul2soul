@@ -114,11 +114,7 @@ class AnnotationOverlayService : Service() {
             rect.height(),
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
             WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
-                or WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
-                // 双影修复：观看端笔迹发到共享端后画在悬浮层里，若不隔离会被
-                // MediaProjection 录回视频流，观看端会看到同一笔迹的本地版+视频回灌版。
-                // FLAG_SECURE 让本窗口内容退出屏幕采集（Android 8+ 悬浮窗有效）。
-                or (if (android.os.Build.VERSION.SDK_INT >= 26) WindowManager.LayoutParams.FLAG_SECURE else 0),
+                or WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
             PixelFormat.TRANSLUCENT,
         ).apply {
             gravity = Gravity.TOP or Gravity.START
