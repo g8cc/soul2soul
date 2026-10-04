@@ -364,6 +364,18 @@
                 android:textSize="12sp" />
 
             <TextView
+                android:id="@+id/tvMic"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="10dp"
+                android:background="@drawable/bg_chip"
+                android:paddingHorizontal="8dp"
+                android:paddingVertical="4dp"
+                android:text="@string/mic_on"
+                android:textColor="@color/white"
+                android:textSize="12sp" />
+
+            <TextView
                 android:id="@+id/btnHangup"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"

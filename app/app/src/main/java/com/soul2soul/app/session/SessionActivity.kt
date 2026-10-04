@@ -47,6 +47,10 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
     private lateinit var controlsContainer: View
     private lateinit var emojiLayer: android.widget.FrameLayout
     private lateinit var fxLayer: OverlayCanvasView
+    private lateinit var tvMic: TextView
+    // 连通后语音默认开启（有麦克风权限即自动发流）——状态必须可见、可关
+    private var micGranted = false
+    private var micMuted = false
     private var emojiOpen = false
     // 收纳时连"面板打开"这个状态一起归零：否则下次轻点画面会把表情图层原样弹回来，
     // 用户感觉它永远关不掉，只能手动点 😊+ 收起
@@ -115,6 +119,16 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
         tvCountdown = findViewById(R.id.tvCountdown)
         tvElapsed = findViewById(R.id.tvElapsed)
         tvRtt = findViewById(R.id.tvRtt)
+        tvMic = findViewById(R.id.tvMic)
+        tvMic.setOnClickListener {
+            if (!micGranted) {
+                android.widget.Toast.makeText(this, R.string.mic_denied_hint, android.widget.Toast.LENGTH_SHORT).show()
+                return@setOnClickListener
+            }
+            micMuted = !micMuted
+            client?.muteLocalAudio(micMuted)
+            refreshMicChip()
+        }
         emojiLayer = findViewById(R.id.emojiLayer)
         emojiPanel = findViewById(R.id.emojiPanel)
         fxRow = findViewById(R.id.fxRow)
@@ -301,6 +315,17 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
         tv.animate().translationYBy(-500f).alpha(0f).setDuration(1200)
             .withEndAction { (tv.parent as? android.view.ViewGroup)?.removeView(tv) }
             .start()
+    }
+
+    private fun refreshMicChip() {
+        tvMic.setText(
+            when {
+                !micGranted -> R.string.mic_none
+                micMuted -> R.string.mic_muted
+                else -> R.string.mic_on
+            }
+        )
+        tvMic.alpha = if (micGranted) 1f else 0.5f
     }
 
     // ---------- 来电状态 ----------
@@ -526,6 +551,9 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
             overlay.visibility = View.VISIBLE // 接听并连通前不显示/不响应画笔层
             setSpeakerphone(true)
             live = true
+            micGranted = checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) ==
+                android.content.pm.PackageManager.PERMISSION_GRANTED
+            refreshMicChip()
             elapsedBase = System.currentTimeMillis()
             mainHandler.removeCallbacks(elapsedTicker)
             mainHandler.post(elapsedTicker)

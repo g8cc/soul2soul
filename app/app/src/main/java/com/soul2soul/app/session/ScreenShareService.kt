@@ -54,7 +54,7 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
                 android.content.Intent.ACTION_SCREEN_OFF -> if (live) {
                     if (ctlAllowed) {
                         ctlAllowed = false // 清醒时给的授权不跨锁屏存续，解锁后需重新点「允许TA操控」
-                        updateNotification(if (micMuted) getString(R.string.sharing_muted) else getString(R.string.sharing_live))
+                        updateNotification(statusText())
                         // 收回发生在观看端操控中途：立刻说清"为什么突然点不动了"，
                         // 否则对方只会以为操控坏了（这正是"退出了还能操控/退出后不能操控"困惑的来源）
                         runCatching {
@@ -91,7 +91,7 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
                 if (webRtc == null) { stopSelf(); return START_NOT_STICKY } // 会话已结束：迟到的通知动作别挂尸
                 micMuted = !micMuted
                 webRtc?.muteLocalAudio(micMuted)
-                updateNotification(if (micMuted) getString(R.string.sharing_muted) else getString(R.string.sharing_live))
+                updateNotification(statusText())
                 return START_NOT_STICKY
             }
             ACTION_TOGGLE_CTL -> {
@@ -102,7 +102,7 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
                     ctlAllowed = !ctlAllowed
                     ctlToast(if (ctlAllowed) R.string.ctl_enabled_toast else R.string.ctl_disabled_toast)
                     if (!ctlAllowed) notifyCtlDenied() // 中途收回：正在操控的观看端立刻知道原因
-                    updateNotification(if (micMuted) getString(R.string.sharing_muted) else getString(R.string.sharing_live))
+                    updateNotification(statusText())
                 }
                 return START_NOT_STICKY
             }
@@ -117,7 +117,7 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
                     ctlAllowed = on
                     ctlToast(if (on) R.string.ctl_enabled_toast else R.string.ctl_disabled_toast)
                     if (!on) notifyCtlDenied()
-                    updateNotification(if (micMuted) getString(R.string.sharing_muted) else getString(R.string.sharing_live))
+                    updateNotification(statusText())
                 }
                 return START_NOT_STICKY
             }
@@ -147,7 +147,7 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
         // 每次新会话必须从零开始收授权：服务实例若跨会话存活(onDestroy 未及时跑)，
         // 上一通话的"允许TA操控"绝不能带进这一通
         ctlAllowed = false
-        updateNotification(if (micMuted) getString(R.string.sharing_muted) else getString(R.string.sharing_live))
+        updateNotification(statusText())
         com.soul2soul.app.util.WifiKeeper.acquire(this) // WiFi 高性能锁：防省电断流
 
         androidx.core.content.ContextCompat.registerReceiver(
@@ -293,7 +293,7 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
         live = true
         liveState = true
         SignalBus.emit(JSONObject().put("type", "local.sessionLive"))
-        updateNotification(getString(R.string.sharing_live))
+        updateNotification(statusText())
         setSpeakerphone(true)
         // 共享端也报一份：断线/操控问题时两份矩阵对起来看是谁的环境缺了什么
         com.soul2soul.app.util.SelfCheck.report(
@@ -357,6 +357,14 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
         } catch (_: SecurityException) {
             // 用户运行中撤销了通知权限：忽略，不影响会话
         }
+    }
+
+    /** 通知正文把"语音到底开没开"说清楚：无麦权限时根本没有上行音频，别让人以为按静音就行 */
+    private fun statusText(): String = when {
+        checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) !=
+            PackageManager.PERMISSION_GRANTED -> getString(R.string.sharing_no_mic)
+        micMuted -> getString(R.string.sharing_muted)
+        else -> getString(R.string.sharing_live)
     }
 
     /** Android 14 会校验 FGS 类型对应的运行时权限；无麦克风权限时只声明屏幕采集。 */
