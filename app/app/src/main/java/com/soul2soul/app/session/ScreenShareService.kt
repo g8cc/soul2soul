@@ -41,6 +41,7 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
     /** 远程操控授权开关：默认关，通知栏「允许TA操控」手动开，会话结束自动收回 */
     @Volatile private var ctlAllowed = false
     @Volatile private var lastCtlWarnAt = 0L
+    @Volatile private var lastCtlDenyAt = 0L
     @Volatile private var live = false
     private val pendingSignals = mutableListOf<JSONObject>()
 
@@ -56,6 +57,11 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
                     if (ctlAllowed) {
                         ctlAllowed = false // 清醒时给的授权不跨锁屏存续，解锁后需重新点「允许TA操控」
                         updateNotification(if (micMuted) getString(R.string.sharing_muted) else getString(R.string.sharing_live))
+                        // 收回发生在观看端操控中途：立刻说清"为什么突然点不动了"，
+                        // 否则对方只会以为操控坏了（这正是"退出了还能操控/退出后不能操控"困惑的来源）
+                        runCatching {
+                            webRtc?.sendControl(org.json.JSONObject().put("k", "ctl_denied").put("reason", "screenoff"))
+                        }
                     }
                     runCatching {
                         webRtc?.sendAnnotation(org.json.JSONObject().put("k", "screenoff"))
@@ -226,15 +232,19 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
 
     /** 远程操控手势（可靠 ctl 通道，整笔一条）：仅在用户允许时注入 */
     private fun handleGesture(json: JSONObject) {
-        if (!ctlAllowed) return
+        if (!ctlAllowed) {
+            notifyCtlDenied() // 静默丢弃会让观看端误以为"操控坏了"：回一条被拒事件让横幅说话
+            return
+        }
         // dispatchGesture 要求带 Looper 的线程；WebRTC 回调在 signaling 线程
         watchdog.post {
             // 收回授权可能发生在入队之后：注入前必须以主线程上的最新状态再判一次
-            if (!ctlAllowed) return@post
+            if (!ctlAllowed) { notifyCtlDenied(); return@post }
             val pts = json.optJSONArray("pts") ?: return@post
             if (!RemoteControlService.isReady()) {
                 ctlAllowed = false
                 ctlToast(R.string.ctl_need_acc)
+                notifyCtlDenied()
                 return@post
             }
             val list = ArrayList<PointF>(pts.length())
@@ -252,6 +262,16 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
         lastCtlWarnAt = now
         watchdog.post {
             android.widget.Toast.makeText(this, res, android.widget.Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    /** 被拒事件回灌观看端（4s 节流）：ctl 可靠通道，观看端在操控横幅上给出原因 */
+    private fun notifyCtlDenied() {
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastCtlDenyAt < 4000L) return
+        lastCtlDenyAt = now
+        runCatching {
+            webRtc?.sendControl(org.json.JSONObject().put("k", "ctl_denied"))
         }
     }
 

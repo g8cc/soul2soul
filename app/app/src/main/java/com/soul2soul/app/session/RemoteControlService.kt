@@ -45,6 +45,14 @@ class RemoteControlService : AccessibilityService() {
         fun dispatchNormalized(pts: List<PointF>, durMs: Long): Boolean {
             val svc = instance ?: return false
             if (Build.VERSION.SDK_INT < 24 || pts.isEmpty()) return false
+            // 边缘手势（侧滑返回/底部上滑回桌面·多任务）：dispatchGesture 落在
+            // y=1px 也让系统边缘手势区不认，硬模仿只会画出四不像。识别意图后改走
+            // performGlobalAction —— 本机播放真·系统动画，动画再随视频回显给观看端。
+            edgeGlobalAction(pts, durMs)?.let { action ->
+                val ok = runCatching { svc.performGlobalAction(action) }.getOrDefault(false)
+                Log.d(TAG, "performGlobalAction action=$action ok=$ok")
+                return ok
+            }
             val dm = svc.resources.displayMetrics
             val path = Path()
             var prevX = 0f
@@ -68,6 +76,27 @@ class RemoteControlService : AccessibilityService() {
             }.getOrDefault(false)
             Log.d(TAG, "dispatchGesture pts=${pts.size} dur=$durMs ok=$ok")
             return ok
+        }
+
+        /**
+         * 边缘手势识别（阈值即"贴边"语义，宁可漏判也不误判普通滑动）：
+         *  - 左右边缘水平长滑 → 返回
+         *  - 底部边缘垂直上滑：快滑 → 回桌面，慢滑（按住拖）→ 多任务
+         */
+        private fun edgeGlobalAction(pts: List<PointF>, durMs: Long): Int? {
+            if (pts.size < 2) return null
+            val f = pts.first()
+            val l = pts.last()
+            val dx = l.x - f.x
+            val dy = l.y - f.y
+            return when {
+                (f.x <= 0.04f || f.x >= 0.96f) && kotlin.math.abs(dy) < 0.06f &&
+                    kotlin.math.abs(dx) >= 0.12f ->
+                    GLOBAL_ACTION_BACK
+                f.y >= 0.92f && kotlin.math.abs(dx) < 0.08f && dy <= -0.25f ->
+                    if (durMs < 400L) GLOBAL_ACTION_HOME else GLOBAL_ACTION_RECENTS
+                else -> null
+            }
         }
     }
 }

@@ -185,12 +185,16 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
             v.setBackgroundResource(
                 if (overlay.controlMode) R.drawable.bg_chip_active else R.drawable.bg_chip
             )
+            mainHandler.removeCallbacks(restoreCtlBanner)
             findViewById<View>(R.id.tvCtlMode).visibility =
                 if (overlay.controlMode) View.VISIBLE else View.GONE
+            if (overlay.controlMode) findViewById<TextView>(R.id.tvCtlMode).setText(R.string.ctl_banner)
             if (overlay.controlMode) {
-                android.widget.Toast.makeText(this, R.string.ctl_mode_hint, android.widget.Toast.LENGTH_SHORT).show()
+                // 进操控先收起整套菜单：挡全屏画面。长按画面可重新唤出（含退出操控）
+                setControlsVisible(false)
+            } else {
+                setControlsVisible(true)
             }
-            setControlsVisible(true) // 操控期间控件不再自动收纳，随时可切回画笔
         }
         listOf(
             R.id.emoji0 to "❤️", R.id.emoji1 to "😂", R.id.emoji2 to "👍",
@@ -205,6 +209,8 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
         }
         // 轻点画面 = 呼出/收纳控件；滑动 = 画笔（DrawingOverlayView 内部区分）
         overlay.onTap = { toggleControls() }
+        // 操控模式里轻点会被注入对方，唤菜单改由长按承担
+        overlay.onRevealControls = { setControlsVisible(true) }
 
         lifecycleScope.launch {
             SignalBus.events.collect { handleSignal(it) }
@@ -249,7 +255,8 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
         emojiPanel.visibility = if (visible && emojiOpen) View.VISIBLE else View.GONE
         fxRow.visibility = if (visible && emojiOpen) View.VISIBLE else View.GONE
         mainHandler.removeCallbacks(hideControls)
-        if (visible && !overlay.controlMode) mainHandler.postDelayed(hideControls, 5000) // 5 秒无操作自动收纳
+        // 操控模式里菜单是"临时唤出"，8 秒不碰也自动收回去让出全屏
+        if (visible) mainHandler.postDelayed(hideControls, if (overlay.controlMode) 8000L else 5000L)
     }
 
     // ---------- 表情互动 ----------
@@ -480,7 +487,20 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
             "screenon" -> runOnUiThread {
                 if (live) tvState.visibility = View.GONE
             }
+            // 对方锁屏/收回授权：手势被静默丢弃时横幅必须说明原因，
+            // 否则操控端只会以为"功能坏了"（历史工单：退出后不能操控=这个）
+            "ctl_denied" -> runOnUiThread {
+                if (!overlay.controlMode) return@runOnUiThread
+                val banner = findViewById<TextView>(R.id.tvCtlMode)
+                banner.setText(R.string.ctl_revoked_banner)
+                mainHandler.removeCallbacks(restoreCtlBanner)
+                mainHandler.postDelayed(restoreCtlBanner, 5000)
+            }
         }
+    }
+
+    private val restoreCtlBanner = Runnable {
+        if (overlay.controlMode) findViewById<TextView>(R.id.tvCtlMode).setText(R.string.ctl_banner)
     }
 
     /** 实时性可视化：网络 RTT 每 2 秒刷新，颜色分级（绿<100ms / 橙<250ms / 红≥250ms） */
@@ -574,9 +594,12 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
         overlay.visibility = if (inPip || !live) View.GONE else View.VISIBLE
         if (!inPip && live) {
             mainHandler.removeCallbacks(hideControls)
-            // 操控模式不收纳：控件一旦藏起，轻点全变成远控点击，再也切不回画笔/挂断
+            // 操控模式：菜单只能长按唤出，唤出后 8 秒自动收回让出全屏（旧版"永不收纳"是怕再也切不回画笔，现在长按就是出口）
             if (!overlay.controlMode) mainHandler.postDelayed(hideControls, 5000)
+            else mainHandler.postDelayed(hideControls, 8000)
         }
+        findViewById<View>(R.id.tvCtlMode).visibility =
+            if (!inPip && live && overlay.controlMode) View.VISIBLE else View.GONE
     }
 
     override fun onDestroy() {
@@ -586,6 +609,7 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
         com.soul2soul.app.util.WifiKeeper.release()
         acceptTimeout?.let { mainHandler.removeCallbacks(it) }
         mainHandler.removeCallbacks(elapsedTicker)
+        mainHandler.removeCallbacks(restoreCtlBanner)
         androidx.core.app.NotificationManagerCompat.from(this).cancel(Notif.ID_CALL)
         // 用户划掉小窗/最近任务时 isFinishing=true，这里也要发 bye，否则对端傻等掉线兜底
         if (accepted && !endedRemotely && !byeSent) {

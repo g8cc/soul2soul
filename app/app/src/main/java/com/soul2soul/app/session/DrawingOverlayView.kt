@@ -32,6 +32,9 @@ class DrawingOverlayView @JvmOverloads constructor(
     /** 轻点回调（呼出/隐藏控件） */
     var onTap: (() -> Unit)? = null
 
+    /** 操控模式长按画面回调（唤出功能菜单——此时轻点会被注入对方，不能再兼职开关菜单） */
+    var onRevealControls: (() -> Unit)? = null
+
     /** DataChannel 出口（SessionActivity 注入：笔迹/表情/指令都走这里） */
     var sink: StrokeSink? = null
 
@@ -48,7 +51,12 @@ class DrawingOverlayView @JvmOverloads constructor(
         set(value) {
             field = value
             if (!value) {
+                removeCallbacks(ctlLongPress)
+                gestureLongPressFired = false
                 gesturePts.clear()
+                gestureTimes.clear()
+                tailPts.clear()
+                tailTimes.clear()
             }
             invalidate()
         }
@@ -65,9 +73,24 @@ class DrawingOverlayView @JvmOverloads constructor(
 
     private val strokes = mutableListOf<Stroke>()
     private var current: Stroke? = null
-    private val gesturePts = mutableListOf<PointF>() // 操控模式进行中手势（视图像素）
+    private val gesturePts = mutableListOf<PointF>() // 操控模式进行中手势（视图像素，抬手前完整保留供注入）
+    private val gestureTimes = mutableListOf<Long>() // 逐点时间戳：渲染只亮"年轻"的段，老点照常参与手势识别
+    private val tailPts = mutableListOf<PointF>()    // 抬手快照：尾迹继续淡出，与原手势解耦
+    private val tailTimes = mutableListOf<Long>()
     private var gestureDownAt = 0L
     private var gestureLastAt = 0L
+    private var gestureActive = false                // 手指还按着
+    private var gestureLongPressFired = false
+    private val ctlLongPress = Runnable {
+        // 长按 = 本端唤菜单，这笔不再注入对方（否则长按菜单会点进对方 App 里）
+        gestureLongPressFired = true
+        gesturePts.clear()
+        gestureTimes.clear()
+        gestureActive = false
+        invalidate()
+        performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS)
+        onRevealControls?.invoke()
+    }
 
     /** 当前画笔颜色索引（UI 读取以显示选中态） */
     var colorIndex = 0
@@ -91,6 +114,11 @@ class DrawingOverlayView @JvmOverloads constructor(
         style = Paint.Style.STROKE
         strokeCap = Paint.Cap.ROUND
         strokeJoin = Paint.Join.ROUND
+        color = Color.WHITE
+    }
+
+    private val pointerPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.FILL
         color = Color.WHITE
     }
 
@@ -156,12 +184,26 @@ class DrawingOverlayView @JvmOverloads constructor(
     private fun handleControlTouch(event: MotionEvent) {
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
+                removeCallbacks(ctlLongPress)
+                gestureLongPressFired = false
                 gesturePts.clear()
+                gestureTimes.clear()
+                val now = SystemClock.uptimeMillis()
                 gesturePts.add(PointF(event.x, event.y))
-                gestureDownAt = SystemClock.uptimeMillis()
-                gestureLastAt = gestureDownAt
+                gestureTimes.add(now)
+                gestureDownAt = now
+                gestureLastAt = now
+                gestureActive = true
+                postDelayed(ctlLongPress, CTL_LONG_PRESS_MS) // 按住不动 650ms = 唤菜单
             }
             MotionEvent.ACTION_MOVE -> {
+                if (gestureLongPressFired) return // 已转为本端菜单手势，放弃注入
+                val first = gesturePts.firstOrNull()
+                if (first != null &&
+                    hypot(event.x - first.x, event.y - first.y) > touchSlopPx
+                ) {
+                    removeCallbacks(ctlLongPress) // 滑起来了就不是长按
+                }
                 val now = SystemClock.uptimeMillis()
                 val last = gesturePts.lastOrNull()
                 val moved = last != null &&
@@ -170,16 +212,29 @@ class DrawingOverlayView @JvmOverloads constructor(
                     gesturePts.size < GESTURE_MAX_PTS
                 ) {
                     gesturePts.add(PointF(event.x, event.y))
+                    gestureTimes.add(now)
                     gestureLastAt = now
                 }
             }
             MotionEvent.ACTION_UP -> {
-                if (gesturePts.isNotEmpty()) {
+                removeCallbacks(ctlLongPress)
+                if (!gestureLongPressFired && gesturePts.isNotEmpty()) {
                     sink?.onStroke(gestureMsg(SystemClock.uptimeMillis() - gestureDownAt))
+                    tailPts.clear()
+                    tailPts.addAll(gesturePts)
+                    tailTimes.clear()
+                    tailTimes.addAll(gestureTimes)
                 }
+                gestureActive = false
                 gesturePts.clear()
+                gestureTimes.clear()
             }
-            MotionEvent.ACTION_CANCEL -> gesturePts.clear()
+            MotionEvent.ACTION_CANCEL -> {
+                removeCallbacks(ctlLongPress)
+                gestureActive = false
+                gesturePts.clear()
+                gestureTimes.clear()
+            }
         }
     }
 
@@ -258,18 +313,37 @@ class DrawingOverlayView @JvmOverloads constructor(
         }
         if (strokes.isNotEmpty()) postInvalidateOnAnimation()
 
-        // 操控模式：正在攒的手势画成白色半透明虚影（是"预览"不是墨迹），抬手即发给对方
-        if (controlMode && gesturePts.isNotEmpty()) {
-            gesturePaint.strokeWidth = 5f * resources.displayMetrics.density
-            gesturePaint.alpha = 110
-            var prev: PointF? = null
-            for (p in gesturePts) {
-                prev?.let { canvas.drawLine(it.x, it.y, p.x, p.y, gesturePaint) }
-                prev = p
-            }
+        // 操控模式：指尖光晕 + 按点龄淡出的短尾迹。刻意不是"墨迹"——
+        // 它只回答"手指正落在对方屏幕哪里"；真正的操作动画由共享端画面回显（唯一权威一份）
+        gesturePaint.strokeWidth = 4f * resources.displayMetrics.density
+        val d = resources.displayMetrics.density
+        drawGestureTrail(canvas, tailPts, tailTimes, now)
+        drawGestureTrail(canvas, gesturePts, gestureTimes, now)
+        if (gestureActive && gesturePts.isNotEmpty()) {
             val tip = gesturePts.last()
-            canvas.drawCircle(tip.x, tip.y, 10f * resources.displayMetrics.density, gesturePaint)
-            postInvalidateOnAnimation()
+            gesturePaint.alpha = 200
+            canvas.drawCircle(tip.x, tip.y, 13f * d, gesturePaint) // 空心指尖环
+            pointerPaint.alpha = 210
+            canvas.drawCircle(tip.x, tip.y, 5f * d, pointerPaint)  // 实心触点
+        }
+        if (gesturePts.isNotEmpty() || tailPts.isNotEmpty()) postInvalidateOnAnimation()
+    }
+
+    /** 逐段画轨迹：只画 450ms 内的"年轻"点；入参列表本身不动（完整点序还要参与手势识别/注入） */
+    private fun drawGestureTrail(canvas: Canvas, pts: List<PointF>, times: List<Long>, now: Long) {
+        gesturePaint.color = Color.WHITE
+        for (i in 1 until pts.size) {
+            val age = now - times[i]
+            if (age > GESTURE_TAIL_MS) continue
+            gesturePaint.alpha = (130 * (1f - age.toFloat() / GESTURE_TAIL_MS)).toInt().coerceIn(0, 130)
+            canvas.drawLine(pts[i - 1].x, pts[i - 1].y, pts[i].x, pts[i].y, gesturePaint)
+        }
+        // 尾迹头部过期即回收（绘制列表才允许收缩，注入列表永不在此裁剪）
+        if (pts === tailPts) {
+            while (tailPts.isNotEmpty() && now - tailTimes.first() > GESTURE_TAIL_MS) {
+                tailPts.removeAt(0)
+                tailTimes.removeAt(0)
+            }
         }
     }
 
@@ -277,6 +351,8 @@ class DrawingOverlayView @JvmOverloads constructor(
         private const val GESTURE_MIN_PX = 12f
         private const val GESTURE_MIN_MS = 60L
         private const val GESTURE_MAX_PTS = 64
+        private const val GESTURE_TAIL_MS = 450L
+        private const val CTL_LONG_PRESS_MS = 650L
         // 本地笔迹收笔后的留存时长：只做落笔即时反馈的短驻留，
         // 之后由共享端回显（真实位置、仅一份）接管，避免"一条线画成两条"。
         private const val GHOST_FADE_MS = 600L

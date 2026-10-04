@@ -26,6 +26,22 @@
         android:layout_width="match_parent"
         android:layout_height="match_parent" />
 
+    <!-- 操控模式横幅：MIUI 会吞 toast，模式状态必须持久可见。
+         挂在根 FrameLayout 顶部而非底部菜单内——操控时整套菜单收起，横幅要留下来 -->
+    <TextView
+        android:id="@+id/tvCtlMode"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="center_horizontal|top"
+        android:layout_marginTop="32dp"
+        android:background="@drawable/bg_chip_active"
+        android:paddingHorizontal="12dp"
+        android:paddingVertical="6dp"
+        android:text="@string/ctl_banner"
+        android:textColor="@color/white"
+        android:textSize="12sp"
+        android:visibility="gone" />
+
     <TextView
         android:id="@+id/tvState"
         android:layout_width="wrap_content"
@@ -233,21 +249,6 @@
                 android:text="🚀"
                 android:textSize="28sp" />
         </LinearLayout>
-
-        <!-- 操控模式横幅：MIUI 会吞 toast，模式状态必须持久可见 -->
-        <TextView
-            android:id="@+id/tvCtlMode"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_gravity="center_horizontal"
-            android:layout_marginBottom="6dp"
-            android:background="@drawable/bg_chip_active"
-            android:paddingHorizontal="12dp"
-            android:paddingVertical="6dp"
-            android:text="@string/ctl_banner"
-            android:textColor="@color/white"
-            android:textSize="12sp"
-            android:visibility="gone" />
 
         <!-- 第一行：画笔工具（小色点+短标签，Mi5 小屏也放得下） -->
         <LinearLayout
