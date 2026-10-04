@@ -248,6 +248,11 @@ wss.on('connection', (ws) => {
         console.log(`[diag.version] ${ws.deviceId} code=${msg.localCode} name=${msg.localName} remote=${msg.remoteCode}/${msg.remoteName} update=${msg.hasUpdate}`);
         break;
       }
+      case 'app.diag': {
+        // 会话能力自检矩阵（机型/系统/权限）：跨机型问题远程定位用，只含公开设备信息
+        console.log(`[diag.selfcheck] ${ws.deviceId} role=${msg.role} model=${msg.model} os=${msg.os}/sdk${msg.sdk} app=${msg.app} notif=${msg.notif} overlay=${msg.overlay} acc=${msg.acc} mic=${msg.mic} battery=${msg.battery} ctl=${msg.ctlAllowed ?? msg.ctlSupported ?? '-'}`);
+        break;
+      }
       default: break;
     }
   });

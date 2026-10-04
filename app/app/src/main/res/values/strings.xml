@@ -67,6 +67,9 @@
     <string name="ctl_disabled_toast">已收回屏幕操控</string>
     <string name="ctl_need_acc">请先在 系统设置→无障碍→已下载服务 里开启「陪着你」远程操控</string>
     <string name="ctl_peer_unsupported">TA 的 App 版本太旧，不支持被操控（让 TA 更新后再试）</string>
+    <string name="battery_dialog_title">允许「陪着你」后台运行</string>
+    <string name="battery_dialog_msg">部分品牌手机（小米/华为/OPPO/vivo）会强杀后台应用，导致你们收不到呼叫、通话中途离线。点「去设置」后选择「不受限制/允许后台运行」即可，只需设置一次。</string>
+    <string name="battery_dialog_go">去设置</string>
     <string name="ctl_consent_title">让 TA 远程操控你的手机？</string>
     <string name="ctl_consent_off">当前：未允许 —— TA 发来的操作不会生效</string>
     <string name="ctl_consent_on">当前：已允许 —— TA 的点击滑动正作用在你手机上</string>

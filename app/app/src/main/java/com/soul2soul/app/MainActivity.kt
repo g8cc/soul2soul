@@ -130,6 +130,7 @@ class MainActivity : AppCompatActivity() {
         Notif.ensureChannels(this)
         Presence.ensureStarted(this)
         requestNotificationPermissionIfNeeded()
+        maybeAskBatteryExemption()
 
         tvStatus = findViewById(R.id.tvStatus)
         boxPairing = findViewById(R.id.boxPairing)
@@ -510,6 +511,43 @@ class MainActivity : AppCompatActivity() {
         ) {
             notifPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
+    }
+
+    /**
+     * 电池优化豁免引导（主流 ROM 兼容的通用逃生门）：
+     * 华为/小米/OPPO/vivo 的后台管控都会优先冻结长连接服务，
+     * 豁免一次即可长期免疫；只引导一次，拒绝后不再骚扰。
+     */
+    private fun maybeAskBatteryExemption() {
+        if (Build.VERSION.SDK_INT < 23) return
+        if (com.soul2soul.app.util.SelfCheck.batteryIgnoring(this)) return
+        if (com.soul2soul.app.util.Prefs.askedBattery(this)) return
+        com.soul2soul.app.util.Prefs.setAskedBattery(this, true)
+        AlertDialog.Builder(this)
+            .setTitle(R.string.battery_dialog_title)
+            .setMessage(R.string.battery_dialog_msg)
+            .setPositiveButton(R.string.battery_dialog_go) { _, _ ->
+                val opened = runCatching {
+                    startActivity(
+                        android.content.Intent(
+                            android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                            android.net.Uri.parse("package:$packageName"),
+                        )
+                    )
+                }.isSuccess
+                if (!opened) {
+                    // 部分 ROM 阉割了单应用豁免页：退到总列表
+                    runCatching {
+                        startActivity(
+                            android.content.Intent(
+                                android.provider.Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS
+                            )
+                        )
+                    }
+                }
+            }
+            .setNegativeButton(R.string.cancel, null)
+            .show()
     }
 
     private fun updateUi() {

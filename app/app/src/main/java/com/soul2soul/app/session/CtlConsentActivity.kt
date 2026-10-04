@@ -88,6 +88,9 @@ class CtlConsentActivity : AppCompatActivity() {
             finish() // 会话已结束：对话框别残留成假授权入口
             return
         }
+        // 同进程共享 companion 状态：先落状态让界面立刻正确，
+        // 服务收到 ACTION_SET_CTL 后做同一件事（幂等）并刷新通知栏
+        ScreenShareService.ctlAllowed = on
         startService(
             Intent(this, ScreenShareService::class.java)
                 .setAction(ScreenShareService.ACTION_SET_CTL)

@@ -529,6 +529,11 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
             elapsedBase = System.currentTimeMillis()
             mainHandler.removeCallbacks(elapsedTicker)
             mainHandler.post(elapsedTicker)
+            // 机型/权限自检矩阵上报（对方手机不在手边时的远程诊断依据）
+            com.soul2soul.app.util.SelfCheck.report(
+                this, "viewer",
+                JSONObject().put("ctlSupported", client?.controlSupported == true),
+            )
         }
     }
 

@@ -38,7 +38,6 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
     private val watchdog = android.os.Handler(android.os.Looper.getMainLooper())
     @Volatile private var micMuted = false
 
-    /** 远程操控授权开关：默认关，通知栏/授权对话框手动开，会话结束自动收回（companion 态：会话级单例） */
     @Volatile private var lastCtlWarnAt = 0L
     @Volatile private var lastCtlDenyAt = 0L
     @Volatile private var live = false
@@ -112,6 +111,7 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
                 if (webRtc == null) { stopSelf(); return START_NOT_STICKY }
                 val on = intent.getBooleanExtra(EXTRA_CTL_ON, false)
                 if (on && !RemoteControlService.isReady()) {
+                    ctlAllowed = false // 对话框乐观置了 true：服务拒绝就必须落回，否则状态与实况不符
                     ctlToast(R.string.ctl_need_acc)
                 } else {
                     ctlAllowed = on
@@ -295,6 +295,11 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
         SignalBus.emit(JSONObject().put("type", "local.sessionLive"))
         updateNotification(getString(R.string.sharing_live))
         setSpeakerphone(true)
+        // 共享端也报一份：断线/操控问题时两份矩阵对起来看是谁的环境缺了什么
+        com.soul2soul.app.util.SelfCheck.report(
+            this, "sharer",
+            JSONObject().put("ctlAllowed", ctlAllowed),
+        )
     }
 
     override fun onEnded(reason: String) {
@@ -396,7 +401,8 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
         // 把"点通知整体"变成授权对话框入口，授权路径不再依赖按钮可见性
         val consentIntent = PendingIntent.getActivity(
             this, 24,
-            Intent(this, CtlConsentActivity::class.java),
+            Intent(this, CtlConsentActivity::class.java)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
         return NotificationCompat.Builder(this, Notif.CH_SESSION)

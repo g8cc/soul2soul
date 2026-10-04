@@ -95,6 +95,7 @@ class RemoteControlService : AccessibilityService() {
          * 边缘手势识别（阈值即"贴边"语义，宁可漏判也不误判普通滑动）：
          *  - 左右边缘水平长滑 → 返回
          *  - 底部边缘垂直上滑：快滑 → 回桌面，慢滑（按住拖）→ 多任务
+         * 底部起点的阈值收到 0.96：0.92 会把"从列表底部往上刷"误判成回桌面
          */
         private fun edgeGlobalAction(pts: List<PointF>, durMs: Long): Int? {
             if (pts.size < 2) return null
@@ -106,7 +107,7 @@ class RemoteControlService : AccessibilityService() {
                 (f.x <= 0.04f || f.x >= 0.96f) && kotlin.math.abs(dy) < 0.06f &&
                     kotlin.math.abs(dx) >= 0.12f ->
                     GLOBAL_ACTION_BACK
-                f.y >= 0.92f && kotlin.math.abs(dx) < 0.08f && dy <= -0.25f ->
+                f.y >= 0.96f && kotlin.math.abs(dx) < 0.08f && dy <= -0.25f ->
                     if (durMs < 400L) GLOBAL_ACTION_HOME else GLOBAL_ACTION_RECENTS
                 else -> null
             }
