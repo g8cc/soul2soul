@@ -55,4 +55,26 @@ class IceServerParserTest {
         assertEquals(1, servers.size)
         assertEquals("", servers[0].username)
     }
+
+    @Test
+    fun `一个条目三条 urls 展开为三个 IceServer 且凭证复制`() {
+        val arr = JSONArray(
+            """[
+              {"urls":["turn:a:3478?transport=udp","turn:a:3478?transport=tcp","turn:a:3478"],
+               "username":"u1","credential":"c1"}
+            ]""",
+        )
+        val servers = IceServerParser.parse(arr)
+        assertEquals(3, servers.size)
+        servers.forEach {
+            assertEquals("u1", it.username)
+            assertEquals("c1", it.password)
+        }
+    }
+
+    @Test
+    fun `urls 为空数组的条目产出零个服务器`() {
+        val arr = JSONArray("""[{"urls":[]}]""")
+        assertTrue(IceServerParser.parse(arr).isEmpty())
+    }
 }

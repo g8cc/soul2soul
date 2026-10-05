@@ -74,4 +74,17 @@ class StrokeMappingTest {
         val (px, py) = StrokeMapping.denormalize(xn, yn, 1080f, 2340f)
         assertTrue(StrokeMapping.withinTolerance(px / 1080f to py / 2340f, 1f to 1f))
     }
+
+    @Test
+    fun `视频高为0同样回退全容器`() {
+        val r = StrokeMapping.fitRect(100, 0, 500f, 500f)
+        assertTrue(r.contentEquals(floatArrayOf(0f, 0f, 500f, 500f)))
+    }
+
+    @Test
+    fun `容差判定恰5%为真_超出即假`() {
+        // AC-3 验收线：<=0.05 通过、0.051 拒绝（起点取 0 保证单精度减法不引入舍入歧义）
+        assertTrue(StrokeMapping.withinTolerance(0f to 0f, 0.05f to 0f))
+        assertTrue(!StrokeMapping.withinTolerance(0f to 0f, 0.051f to 0f))
+    }
 }
