@@ -25,7 +25,9 @@
 | `bye` | — | 已鉴权 | 挂断，原样转发给对端。 |
 | `sdp` | `sdp:{type, sdp}` | 已鉴权 | 原样转发给对端（日志省略正文）。 |
 | `ice` | `candidate:{...}` | 已鉴权 | 原样转发给对端（日志省略正文）。 |
-| `unpair` | — | 已鉴权 | 解除配对：删除双向关系，在线端立即收 `unpaired`。 |
+| `unpair` | — | 已鉴权 | 解除配对：删除双向关系并**双向清空留言箱**（文字+语音文件），在线端立即收 `unpaired`。 |
+| `msg.post` | `kind:"text"`+`text`(≤500字) 或 `kind:"voice"`+`voiceId`(UUID)+`durMs`(0<d≤60000) | 已鉴权+已配对 | 给对端留言（对方离线也收）。发件限速 1 条/秒；被拒回 `msg.failed`。语音文件先经 HTTP `POST /voice` 上传（见 2.4）。 |
+| `msg.read` | `ids`[] | 已鉴权 | 阅后即删：从**自己**的留言箱删除这些 id（含语音文件），只能删自己的。 |
 | `app.diag` | 见 2.3 | 已 hello | 服务端只落日志 `[diag.selfcheck]`，不转发。 |
 | `app.version` | 见 2.3 | 已 hello | 服务端只落日志 `[diag.version]`，不转发。 |
 
@@ -49,12 +51,25 @@
 | `peer.offline` | `reason`(可选: `not_authed`/`too_fast`) | 呼叫时对端不在 |
 | `bye` / `sdp` / `ice` | 原样转发 | 对端挂断/媒体协商 |
 | `peer.gone` | — | 对端连接断开（服务端 close 时补发） |
+| `msg.inbox` | `items`[]（留言条目） | hello 成功后，若有未送达留言（非空才发） |
+| `msg.sent` | `id` | msg.post 成功回执（容量溢出挤掉的旧留言由服务端自行删除，不再通知） |
+| `msg.failed` | `reason`: `unpaired` / `too_fast` / `empty` / `too_long` / `bad_recipient` / `bad_kind` / `bad_voice_id` / `bad_duration` | msg.post 被拒 |
+| `msg.new` | 留言条目展开（`id,from,kind,text|voiceId+durMs,ts,expires`） | msg.post 时收件人恰好在线则直达 |
+
+留言条目结构：`{id:UUID, from, kind:'text'|'voice', text | voiceId+durMs, ts, expires}`。
+容量与隐私：每收件人最多 20 条（溢出丢最旧，语音文件同删）、TTL 7 天自动销毁、`msg.read` 送达即删（阅后即删）；无厂商推送，**打开 App 才送达**。决策逻辑在 `server/src/messages.js#MessageBook`（纯逻辑，单测覆盖）。
 
 ### 2.3 ICE 凭证与遥测
 
 - `iceServers` 由服务端签发（`server/src/turn.js#buildIceServers`）：`username = floor(now/1000)+ttlSec`（默认 ttl 3600s），`credential = base64(HMAC-SHA1(secret, username))`（reverse-proxy 限时凭证）。含 1 条 `stun:` + 2 条 `turn:`（udp/tcp）。
 - `app.diag` 字段：`role`(viewer/sharer), `model`, `os`, `sdk`, `app`, `notif`, `overlay`, `acc`, `mic`, `battery`，外加扩展位（观看端 `ctlSupported`、共享端 `ctlAllowed`）。
 - `app.version` 字段：`localCode`, `localName`, `remoteCode`, `remoteName`, `hasUpdate`。
+
+### 2.4 语音留言文件（HTTP，与信令同端口）
+
+- `POST /voice?deviceId=&token=` — 发件人上传，原始字节体（非 multipart），上限 1MB（超限 413）；鉴权同 hello（pairings token），成功回 `{id:UUID}`，落盘 `data/voice/<id>.m4a`。上传后须再发 `msg.post(kind:'voice', voiceId:id)` 才会入箱；留言被拒时服务端删除孤儿文件。
+- `GET /voice/<id>?deviceId=&token=` — 仅**收件人本人**可下载（`MessageBook.hasVoice` 校验该语音确在其未读箱中），返回 `audio/mp4`；非收件人/错误 token 403，文件已删 404。
+- 客户端上传的 token/deviceId 与 WebSocket hello 相同（Prefs 持久化的 pairToken）。
 
 ## 3. DataChannel 双通道
 
@@ -106,3 +121,4 @@
 
 - **SPEC.md §3 标注协议表过时**：早期设计为 `stroke.start / stroke.p / stroke.end / anno.clear`（且通道为 reliable+ordered），线上实际是 anno 走**不可靠**通道、字段 `k:"s"/"p"/"e"/"clear"`（另有 emoji/fx/res 等扩展）。以本文 §3.1 为准。
 - **服务端常量漂移**：repo 为 `PAIR_CODE_TTL=10min / ENTER 尝试上限=5`；**生产运行的是 hotfix 值 30min/10**。单测锁定的是 repo 行为；部署前必须先人工比对，禁止 naive 覆盖（见根目录 AGENTS.md）。
+- **离线留言（msg.*、HTTP /voice）仅存在于 repo**：截至 v0.2.23 生产服务器尚无留言箱代码，上线前旧客户端对新信号只是忽略（unknown type 静默丢弃），不会崩；但客户端留言功能须与服务器改动同批部署。

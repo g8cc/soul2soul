@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# T3 协议黑盒：随机端口起一次性信令实例 → 对抗(protocol-test) + 全链路冒烟(smoke-test)
+# T3 协议黑盒：随机端口起一次性信令实例 → 对抗(protocol-test) + 全链路冒烟(smoke-test) + 离线留言(msg-blackbox)
 # 关键护栏：
 #  - 数据文件走 mktemp，绝不触碰 server/data/pairings.json（生产配对关系所在）
 #  - cwd 必须是 server/（两个黑盒脚本从 process.cwd() 解析 node_modules/ws）
@@ -44,3 +44,5 @@ echo "-- protocol-test.cjs @ :$PORT"
 SIG_URL="ws://127.0.0.1:$PORT" node protocol-test.cjs
 echo "-- smoke-test.cjs @ :$PORT"
 SIG_URL="ws://127.0.0.1:$PORT" node smoke-test.cjs
+echo "-- msg-blackbox.cjs @ :$PORT"
+SIG_URL="ws://127.0.0.1:$PORT" HTTP_URL="http://127.0.0.1:$PORT" node msg-blackbox.cjs
