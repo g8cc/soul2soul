@@ -1,5 +1,6 @@
 // 配对码本单测：锁定爆破限制、旧码作废、TTL 边界与清扫。
-// 注意：测的是 repo 常量（TTL 10min / 尝试 5），线上 hotfix 为 30min/10（见 AGENTS.md 漂移警告）。
+// 测的是 repo 默认值（TTL 10min / 尝试 5）；线上以 env 注入 PAIR_CODE_TTL_MS=1800000、
+// PAIR_ENTER_MAX_ATTEMPTS=10（2026-09-29 hotfix 已配置化，不再是源码漂移）。
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { PairCodeBook } from '../src/pairing.js';
@@ -105,4 +106,11 @@ test('forgetDevice：断线后该设备限速归零，但码仍然有效', () =>
   book.forgetDevice('devA');
   assert.equal(book.request('devA').code.length, 6); // 归零后可再申请
   // 旧码被新申请作废属于「旧码作废」规则，与 forgetDevice 无关，此处只验证限速复位
+});
+
+test('输码归一化：全角数字 + 首尾空白仍能命中（2026-09-29 线上 hotfix 回灌锁定）', () => {
+  const { book } = makeBook();
+  const code = book.request('devA').code;
+  const fullwidth = code.replace(/\d/g, (d) => String.fromCharCode(d.charCodeAt(0) + 0xFEE0));
+  assert.equal(book.enter({ pairAttempts: 0 }, 'devB', ` ${fullwidth} `).out, 'paired');
 });

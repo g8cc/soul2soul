@@ -42,7 +42,10 @@ export class PairCodeBook {
       return { out: 'failed', reason: 'too_many_attempts' };
     }
     conn.pairAttempts += 1;
-    const code = String(rawCode || '');
+    // 规范化：去空白 + 全角数字转半角（中文输入法数字键盘会产出全角字符）——线上 2026-09-29 hotfix 回灌
+    const code = String(rawCode || '')
+      .replace(/\s+/g, '')
+      .replace(/[０-９]/g, (ch) => String.fromCharCode(ch.charCodeAt(0) - 0xFEE0));
     const pending = this.codes.get(code);
     if (!pending || pending.expires < this.now()) {
       return { out: 'failed', reason: 'code_invalid' };
