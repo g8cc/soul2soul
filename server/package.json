@@ -5,7 +5,10 @@
   "type": "module",
   "engines": { "node": ">=16" },
   "scripts": {
-    "start": "node src/index.js"
+    "start": "node src/index.js",
+    "test": "node --test test/",
+    "test:coverage": "node --test --experimental-test-coverage test/",
+    "test:blackbox": "bash test/run-blackbox.sh"
   },
   "dependencies": {
     "ws": "^8.18.0"

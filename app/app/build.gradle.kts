@@ -81,3 +81,28 @@ dependencies {
     // 本地单测用真实 org.json 实现（android.jar 里是 stub）
     testImplementation("org.json:json:20240303")
 }
+
+// 覆盖率只在 -Pcoverage 时接入：默认构建链路零插件下载、零附加任务（离线安全）
+if (project.hasProperty("coverage")) {
+    apply(plugin = "jacoco")
+
+    tasks.withType<Test>().configureEach {
+        extensions.configure<JacocoTaskExtension> {
+            isIncludeNoLocationClasses = true
+            excludes = listOf("jdk.internal.*")
+        }
+    }
+
+    tasks.register<JacocoReport>("testProdDebugUnitTestCoverageReport") {
+        dependsOn("testProdDebugUnitTest")
+        classDirectories.setFrom(files(layout.buildDirectory.dir("tmp/kotlin-classes/prodDebug")))
+        sourceDirectories.setFrom(files("src/main/java"))
+        executionData.setFrom(files(layout.buildDirectory.file("jacoco/testProdDebugUnitTest.exec")))
+        reports {
+            xml.required.set(true)
+            html.required.set(true)
+            xml.outputLocation.set(layout.buildDirectory.file("reports/jacoco/coverage.xml"))
+            html.outputLocation.set(layout.buildDirectory.dir("reports/jacoco/html"))
+        }
+    }
+}
