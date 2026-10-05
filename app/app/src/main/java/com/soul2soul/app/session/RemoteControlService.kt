@@ -56,12 +56,19 @@ class RemoteControlService : AccessibilityService() {
             // 边缘手势（侧滑返回/底部上滑回桌面·多任务）：dispatchGesture 落在
             // y=1px 也让系统边缘手势区不认，硬模仿只会画出四不像。识别意图后改走
             // performGlobalAction —— 本机播放真·系统动画，动画再随视频回显给观看端。
-            edgeGlobalAction(pts, durMs)?.let { action ->
+            // 阈值判定在 GestureIntent（纯逻辑，单测锁定）。
+            val norm = pts.map { GestureIntent.NormPt(it.x, it.y) }
+            GestureIntent.edgeGlobalAction(norm, durMs)?.let { action ->
                 // 返回键打在我们自己的通话界面上 = 退出会话断线（实测踩坑）。
                 // 共享进行中改按 HOME：通话界面退到后台、共享继续，她立刻落到桌面接着操作
-                val target = if (action == GLOBAL_ACTION_BACK &&
-                    ScreenShareService.isLive() && lastForegroundPkg == svc.packageName
-                ) GLOBAL_ACTION_HOME else action
+                val resolved = GestureIntent.resolveGlobalAction(
+                    action, ScreenShareService.isLive(), lastForegroundPkg == svc.packageName
+                )
+                val target = when (resolved) {
+                    GestureIntent.GlobalAction.BACK -> GLOBAL_ACTION_BACK
+                    GestureIntent.GlobalAction.HOME -> GLOBAL_ACTION_HOME
+                    GestureIntent.GlobalAction.RECENTS -> GLOBAL_ACTION_RECENTS
+                }
                 val ok = runCatching { svc.performGlobalAction(target) }.getOrDefault(false)
                 Log.d(TAG, "performGlobalAction action=$target (raw=$action) ok=$ok")
                 return ok
@@ -89,28 +96,6 @@ class RemoteControlService : AccessibilityService() {
             }.getOrDefault(false)
             Log.d(TAG, "dispatchGesture pts=${pts.size} dur=$durMs ok=$ok")
             return ok
-        }
-
-        /**
-         * 边缘手势识别（阈值即"贴边"语义，宁可漏判也不误判普通滑动）：
-         *  - 左右边缘水平长滑 → 返回
-         *  - 底部边缘垂直上滑：快滑 → 回桌面，慢滑（按住拖）→ 多任务
-         * 底部起点的阈值收到 0.96：0.92 会把"从列表底部往上刷"误判成回桌面
-         */
-        private fun edgeGlobalAction(pts: List<PointF>, durMs: Long): Int? {
-            if (pts.size < 2) return null
-            val f = pts.first()
-            val l = pts.last()
-            val dx = l.x - f.x
-            val dy = l.y - f.y
-            return when {
-                (f.x <= 0.04f || f.x >= 0.96f) && kotlin.math.abs(dy) < 0.06f &&
-                    kotlin.math.abs(dx) >= 0.12f ->
-                    GLOBAL_ACTION_BACK
-                f.y >= 0.96f && kotlin.math.abs(dx) < 0.08f && dy <= -0.25f ->
-                    if (durMs < 400L) GLOBAL_ACTION_HOME else GLOBAL_ACTION_RECENTS
-                else -> null
-            }
         }
     }
 }
