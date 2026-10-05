@@ -58,7 +58,7 @@ class SignalingClient : WebSocketListener() {
 
     /** 组一条消息发送 */
     fun send(type: String, block: JSONObject.() -> Unit = {}): Boolean {
-        val json = JSONObject().put("type", type)
+        val json = SignalEnvelope.message(type)
         json.block()
         return sendRaw(json)
     }
@@ -86,9 +86,7 @@ class SignalingClient : WebSocketListener() {
         val id = deviceId
         socketOpen = true
         if (id != null) {
-            val hello = JSONObject().put("type", "hello").put("deviceId", id)
-            pairToken?.let { hello.put("token", it) }
-            webSocket.send(hello.toString())
+            webSocket.send(SignalEnvelope.hello(id, pairToken).toString())
         }
         stateListener?.onState(true)
     }
