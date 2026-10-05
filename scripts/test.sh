@@ -101,9 +101,9 @@ t2_server_unit() {
   fi
   cd "$ROOT/server" || return 1
   if [ "$COVERAGE" = 1 ]; then
-    node --test --experimental-test-coverage test/
+    node --test --experimental-test-coverage 'test/*.test.mjs'
   else
-    node --test test/
+    node --test 'test/*.test.mjs'
   fi
 }
 

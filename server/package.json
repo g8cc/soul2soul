@@ -6,8 +6,8 @@
   "engines": { "node": ">=16" },
   "scripts": {
     "start": "node src/index.js",
-    "test": "node --test test/",
-    "test:coverage": "node --test --experimental-test-coverage test/",
+    "test": "node --test 'test/*.test.mjs'",
+    "test:coverage": "node --test --experimental-test-coverage 'test/*.test.mjs'",
     "test:blackbox": "bash test/run-blackbox.sh"
   },
   "dependencies": {

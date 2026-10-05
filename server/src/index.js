@@ -12,6 +12,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { WebSocketServer, WebSocket } from 'ws';
+import { buildIceServers } from './turn.js';
 
 const PORT = Number(process.env.PORT || 8080);
 const TURN_STATIC_AUTH_SECRET = process.env.TURN_STATIC_AUTH_SECRET || 'change_me';
@@ -70,20 +71,10 @@ function send(ws, obj) {
   }
 }
 function iceServers() {
-  const unixSec = Math.floor(Date.now() / 1000) + 3600; // 1 小时有效
-  const username = `${unixSec}`;
-  const credential = crypto.createHmac('sha1', TURN_STATIC_AUTH_SECRET)
-    .update(username).digest('base64');
-  return [
-    { urls: [`stun:${TURN_HOST}:${TURN_PORT}`] },
-    {
-      urls: [
-        `turn:${TURN_HOST}:${TURN_PORT}?transport=udp`,
-        `turn:${TURN_HOST}:${TURN_PORT}?transport=tcp`,
-      ],
-      username, credential,
-    },
-  ];
+  // 纯逻辑在 turn.js（单测覆盖）：reverse-proxy 限时凭证 + stun/turn udp+tcp 三 urls
+  return buildIceServers({
+    secret: TURN_STATIC_AUTH_SECRET, host: TURN_HOST, port: TURN_PORT,
+  });
 }
 
 // ---------- WebSocket 服务 ----------
