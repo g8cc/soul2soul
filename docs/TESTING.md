@@ -8,8 +8,8 @@
 |---|---|---|---|---|
 | T0 | 静态检查 | `bash -n scripts/*.sh`；`node --check` 全部服务端 JS；AndroidManifest XML 良构（python minidom）；package.json JSON 校验 | 无 | ✅ |
 | T1 | Android JVM 单测 | `gradle -p app :app:testProdDebugUnitTest` | JDK17 + Gradle 8.7 | ✅ |
-| T2 | Server 单测 | `node --test 'test/*.test.mjs'`（pairing/turn 纯逻辑） | node ≥ 22 | ✅ |
-| T3 | 协议黑盒 | 随机空闲端口起临时服务器（`S2S_DATA_FILE=$(mktemp)`）→ 等 `/health` → `protocol-test.cjs`（17 项）+ `smoke-test.cjs`（15 项）→ trap 清理 | node | ✅ |
+| T2 | Server 单测 | `node --test 'test/*.test.mjs'`（pairing/turn/messages 纯逻辑） | node ≥ 22 | ✅ |
+| T3 | 协议黑盒 | 随机空闲端口起临时服务器（`S2S_DATA_FILE=$(mktemp)`）→ 等 `/health` → `protocol-test.cjs`（17 项）+ `smoke-test.cjs`（15 项）+ `msg-blackbox.cjs`（16 项：离线留言全链路含语音鉴权）→ trap 清理 | node | ✅ |
 | T4 | 模拟器/真机 E2E | 复用 `scripts/e2e.sh`，需 adb + ≥2 台已 boot 设备 | adb、设备 | ❌ 门控 |
 
 关键保证：**测试永不写 `server/data/pairings.json`**（T3 用临时数据文件），跑完无残留 node 进程。
@@ -133,6 +133,8 @@ bash scripts/test.sh --coverage
 | StrokeMapping (9) | video=0 回退；0.05 容差边界；往返一致 | FR-5 / §5 |
 | IceServerParser (7) | 多 urls；urls 缺失跳过；凭证携带 | §2.3 |
 | PairCodeBook (9) | +4999/+5000ms；旧码作废；第 5/6 次尝试；TTL ±1ms；sweep；self_pair | §2 防爆破（repo 常量） |
+| MessageBook (10) | 限速 999/1000ms；发件人隔离；text 500/501；voice 校验（bad id/时长）；list 时序+拷贝+过期；ack 只删自己；容量溢出丢最旧；forgetDevice 双向；sweep TTL±1ms；self/空收件人 | 离线留言（未发版） |
 | turn (5) | 固定 HMAC 向量（openssl 交叉验证）；udp+tcp；username 过期秒 | §2.3 |
+| InboxStore (6) | fromJson 语音字段保留/缺 id→null/kind 缺省；按 id 去重；received 排 mine+时序；conversation 合并时序；remove 只删收到的；回调次数+重复 addAll 不触发 | 离线留言（未发版） |
 
-> 括号内为用例数（2026-10 时点，合计 Kotlin 85 / node 14 / 黑盒 32）。
+> 括号内为用例数（2026-10 时点，合计 Kotlin 91 / node 24 / 黑盒 48）。
