@@ -65,6 +65,11 @@ soul2soul/
 | `ice` | 双向 | candidate:{candidate,sdpMid,sdpMLineIndex} | 原样转发 |
 | `bye` | 双向 | — | 挂断 |
 | `peer.gone` | S→C | — | 对方连接断开（服务器代发） |
+| `cancel` / `call.canceled` | C→S / S→C(对方) | — | 主叫在对方接听前撤呼 |
+| `app.diag` | C→S | role/model/os/sdk/app/notif/overlay/acc/mic/battery… | 会话能力自检矩阵，服务器只落 `[diag.selfcheck]` 日志、不转发 |
+| `app.version` | C→S | localCode/localName/remoteCode/remoteName/hasUpdate | 更新判定自检，服务器只落 `[diag.version]` 日志、不转发 |
+
+> 完整字段/限速/鉴权规则见 [`docs/PROTOCOL.md`](PROTOCOL.md)（以代码为准的线上协议参考）。
 
 `iceServers` 格式：`[{urls:[...]}, {urls:[...], username, credential}]`，
 TURN 凭证 = `HMAC-SHA1(secret, "<unix秒过期>")`，1 小时时限（coturn `use-auth-secret`）。
@@ -92,6 +97,8 @@ TURN 凭证 = `HMAC-SHA1(secret, "<unix秒过期>")`，1 小时时限（coturn `
 挂断：任一端 `bye` → 对方收到后释放全部资源；服务器检测到连接断开则代发 `peer.gone`。
 
 ## 3. 标注协议（DataChannel "anno"，reliable + ordered）
+
+> **勘误（2026-10）**：本节是 v1 设计稿，与线上实现不符。实际为：anno 通道**不可靠**（丢包不重传，收笔信号 300ms 幂等重发），另有可靠的 `ctl` 通道承载操控手势与被拒通知；消息以 `k:"s"/"p"/"e"/"clear"/"res"/"emoji"/"fx"/"g"…` 路由。**线上格式一律以 [`docs/PROTOCOL.md`](PROTOCOL.md) §3 为准。**
 
 | 消息 | 字段 | 说明 |
 |---|---|---|

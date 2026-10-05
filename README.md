@@ -48,6 +48,23 @@ cd app && ../gradlew assembleDebug -PS2S_SIGNALING_URL=ws://10.0.2.2:8080
 ../scripts/e2e.sh
 ```
 
+## 开发快速上手
+
+```bash
+# 1. 跑测试（分层 harness：静态/JVM单测/Server单测/协议黑盒，无需设备，约1分钟）
+bash scripts/test.sh
+
+# 2. 构建调试包（app/ 无 gradlew，用系统 Gradle + JDK17）
+export JAVA_HOME=/Users/wardonguo/tools/jdk17/jdk-17.0.2.jdk/Contents/Home
+~/tools/gradle-8.7/bin/gradle -p app assembleProdDebug
+adb install -r app/app/build/outputs/apk/prod/debug/app-prod-debug.apk
+
+# 3. 发版（构建 release → 上传自托管 APK 通道 → App 内自动更新生效）
+./scripts/publish-release.sh 0.2.23 23
+```
+
+- 工程约定/服务器漂移警告见根目录 `AGENTS.md`；测试怎么写见 `docs/TESTING.md`；线上协议以 `docs/PROTOCOL.md` 为准。
+
 ## 当前已知限制
 
 - 云服务器安全组未放行前，公网不可用（本地模拟器联调不受影响）
