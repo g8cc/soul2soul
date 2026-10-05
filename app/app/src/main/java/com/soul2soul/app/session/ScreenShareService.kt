@@ -10,7 +10,6 @@ import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.graphics.PointF
 import android.os.Build
-import android.os.SystemClock
 import android.util.Log
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
@@ -38,8 +37,6 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
     private val watchdog = android.os.Handler(android.os.Looper.getMainLooper())
     @Volatile private var micMuted = false
 
-    @Volatile private var lastCtlWarnAt = 0L
-    @Volatile private var lastCtlDenyAt = 0L
     @Volatile private var live = false
     private val pendingSignals = mutableListOf<JSONObject>()
 
@@ -52,15 +49,10 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
         override fun onReceive(context: Context, intent: android.content.Intent) {
             when (intent.action) {
                 android.content.Intent.ACTION_SCREEN_OFF -> if (live) {
-                    if (ctlAllowed) {
-                        ctlAllowed = false // 清醒时给的授权不跨锁屏存续，解锁后需重新点「允许TA操控」
-                        updateNotification(statusText())
-                        // 收回发生在观看端操控中途：立刻说清"为什么突然点不动了"，
-                        // 否则对方只会以为操控坏了（这正是"退出了还能操控/退出后不能操控"困惑的来源）
-                        runCatching {
-                            webRtc?.sendControl(org.json.JSONObject().put("k", "ctl_denied").put("reason", "screenoff"))
-                        }
-                    }
+                    // 清醒时给的授权不跨锁屏存续，解锁后需重新点「允许TA操控」。
+                    // 收回发生在观看端操控中途：立刻说清"为什么突然点不动了"，
+                    // 否则对方只会以为操控坏了（这正是"退出了还能操控/退出后不能操控"困惑的来源）
+                    dispatchConsent(consent.revokeOnScreenOff())
                     runCatching {
                         webRtc?.sendAnnotation(org.json.JSONObject().put("k", "screenoff"))
                     }
@@ -96,29 +88,18 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
             }
             ACTION_TOGGLE_CTL -> {
                 if (webRtc == null) { stopSelf(); return START_NOT_STICKY }
-                if (!ctlAllowed && !RemoteControlService.isReady()) {
-                    ctlToast(R.string.ctl_need_acc)
-                } else {
-                    ctlAllowed = !ctlAllowed
-                    ctlToast(if (ctlAllowed) R.string.ctl_enabled_toast else R.string.ctl_disabled_toast)
-                    if (!ctlAllowed) notifyCtlDenied() // 中途收回：正在操控的观看端立刻知道原因
-                    updateNotification(statusText())
-                }
+                dispatchConsent(consent.toggle(RemoteControlService.isReady()))
                 return START_NOT_STICKY
             }
             ACTION_SET_CTL -> {
                 // 授权对话框的确定性开关（比 toggle 更适合"当前状态→目标状态"）
                 if (webRtc == null) { stopSelf(); return START_NOT_STICKY }
-                val on = intent.getBooleanExtra(EXTRA_CTL_ON, false)
-                if (on && !RemoteControlService.isReady()) {
-                    ctlAllowed = false // 对话框乐观置了 true：服务拒绝就必须落回，否则状态与实况不符
-                    ctlToast(R.string.ctl_need_acc)
-                } else {
-                    ctlAllowed = on
-                    ctlToast(if (on) R.string.ctl_enabled_toast else R.string.ctl_disabled_toast)
-                    if (!on) notifyCtlDenied()
-                    updateNotification(statusText())
-                }
+                dispatchConsent(
+                    consent.setTarget(
+                        intent.getBooleanExtra(EXTRA_CTL_ON, false),
+                        RemoteControlService.isReady(),
+                    )
+                )
                 return START_NOT_STICKY
             }
         }
@@ -146,7 +127,7 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
         Presence.sessionBusy = true // 会话期间自动拒接新呼叫
         // 每次新会话必须从零开始收授权：服务实例若跨会话存活(onDestroy 未及时跑)，
         // 上一通话的"允许TA操控"绝不能带进这一通
-        ctlAllowed = false
+        consent.resetForNewSession()
         updateNotification(statusText())
         com.soul2soul.app.util.WifiKeeper.acquire(this) // WiFi 高性能锁：防省电断流
 
@@ -201,7 +182,7 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
     override fun onDestroy() {
         watchdog.removeCallbacks(screenOffStop)
         watchdog.removeCallbacksAndMessages(null) // 排队中的手势注入一并作废（服务已亡不再代表会话授权）
-        ctlAllowed = false
+        consent.resetForNewSession()
         runCatching { unregisterReceiver(screenReceiver) }
         scope.cancel()
         live = false
@@ -246,21 +227,24 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
 
     /** 远程操控手势（可靠 ctl 通道，整笔一条）：仅在用户允许时注入 */
     private fun handleGesture(json: JSONObject) {
-        if (!ctlAllowed) {
-            notifyCtlDenied() // 静默丢弃会让观看端误以为"操控坏了"：回一条被拒事件让横幅说话
-            return
+        when (val held = consent.heldCheck()) {
+            is CtlConsentMachine.Decision.Allow -> Unit
+            is CtlConsentMachine.Decision.Deny -> {
+                dispatchConsent(held.effects)
+                return
+            }
         }
         // dispatchGesture 要求带 Looper 的线程；WebRTC 回调在 signaling 线程
         watchdog.post {
             // 收回授权可能发生在入队之后：注入前必须以主线程上的最新状态再判一次
-            if (!ctlAllowed) { notifyCtlDenied(); return@post }
-            val pts = json.optJSONArray("pts") ?: return@post
-            if (!RemoteControlService.isReady()) {
-                ctlAllowed = false
-                ctlToast(R.string.ctl_need_acc)
-                notifyCtlDenied()
-                return@post
+            when (val pre = consent.preInjectCheck(RemoteControlService.isReady())) {
+                is CtlConsentMachine.Decision.Allow -> Unit
+                is CtlConsentMachine.Decision.Deny -> {
+                    dispatchConsent(pre.effects)
+                    return@post
+                }
             }
+            val pts = json.optJSONArray("pts") ?: return@post
             val list = ArrayList<PointF>(pts.length())
             for (i in 0 until pts.length()) {
                 val p = pts.optJSONArray(i) ?: continue
@@ -270,22 +254,21 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
         }
     }
 
-    private fun ctlToast(res: Int) {
-        val now = SystemClock.elapsedRealtime()
-        if (now - lastCtlWarnAt < 3000L) return // 手势连发时别把屏幕糊满 toast
-        lastCtlWarnAt = now
-        watchdog.post {
-            android.widget.Toast.makeText(this, res, android.widget.Toast.LENGTH_SHORT).show()
-        }
-    }
-
-    /** 被拒事件回灌观看端（4s 节流）：ctl 可靠通道，观看端在操控横幅上给出原因 */
-    private fun notifyCtlDenied() {
-        val now = SystemClock.elapsedRealtime()
-        if (now - lastCtlDenyAt < 4000L) return
-        lastCtlDenyAt = now
-        runCatching {
-            webRtc?.sendControl(org.json.JSONObject().put("k", "ctl_denied"))
+    /** 执行状态机产出的副作用：Toast/被拒回灌/通知栏刷新（节流判定已在状态机内完成） */
+    private fun dispatchConsent(effects: List<CtlConsentMachine.Effect>) {
+        for (e in effects) {
+            when (e) {
+                is CtlConsentMachine.Effect.Toast -> watchdog.post {
+                    android.widget.Toast.makeText(this, e.res, android.widget.Toast.LENGTH_SHORT).show()
+                }
+                is CtlConsentMachine.Effect.DeniedNotice -> runCatching {
+                    webRtc?.sendControl(org.json.JSONObject().put("k", "ctl_denied"))
+                }
+                is CtlConsentMachine.Effect.DeniedScreenOff -> runCatching {
+                    webRtc?.sendControl(org.json.JSONObject().put("k", "ctl_denied").put("reason", "screenoff"))
+                }
+                is CtlConsentMachine.Effect.RefreshNotification -> updateNotification(statusText())
+            }
         }
     }
 
@@ -317,7 +300,7 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
         watchdog.removeCallbacks(screenOffStop)
         setSpeakerphone(false)
         micMuted = false
-        ctlAllowed = false // 会话结束立即收回操控授权
+        consent.resetForNewSession() // 会话结束立即收回操控授权
         // 静音是发送轨属性，随 AudioSource 销毁而复位，无需再全局恢复系统麦克风
         com.soul2soul.app.util.WifiKeeper.release()
         if (sendBye) Presence.client.send("bye")
@@ -442,9 +425,13 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
         const val EXTRA_PROJECTION = "projection"
         private const val SCREEN_OFF_TIMEOUT_MS = 15_000L
 
-        /** 操控授权（会话级）：通知按钮与授权对话框都写这里，跨 Activity/Service 读取 */
-        @Volatile
-        var ctlAllowed = false
+        /** 操控授权状态机（会话级）：通知按钮与授权对话框都经它读写，跨 Activity/Service 共享 */
+        val consent = CtlConsentMachine { android.os.SystemClock.elapsedRealtime() }
+
+        /** ctlAllowed 是状态机的投影：读取点（对话框/通知栏）不变，对话框乐观写转交状态机 */
+        var ctlAllowed: Boolean
+            get() = consent.allowed
+            set(value) = consent.optimisticSet(value)
 
         // 会话级单例：生命周期与 ScreenShareService 完全绑定（onDestroy 清空），不构成泄漏
         @Suppress("StaticFieldLeak")
