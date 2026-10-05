@@ -448,29 +448,20 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
     }
 
     private fun handleSignal(json: JSONObject) {
-        when (json.optString("type")) {
-            "sdp" -> {
-                if (client == null) pendingSignals += json else dispatchToClient(json)
+        when (val action = SignalRouter.routeSignal(json.optString("type"), accepted, client != null)) {
+            SignalRouter.SignalAction.None -> Unit
+            SignalRouter.SignalAction.BufferMedia -> pendingSignals += json
+            SignalRouter.SignalAction.DispatchMedia -> dispatchToClient(json)
+            is SignalRouter.SignalAction.PeerEnded -> {
+                endedRemotely = true
+                finishWithCleanup(sendBye = false, notice = action.noticeRes)
             }
-            "ice" -> if (client == null) pendingSignals += json else dispatchToClient(json)
-            // 迟到的 bye/取消（上一轮呼叫的回声）：未接听状态下忽略，别把新页面误杀
-            "bye" -> {
-                if (accepted) {
-                    endedRemotely = true
-                    finishWithCleanup(sendBye = false, notice = R.string.peer_ended)
-                }
-            }
-            "peer.gone" -> {
-                if (accepted) {
-                    endedRemotely = true
-                    finishWithCleanup(sendBye = false, notice = R.string.peer_lost)
-                }
-            }
-            "call.canceled" -> if (!accepted) {
+            SignalRouter.SignalAction.CallerCanceledBeforeAccept -> {
                 stopRinging()
                 android.widget.Toast.makeText(this, R.string.peer_canceled, android.widget.Toast.LENGTH_SHORT).show()
                 finish()
-            } else {
+            }
+            SignalRouter.SignalAction.CanceledAfterAccept -> {
                 // 主叫在授权阶段反悔: 别让人对着"连接中"数 30 秒
                 endedRemotely = true
                 android.widget.Toast.makeText(this, R.string.peer_canceled, android.widget.Toast.LENGTH_SHORT).show()
@@ -504,22 +495,25 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
 
     /** 共享端 DataChannel 状态通知（锁屏等），在观看端显示明确状态 */
     override fun onDataMessage(json: JSONObject) {
-        when (json.optString("k")) {
-            "screenoff" -> runOnUiThread {
-                tvState.visibility = View.VISIBLE
-                tvState.setText(R.string.peer_screen_off)
-            }
-            "screenon" -> runOnUiThread {
-                if (live) tvState.visibility = View.GONE
-            }
-            // 对方锁屏/收回授权：手势被静默丢弃时横幅必须说明原因，
-            // 否则操控端只会以为"功能坏了"（历史工单：退出后不能操控=这个）
-            "ctl_denied" -> runOnUiThread {
-                if (!overlay.controlMode) return@runOnUiThread
-                val banner = findViewById<TextView>(R.id.tvCtlMode)
-                banner.setText(R.string.ctl_revoked_banner)
-                mainHandler.removeCallbacks(restoreCtlBanner)
-                mainHandler.postDelayed(restoreCtlBanner, 5000)
+        runOnUiThread {
+            // 判据（controlMode/live）与 UI 更新同在主线程：与提取前的读取时序一致
+            when (val action = SignalRouter.routeData(json.optString("k"), overlay.controlMode, live)) {
+                SignalRouter.DataAction.None -> Unit
+                SignalRouter.DataAction.PeerScreenOff -> {
+                    tvState.visibility = View.VISIBLE
+                    tvState.setText(R.string.peer_screen_off)
+                }
+                SignalRouter.DataAction.HideBanner -> {
+                    // 对方锁屏/收回授权：手势被静默丢弃时横幅必须说明原因，
+                    // 否则操控端只会以为"功能坏了"（历史工单：退出后不能操控=这个）
+                    tvState.visibility = View.GONE
+                }
+                SignalRouter.DataAction.RevokedBanner -> {
+                    val banner = findViewById<TextView>(R.id.tvCtlMode)
+                    banner.setText(R.string.ctl_revoked_banner)
+                    mainHandler.removeCallbacks(restoreCtlBanner)
+                    mainHandler.postDelayed(restoreCtlBanner, 5000)
+                }
             }
         }
     }
