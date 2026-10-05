@@ -13,6 +13,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { WebSocketServer, WebSocket } from 'ws';
 import { buildIceServers } from './turn.js';
+import { PairCodeBook } from './pairing.js';
 
 const PORT = Number(process.env.PORT || 8080);
 const TURN_STATIC_AUTH_SECRET = process.env.TURN_STATIC_AUTH_SECRET || 'change_me';
@@ -47,17 +48,16 @@ function savePairings() {
 
 // ---------- 运行时状态 ----------
 const online = new Map();           // deviceId -> WebSocket
-const pendingPairCodes = new Map(); // code -> { deviceId, expires }
+// 配对码本（纯逻辑在 pairing.js，单测覆盖）：限速/旧码作废/尝试上限/TTL 常量在此注入
+const pairBook = new PairCodeBook({
+  ttlMs: PAIR_CODE_TTL_MS,
+  requestMinIntervalMs: PAIR_REQUEST_MIN_INTERVAL_MS,
+  maxEnterAttempts: PAIR_ENTER_MAX_ATTEMPTS,
+});
 const lastInviteAt = new Map();     // deviceId -> 上次 invite 时间戳
-const lastPairRequestAt = new Map();// deviceId -> 上次 pair.request 时间戳
 
 // 清扫过期配对码：只在 enter 时判断过期的话，从不再使用的码会永久滞留（慢性内存泄漏）
-setInterval(() => {
-  const now = Date.now();
-  for (const [code, entry] of pendingPairCodes) {
-    if (entry.expires < now) pendingPairCodes.delete(code);
-  }
-}, 60 * 1000).unref();
+setInterval(() => pairBook.sweep(), 60 * 1000).unref();
 
 function pairingOf(deviceId) { return pairings[deviceId] || null; }
 function peerDeviceId(deviceId) { return pairings[deviceId]?.peer || null; }
@@ -137,40 +137,17 @@ wss.on('connection', (ws) => {
     switch (type) {
       // ---- 配对 ----
       case 'pair.request': {
-        const now = Date.now();
-        if (now - (lastPairRequestAt.get(ws.deviceId) || 0) < PAIR_REQUEST_MIN_INTERVAL_MS) {
-          send(ws, { type: 'pair.failed', reason: 'too_fast' });
-          break;
-        }
-        lastPairRequestAt.set(ws.deviceId, now);
-        // 每设备最多 1 个有效码：申请新码即撤销旧码（码表规模有上界）
-        for (const [c, e] of pendingPairCodes) {
-          if (e.deviceId === ws.deviceId) pendingPairCodes.delete(c);
-        }
-        const code = String(crypto.randomInt(0, 1000000)).padStart(6, '0');
-        pendingPairCodes.set(code, { deviceId: ws.deviceId, expires: Date.now() + PAIR_CODE_TTL_MS });
-        send(ws, { type: 'pair.code', code });
+        const r = pairBook.request(ws.deviceId);
+        if (r.out === 'failed') { send(ws, { type: 'pair.failed', reason: r.reason }); break; }
+        send(ws, { type: 'pair.code', code: r.code });
         break;
       }
       case 'pair.enter': {
-        if (ws.pairAttempts >= PAIR_ENTER_MAX_ATTEMPTS) {
-          send(ws, { type: 'pair.failed', reason: 'too_many_attempts' });
-          break;
-        }
-        ws.pairAttempts += 1;
-        const code = String(msg.code || '');
-        const pending = pendingPairCodes.get(code);
-        if (!pending || pending.expires < Date.now()) {
-          send(ws, { type: 'pair.failed', reason: 'code_invalid' }); break;
-        }
-        if (pending.deviceId === ws.deviceId) {
-          send(ws, { type: 'pair.failed', reason: 'self_pair' }); break;
-        }
-        const a = pending.deviceId, b = ws.deviceId;
-        const token = crypto.randomBytes(16).toString('hex');
+        const r = pairBook.enter(ws, ws.deviceId, msg.code);
+        if (r.out === 'failed') { send(ws, { type: 'pair.failed', reason: r.reason }); break; }
+        const { a, b, token } = r;
         pairings[a] = { peer: b, token };
         pairings[b] = { peer: a, token };
-        pendingPairCodes.delete(code);
         savePairings();
         const wa = online.get(a), wb = online.get(b);
         // 配对成功即视为鉴权通过；客户端会把 token 存下来用于之后的 hello
@@ -251,7 +228,7 @@ wss.on('connection', (ws) => {
   ws.on('close', () => {
     if (ws.deviceId && online.get(ws.deviceId) === ws) {
       online.delete(ws.deviceId);
-      lastPairRequestAt.delete(ws.deviceId);
+      pairBook.forgetDevice(ws.deviceId);
       lastInviteAt.delete(ws.deviceId);
       const peer = peerDeviceId(ws.deviceId);
       if (peer) send(online.get(peer), { type: 'peer.gone' });
