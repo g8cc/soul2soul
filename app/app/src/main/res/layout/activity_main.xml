@@ -96,6 +96,16 @@
                 android:textColor="@color/white"
                 android:textSize="20sp" />
 
+            <Button
+                android:id="@+id/btnMessage"
+                android:layout_width="match_parent"
+                android:layout_height="52dp"
+                android:layout_marginTop="12dp"
+                android:background="@drawable/bg_card"
+                android:text="@string/msg_button"
+                android:textColor="@color/primary"
+                android:textSize="16sp" />
+
             <TextView
                 android:id="@+id/btnUnpair"
                 android:layout_width="wrap_content"

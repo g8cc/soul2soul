@@ -63,10 +63,16 @@ class MainActivity : AppCompatActivity() {
     private lateinit var boxSharing: View
     private lateinit var tvMyCode: TextView
     private lateinit var btnCall: Button
+    private lateinit var btnMessage: Button
     private lateinit var permNotification: View
     private lateinit var permMic: View
     private lateinit var permOverlay: View
     private lateinit var permAccessibility: View
+
+    /** 留言箱变化（含后台经 PresenceService 收到的）实时刷主页角标 */
+    private val inboxListener: () -> Unit = {
+        runOnUiThread { if (!isDestroyed) updateUi() }
+    }
 
     private val projectionLauncher =
         registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
@@ -138,6 +144,7 @@ class MainActivity : AppCompatActivity() {
         boxSharing = findViewById(R.id.boxSharing)
         tvMyCode = findViewById(R.id.tvMyCode)
         btnCall = findViewById(R.id.btnCall)
+        btnMessage = findViewById(R.id.btnMessage)
         permNotification = findViewById(R.id.permNotification)
         permMic = findViewById(R.id.permMic)
         permOverlay = findViewById(R.id.permOverlay)
@@ -157,6 +164,9 @@ class MainActivity : AppCompatActivity() {
             boxSharing.postDelayed({ updateUi() }, 500)
         }
         btnCall.setOnClickListener { onCallClicked() }
+        btnMessage.setOnClickListener {
+            startActivity(Intent(this, com.soul2soul.app.msg.MessageActivity::class.java))
+        }
         findViewById<View>(R.id.btnUnpair).setOnClickListener { showUnpairDialog() }
         findViewById<View>(R.id.btnUpdate).setOnClickListener { showUpdateDialog() }
         // 更新检查统一在 onResume（冷启动也会走到）
@@ -176,6 +186,12 @@ class MainActivity : AppCompatActivity() {
         lifecycleScope.launch {
             SignalBus.events.collect { handleSignal(it) }
         }
+        com.soul2soul.app.msg.InboxStore.addListener(inboxListener)
+    }
+
+    override fun onDestroy() {
+        com.soul2soul.app.msg.InboxStore.removeListener(inboxListener)
+        super.onDestroy()
     }
 
     private fun handleSignal(json: JSONObject) {
@@ -263,9 +279,25 @@ class MainActivity : AppCompatActivity() {
             "peer.offline" -> {
                 callTimeout.removeCallbacksAndMessages(null)
                 cancelOutgoing()
-                toast(R.string.peer_offline)
+                val reason = json.optString("reason")
+                if (reason.isEmpty()) showLeaveMessageDialog() else toast(R.string.peer_offline)
                 updateUi()
             }
+            "msg.inbox" -> updateUi()
+            "msg.new" -> {
+                toast(R.string.msg_arrived)
+                updateUi()
+            }
+            "msg.failed" -> {
+                val res = when (json.optString("reason")) {
+                    "too_fast" -> R.string.msg_fail_too_fast
+                    "too_long" -> R.string.msg_fail_too_long
+                    "empty" -> R.string.msg_fail_empty
+                    else -> R.string.msg_fail_generic
+                }
+                toast(res)
+            }
+            "msg.sent" -> { /* 送达回执：语音/文字上屏由本地乐观添加完成，无需处理 */ }
             "unpaired" -> {
                 // 被对端解除配对（或自己发起后服务端确认）
                 callTimeout.removeCallbacksAndMessages(null)
@@ -273,6 +305,7 @@ class MainActivity : AppCompatActivity() {
                 Prefs.setPaired(this, false)
                 Prefs.setPairToken(this, null)
                 Presence.client.setPairToken(null)
+                com.soul2soul.app.msg.InboxStore.clear() // 留言箱随配对关系统一清空
                 peerOnline = false
                 toast(R.string.unpaired_done)
                 updateUi()
@@ -346,6 +379,19 @@ class MainActivity : AppCompatActivity() {
         updateUi()
         // 先授权屏幕、后邀请：对方一接听立刻出画面，中间无授权间隙
         requestScreenCapture()
+    }
+
+    /** 对方不在线时的出路：引导去留言（无厂商推送，留言在对方打开 App 时送达） */
+    private fun showLeaveMessageDialog() {
+        if (isFinishing || isDestroyed) return
+        AlertDialog.Builder(this)
+            .setTitle(R.string.msg_peer_offline_title)
+            .setMessage(R.string.msg_peer_offline_msg)
+            .setPositiveButton(R.string.msg_goto) { _, _ ->
+                startActivity(Intent(this, com.soul2soul.app.msg.MessageActivity::class.java))
+            }
+            .setNegativeButton(R.string.msg_got_it, null)
+            .show()
     }
 
     /** 解除配对：换绑设备/测试切换用。解绑后双方都回到未配对状态，需重新走配对码 */
@@ -557,6 +603,12 @@ class MainActivity : AppCompatActivity() {
         boxReady.visibility = if (paired && !sharing) View.VISIBLE else View.GONE
         boxSharing.visibility = if (sharing) View.VISIBLE else View.GONE
         btnCall.text = if (outgoingPending) getString(R.string.btn_cancel_call) else getString(R.string.btn_call)
+        val unread = com.soul2soul.app.msg.InboxStore.received().size
+        btnMessage.text = if (unread > 0) {
+            getString(R.string.msg_button) + "（$unread）"
+        } else {
+            getString(R.string.msg_button)
+        }
         tvStatus.setText(
             when {
                 !paired -> R.string.status_unpaired

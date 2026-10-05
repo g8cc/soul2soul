@@ -173,6 +173,19 @@ class PresenceService : Service() {
                 Prefs.setPaired(this, false)
                 Prefs.setPairToken(this, null)
                 Presence.client.setPairToken(null)
+                com.soul2soul.app.msg.InboxStore.clear()
+            }
+            "msg.inbox" -> {
+                // 上线送达的留言箱：由常驻服务入库（UI 可能根本不存在），已读删除在留言页完成
+                val arr = json.optJSONArray("items") ?: return
+                val list = (0 until arr.length()).mapNotNull {
+                    com.soul2soul.app.msg.Msg.fromJson(arr.optJSONObject(it), mine = false)
+                }
+                com.soul2soul.app.msg.InboxStore.addAll(list)
+            }
+            "msg.new" -> {
+                com.soul2soul.app.msg.Msg.fromJson(json, mine = false)
+                    ?.let { com.soul2soul.app.msg.InboxStore.add(it) }
             }
         }
     }

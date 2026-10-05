@@ -102,4 +102,33 @@
     <string name="guide_xiaomi">小米手机请到「设置 → 应用设置 → 陪着你」：开启 自启动、省电策略设为无限制、其他权限里开「后台弹出界面」。否则 TA 召唤你时可能收不到。</string>
     <string name="guide_huawei">华为手机请到「设置 → 应用 → 应用启动管理 → 陪着你」：关闭自动管理，手动允许 自启动 / 关联启动 / 后台活动。否则 TA 召唤你时可能收不到。</string>
     <string name="guide_generic">请在系统设置里允许本 App 自启动、后台运行和电池无限制，否则 TA 召唤你时可能收不到。</string>
+    <!-- 离线留言 -->
+    <string name="msg_button">给TA留言</string>
+    <string name="msg_back">‹ 返回</string>
+    <string name="msg_title">给TA的留言</string>
+    <string name="msg_empty">还没有留言。TA 不在线时，你可以先说给 TA 听；TA 打开 App 就能看到、也能回你。</string>
+    <string name="msg_hint">想对TA说的话…</string>
+    <string name="msg_send">发送</string>
+    <string name="msg_rec">🎙 语音</string>
+    <string name="msg_rec_stop">⏹ %1$s″</string>
+    <string name="msg_sending">上传中…</string>
+    <string name="msg_need_mic">要先允许麦克风权限，才能录语音哦</string>
+    <string name="msg_rec_failed">录音没成功，再试一次？</string>
+    <string name="msg_rec_too_short">话太短啦，按住多说几个字</string>
+    <string name="msg_send_failed">语音没发出去，检查一下网络再试试</string>
+    <string name="msg_not_connected">还没连上服务器，稍等一下再发吧</string>
+    <string name="msg_voice_loading">下载中…</string>
+    <string name="msg_voice_play">🔊 语音 %1$d″ · 点按播放</string>
+    <string name="msg_voice_playing">🔊 播放中 · 点按停止</string>
+    <string name="msg_voice_failed">语音没下载下来，检查网络再试试</string>
+    <string name="msg_peer_offline_title">TA 现在不在线</string>
+    <string name="msg_peer_offline_msg">要不要给 TA 留个言？TA 打开 App 就能看到，也能回你。</string>
+    <string name="msg_goto">去留言</string>
+    <string name="msg_got_it">知道了</string>
+    <string name="msg_arrived">TA 给你留了言，快去看看 ❤️</string>
+    <string name="msg_fail_too_fast">发得太快啦，歇一秒再发</string>
+    <string name="msg_fail_too_long">留言太长啦，最多 500 个字</string>
+    <string name="msg_fail_empty">还没写字呢～</string>
+    <string name="msg_fail_generic">留言没发出去，稍后再试试</string>
 </resources>
+

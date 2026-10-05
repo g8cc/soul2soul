@@ -61,6 +61,12 @@
             android:supportsPictureInPicture="true"
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden" />
 
+        <!-- 离线留言：文字/语音信箱（阅后即删，无本地持久化） -->
+        <activity
+            android:name=".msg.MessageActivity"
+            android:exported="false"
+            android:windowSoftInputMode="adjustResize" />
+
         <!-- 操控授权对话框：共享通知的点击入口（FGS 通知动作按钮在 HyperOS 上常被折叠看不见） -->
         <activity
             android:name=".session.CtlConsentActivity"
