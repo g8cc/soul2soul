@@ -94,6 +94,16 @@ bash scripts/test.sh --coverage
 
 诚实的覆盖率预期：提取出的纯逻辑类 90%+ 行覆盖；app 整体 15–30%（Activity/Service/WebRTC 壳层留给 T4 与真机）；server pairing/turn 模块 70–85%。
 
+实测基线（2026-10，v0.2.23 首跑 `--coverage`，jacoco 经 Aliyun 镜像下载成功）：
+
+| 对象 | 行覆盖 |
+|---|---|
+| GestureIntent / CtlConsentMachine / SignalRouter / VersionManifest / SignalEnvelope / StrokeMapping / IceServerParser | 100% |
+| OverlayGestureEngine | 96%（143/149） |
+| server/pairing.js | 100%（分支 95.2%） |
+| server/turn.js | 100% |
+| app 四包整体（session/signaling/util/webrtc） | 10.8%（289/2674；壳层未覆盖所致，低于原 15–30% 预期，如实记录） |
+
 ## 6. T4（E2E）前置
 
 - `adb devices` ≥ 2 台且均已 boot（当前常态是 Mi5 + Mi15 真机或模拟器双开）；
