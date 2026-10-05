@@ -9,7 +9,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
-import org.json.JSONObject
 import java.io.File
 
 /**
@@ -32,12 +31,7 @@ object Updater {
     fun check(): Info? = runCatching {
         http.newCall(Request.Builder().url(VERSION_URL).build()).execute().use { resp ->
             if (!resp.isSuccessful) return null
-            val json = JSONObject(resp.body!!.string())
-            Info(
-                versionCode = json.optInt("versionCode", 0),
-                versionName = json.optString("versionName", ""),
-                url = json.optString("url", ""),
-            )
+            VersionManifest.parse(resp.body!!.string())
         }
     }.onFailure { Log.w(TAG, "check failed", it) }.getOrNull()
 

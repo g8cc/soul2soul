@@ -371,7 +371,7 @@ class MainActivity : AppCompatActivity() {
             Log.d(TAG, "update check: remote=${info.versionCode} local=$local")
             reportVersionDiag(info, local)
             val btn = findViewById<TextView>(R.id.btnUpdate)
-            if (info.versionCode > local) {
+            if (com.soul2soul.app.util.VersionManifest.hasUpdate(local, info)) {
                 pendingUpdateInfo = info
                 btn.visibility = View.VISIBLE
                 btn.text = getString(R.string.update_available_short) + " v" + info.versionName
@@ -395,7 +395,7 @@ class MainActivity : AppCompatActivity() {
                     put("localName", BuildConfig.VERSION_NAME)
                     put("remoteCode", info.versionCode)
                     put("remoteName", info.versionName)
-                    put("hasUpdate", info.versionCode > local)
+                    put("hasUpdate", com.soul2soul.app.util.VersionManifest.hasUpdate(local, info))
                 }
             }
         }
