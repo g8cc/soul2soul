@@ -19,3 +19,6 @@ server/turn/.env
 dist/
 keystore/
 keystore.properties
+
+# 本机 Agent 权限配置（含机器路径，不入库）
+.qoder/settings.local.json
