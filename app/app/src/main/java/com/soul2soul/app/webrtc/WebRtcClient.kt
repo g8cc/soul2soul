@@ -2,6 +2,7 @@ package com.soul2soul.app.webrtc
 
 import android.content.Context
 import android.content.Intent
+import android.media.audiofx.AudioEffect
 import android.util.Log
 import com.soul2soul.app.App
 import org.json.JSONObject
@@ -56,15 +57,22 @@ class WebRtcClient(
 
     private val eglContext = App.instance.eglBase.eglBaseContext
     private val audioModule: org.webrtc.audio.JavaAudioDeviceModule =
-        org.webrtc.audio.JavaAudioDeviceModule.builder(context)
-            // 通话音源：路由到设备的通话音频通路
-            .setAudioSource(android.media.MediaRecorder.AudioSource.VOICE_COMMUNICATION)
-            // 声学策略：回声消除用软件 AEC3（稳定可控）；
-            // 噪声抑制走设备硬件 DSP（对稳态环境声压制更强，软件 NS 对键盘/磕碰类瞬态声无效——
-            // 那部分靠硬件 DSP + 增益控制，极端场景需耳机，微信亦如此）
-            .setUseHardwareAcousticEchoCanceler(false)
-            .setUseHardwareNoiseSuppressor(true)
-            .createAudioDeviceModule()
+        // 啸叫(尖锐声不断变大)=「扬声器→自己麦克风」的正反馈环，只有 AEC 能掐断，NS 挡不住。
+        // 软件 AEC3 依赖系统上报准确的播放延迟，MIUI 上经常偏差过大 → 对齐失败 ≈ 没有 AEC。
+        // 因此设备支持时改走系统 DSP 硬件回声消除（即"打电话不啸叫"的那条链路）；
+        // 硬件 NS 只在同一 DSP 链路上启用——纯软 AEC3 时叠加硬件 NS 会进一步破坏线性对齐。
+        run {
+            // 本机 SDK jar 无 android.media.AudioEffect（被裁剪），用 audiofx 桩里的 queryEffects 探测
+            val hwAec = runCatching {
+                AudioEffect.queryEffects()?.any { it.type == AudioEffect.EFFECT_TYPE_AEC } == true
+            }.getOrDefault(false)
+            Log.i(TAG, "audio: hardwareAEC=$hwAec")
+            org.webrtc.audio.JavaAudioDeviceModule.builder(context)
+                .setAudioSource(android.media.MediaRecorder.AudioSource.VOICE_COMMUNICATION)
+                .setUseHardwareAcousticEchoCanceler(hwAec)
+                .setUseHardwareNoiseSuppressor(hwAec)
+                .createAudioDeviceModule()
+        }
     private val factory: PeerConnectionFactory = PeerConnectionFactory.builder()
         .setAudioDeviceModule(audioModule)
         .setVideoEncoderFactory(DefaultVideoEncoderFactory(eglContext, true, true))

@@ -521,6 +521,7 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
             }
             overlay.videoWidth = width
             overlay.videoHeight = height
+            applyRendererFitLayout(width, height)
             if (changed) {
                 val (sw, sh) = com.soul2soul.app.util.ScreenSize.real(this)
                 Log.d(
@@ -530,6 +531,32 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
                 )
             }
         }
+    }
+
+    /**
+     * 把渲染 View 缩成"视频等比适配"后的实际矩形并居中（SCALE_ASPECT_FIT 的等效几何）。
+     * 原因：letterbox 若只靠 GL 留边实现，MIUI 合成层会把视频 SurfaceView 拉伸铺满、
+     * 裁掉留边和画面底部；视图比例=内容比例后，任何合成都无从裁切。
+     * DrawingOverlayView 的 fitRect 触控映射基于同一公式，缩放后仍然对齐。
+     */
+    private fun applyRendererFitLayout(width: Int, height: Int) {
+        val parent = renderer.parent as? View ?: return
+        val pw = parent.width
+        val ph = parent.height
+        if (width <= 0 || height <= 0) return
+        if (pw <= 0 || ph <= 0) {
+            parent.post { applyRendererFitLayout(width, height) }
+            return
+        }
+        val scale = minOf(pw.toFloat() / width, ph.toFloat() / height)
+        val w = Math.round(width * scale)
+        val h = Math.round(height * scale)
+        val lp = renderer.layoutParams as? android.widget.FrameLayout.LayoutParams ?: return
+        if (lp.width == w && lp.height == h && lp.gravity == android.view.Gravity.CENTER) return
+        lp.width = w
+        lp.height = h
+        lp.gravity = android.view.Gravity.CENTER
+        renderer.layoutParams = lp
     }
 
     /** 共享端 DataChannel 状态通知（锁屏等），在观看端显示明确状态 */

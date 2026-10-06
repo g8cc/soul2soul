@@ -4,6 +4,9 @@
     android:layout_height="match_parent"
     android:background="@drawable/bg_call">
 
+    <!-- MIUI 合成层会对视频 SurfaceView 做"铺满拉伸"，无视 GL letterbox → 底部被裁。
+         SessionActivity 在收到远端视频尺寸后把本 View 缩成视频等比尺寸并居中，
+         视图比例=内容比例，任何 ROM 合成都裁不掉内容 -->
     <org.webrtc.SurfaceViewRenderer
         android:id="@+id/renderer"
         android:layout_width="match_parent"
