@@ -120,5 +120,5 @@
 ## 5. 已知漂移与勘误
 
 - **SPEC.md §3 标注协议表过时**：早期设计为 `stroke.start / stroke.p / stroke.end / anno.clear`（且通道为 reliable+ordered），线上实际是 anno 走**不可靠**通道、字段 `k:"s"/"p"/"e"/"clear"`（另有 emoji/fx/res 等扩展）。以本文 §3.1 为准。
-- **服务端常量漂移**：repo 为 `PAIR_CODE_TTL=10min / ENTER 尝试上限=5`；**生产运行的是 hotfix 值 30min/10**。单测锁定的是 repo 行为；部署前必须先人工比对，禁止 naive 覆盖（见根目录 AGENTS.md）。
-- **离线留言（msg.*、HTTP /voice）仅存在于 repo**：截至 v0.2.23 生产服务器尚无留言箱代码，上线前旧客户端对新信号只是忽略（unknown type 静默丢弃），不会崩；但客户端留言功能须与服务器改动同批部署。
+- **服务端常量配置**：repo 代码默认 `PAIR_CODE_TTL=10min / ENTER 尝试上限=5`；生产经 `.env` 注入 `PAIR_CODE_TTL_MS=1800000 / PAIR_ENTER_MAX_ATTEMPTS=10`（`4ce2928` 起 hotfix 已回灌为 env 可配，源码不再漂移）。单测锁定的是 repo 默认行为；部署时仍需人工核对线上 env 值（见根目录 AGENTS.md）。
+- **离线留言（msg.*、HTTP /voice）**：生产服务器已于 2026-10-06 部署；旧客户端（≤v0.2.23）收到新信号只是忽略（unknown type 静默丢弃），留言功能需 v0.2.24 客户端。

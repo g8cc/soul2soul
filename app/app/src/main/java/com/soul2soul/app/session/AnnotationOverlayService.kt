@@ -99,8 +99,8 @@ class AnnotationOverlayService : Service() {
     }
 
     private fun layoutWindow(cv: OverlayCanvasView, fullWanted: Boolean) {
-        val screenW = resources.displayMetrics.widthPixels
-        val screenH = resources.displayMetrics.heightPixels
+        // 真实显示尺寸：悬浮窗坐标是全屏幕，app 视角 dm 会让笔迹整体上偏
+        val (screenW, screenH) = com.soul2soul.app.util.ScreenSize.real(this)
         val attached = cv.parent != null
         val rect: Rect = if (fullWanted || !attached && cv.strokesBboxN() == null) {
             Rect(0, 0, screenW, screenH)
@@ -112,7 +112,7 @@ class AnnotationOverlayService : Service() {
         val lp = WindowManager.LayoutParams(
             rect.width(),
             rect.height(),
-            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+            overlayWindowType(),
             WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
                 or WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
             PixelFormat.TRANSLUCENT,
@@ -162,6 +162,14 @@ class AnnotationOverlayService : Service() {
         }
         return Rect(l, t, r, b)
     }
+
+    /** TYPE_APPLICATION_OVERLAY 是 API 26+ 类型，Android 7/8 以下挂它会被 WindowManager 直接拒绝（Mi5 悬浮窗"无效"根因） */
+    @Suppress("DEPRECATION")
+    private fun overlayWindowType(): Int =
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O)
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+        else
+            WindowManager.LayoutParams.TYPE_PHONE
 
     private fun maybeRemoveCanvas() {
         val cv = canvas ?: return

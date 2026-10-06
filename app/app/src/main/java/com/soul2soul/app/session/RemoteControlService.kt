@@ -73,15 +73,16 @@ class RemoteControlService : AccessibilityService() {
                 Log.d(TAG, "performGlobalAction action=$target (raw=$action) ok=$ok")
                 return ok
             }
-            val dm = svc.resources.displayMetrics
+            // 真实显示尺寸：dispatchGesture 的坐标系是全屏幕，用 app 视角 dm 会整体偏小、底部点不到
+            val (screenW, screenH) = com.soul2soul.app.util.ScreenSize.real(svc)
             val path = Path()
             var prevX = 0f
             var prevY = 0f
             pts.forEachIndexed { i, p ->
-                val x = (p.x * dm.widthPixels)
-                    .coerceIn(1f, (dm.widthPixels - 1).toFloat())
-                val y = (p.y * dm.heightPixels)
-                    .coerceIn(1f, (dm.heightPixels - 1).toFloat())
+                val x = (p.x * screenW)
+                    .coerceIn(1f, (screenW - 1).toFloat())
+                val y = (p.y * screenH)
+                    .coerceIn(1f, (screenH - 1).toFloat())
                 if (i == 0) path.moveTo(x, y) else path.lineTo(x, y)
                 prevX = x
                 prevY = y

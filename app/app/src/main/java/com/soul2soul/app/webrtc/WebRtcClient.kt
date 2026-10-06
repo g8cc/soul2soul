@@ -139,11 +139,11 @@ class WebRtcClient(
         val source = factory.createVideoSource(true) // isScreencast: 启用内容编码模式
         videoSource = source
 
-        val metrics = context.resources.displayMetrics
-        val longEdge = maxOf(metrics.widthPixels, metrics.heightPixels)
-        val scale = minOf(1f, captureLongEdge.toFloat() / longEdge)
-        val w = (metrics.widthPixels * scale).toInt() / 2 * 2
-        val h = (metrics.heightPixels * scale).toInt() / 2 * 2
+        // 真实显示尺寸：displayMetrics 在全面屏上是 app 视角、少一截，采集会裁掉导航条区域
+        val (sw, sh) = com.soul2soul.app.util.ScreenSize.real(context)
+        val scale = minOf(1f, captureLongEdge.toFloat() / maxOf(sw, sh))
+        val w = (sw * scale).toInt() / 2 * 2
+        val h = (sh * scale).toInt() / 2 * 2
         val helper = SurfaceTextureHelper.create("s2s-capture", eglContext)
         surfaceHelper = helper
         // 计帧观察者：只透传不碰引用计数（在轨道上加 Sink 会破坏 VideoFrame 引用计数导致崩溃）
@@ -226,11 +226,11 @@ class WebRtcClient(
     private fun applyCaptureLongEdge(edge: Int) {
         captureLongEdge = edge
         val capturer = capturer ?: return
-        val metrics = context.resources.displayMetrics
-        val longEdge = maxOf(metrics.widthPixels, metrics.heightPixels)
-        val scale = minOf(1f, captureLongEdge.toFloat() / longEdge)
-        val w = (metrics.widthPixels * scale).toInt() / 2 * 2
-        val h = (metrics.heightPixels * scale).toInt() / 2 * 2
+        // 真实显示尺寸：displayMetrics 在全面屏上是 app 视角、少一截，采集会裁掉导航条区域
+        val (sw, sh) = com.soul2soul.app.util.ScreenSize.real(context)
+        val scale = minOf(1f, captureLongEdge.toFloat() / maxOf(sw, sh))
+        val w = (sw * scale).toInt() / 2 * 2
+        val h = (sh * scale).toInt() / 2 * 2
         runCatching {
             capturer.stopCapture()
             capturer.startCapture(w, h, CAPTURE_FPS)
