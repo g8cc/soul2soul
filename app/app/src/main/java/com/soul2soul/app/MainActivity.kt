@@ -530,14 +530,11 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showEnterCodeDialog() {
-        val input = EditText(this).apply {
-            hint = getString(R.string.enter_code_hint)
-            inputType = android.text.InputType.TYPE_CLASS_NUMBER
-            filters = arrayOf(android.text.InputFilter.LengthFilter(6))
-        }
+        val view = layoutInflater.inflate(R.layout.dialog_enter_code, null)
+        val input = view.findViewById<EditText>(R.id.etCode)
         AlertDialog.Builder(this)
             .setTitle(R.string.enter_code)
-            .setView(input)
+            .setView(view)
             .setPositiveButton(R.string.ok) { _, _ ->
                 val code = input.text.toString().trim()
                 if (code.length == 6) {

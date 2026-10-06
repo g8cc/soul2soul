@@ -3,6 +3,7 @@
     <string name="app_name">陪着你</string>
     <string name="show_my_code">显示我的配对码</string>
     <string name="enter_code">输入对方的配对码</string>
+    <string name="enter_code_desc">让 TA 在自己手机上点「显示我的配对码」，把 6 位数字填进来；配对码过期就请 TA 重新点一次。</string>
     <string name="enter_code_hint">输入 6 位配对码</string>
     <string name="ok">确定</string>
     <string name="cancel">取消</string>
