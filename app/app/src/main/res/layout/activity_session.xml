@@ -2,7 +2,11 @@
 <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:background="@drawable/bg_call">
+    android:background="#000000">
+
+    <!-- 观看端 letterbox 空隙用纯黑衬底（影院黑边语义，一眼懂"这是边不是内容"）。
+         曾用远端画面模糊放大做衬底，但糊图=前景内容的鬼影，两台手机比例不同时
+         看起来像两块屏幕重叠，观感更差，已回退为纯黑 -->
 
     <!-- MIUI 合成层会对视频 SurfaceView 做"铺满拉伸"，无视 GL letterbox → 底部被裁。
          SessionActivity 在收到远端视频尺寸后把本 View 缩成视频等比尺寸并居中，

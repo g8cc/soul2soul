@@ -16,6 +16,9 @@ import android.view.WindowManager
 import android.widget.TextView
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.lifecycleScope
 import com.soul2soul.app.App
 import com.soul2soul.app.R
@@ -122,6 +125,7 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
         )
 
         renderer = findViewById(R.id.renderer)
+
         overlay = findViewById(R.id.drawingOverlay)
         boxIncoming = findViewById(R.id.boxIncoming)
         tvState = findViewById(R.id.tvState)
@@ -148,6 +152,20 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
         renderer.init(App.instance.eglBase.eglBaseContext, null)
         // 缩放模式必须与 DrawingOverlayView.videoRect() 的 letterbox 假设一致（SPEC §5）
         renderer.setScalingType(org.webrtc.RendererCommon.ScalingType.SCALE_ASPECT_FIT)
+        // 首帧尺寸事件约 1~2 秒后才到，之前 View 保持 match_parent 会被合成层铺满拉伸裁底；
+        // 开场先按上次会话缓存的远端尺寸套用等比布局，事件到达后再校正
+        com.soul2soul.app.util.Prefs.lastVideoSize(this)?.let { (w, h) ->
+            overlay.videoWidth = w
+            overlay.videoHeight = h
+            applyRendererFitLayout(w, h)
+        }
+        // 系统栏收起/唤回会改变根容器高度（约 ± 状态栏+导航栏），等比矩形必须跟着重算，
+        // 否则沉浸态下视频按旧高度居中会偏上/偏下
+        (renderer.parent as? View)?.addOnLayoutChangeListener { _, l, t, r, b, ol, ot, or, ob ->
+            if (live && (r - l != or - ol || b - t != ob - ot)) {
+                applyRendererFitLayout(overlay.videoWidth, overlay.videoHeight)
+            }
+        }
         overlay.visibility = View.GONE // 接听并连通前不显示/不响应画笔层
         overlay.sink = object : DrawingOverlayView.StrokeSink {
             override fun onStroke(json: JSONObject) {
@@ -287,9 +305,39 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
         boxLive.visibility = if (visible) View.VISIBLE else View.GONE
         emojiPanel.visibility = if (visible && emojiOpen) View.VISIBLE else View.GONE
         fxRow.visibility = if (visible && emojiOpen) View.VISIBLE else View.GONE
+        // 沉浸联动：控件收起时状态栏/导航栏一起收起，整屏只剩对方画面+纯黑边；
+        // 轻点唤回控件时系统栏同步回来。侧边滑入仍可临时呼出系统栏
+        if (live) applyImmersiveBars(!visible)
         mainHandler.removeCallbacks(hideControls)
         // 操控模式里菜单是"临时唤出"，8 秒不碰也自动收回去让出全屏
         if (visible) mainHandler.postDelayed(hideControls, if (overlay.controlMode) 8000L else 5000L)
+    }
+
+    /**
+     * 只藏本设备（观看端）自己的系统栏，视频保持等比原始大小、空隙为纯黑。
+     * Android 7/MIUI 上 WindowInsetsControllerCompat.hide(systemBars) 只写入了
+     * HIDE_NAVIGATION、FULLSCREEN 位被吞（实测 mSystemUiVisibility=0x1606），
+     * 故 API<30 直接操作 legacy flags；API>=30 走 controller。
+     */
+    private fun applyImmersiveBars(hideSystemBars: Boolean) {
+        if (android.os.Build.VERSION.SDK_INT >= 30) {
+            val controller = WindowCompat.getInsetsController(window, window.decorView)
+            controller.systemBarsBehavior =
+                WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            if (hideSystemBars) controller.hide(WindowInsetsCompat.Type.systemBars())
+            else controller.show(WindowInsetsCompat.Type.systemBars())
+        } else {
+            @Suppress("DEPRECATION")
+            window.decorView.systemUiVisibility = if (hideSystemBars) {
+                View.SYSTEM_UI_FLAG_FULLSCREEN or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or
+                    View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY or
+                    View.SYSTEM_UI_FLAG_LAYOUT_STABLE or
+                    View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or
+                    View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+            } else {
+                0 // 恢复默认：内容回到系统栏之间，控件不会被导航栏压住
+            }
+        }
     }
 
     // ---------- 表情互动 ----------
@@ -523,6 +571,7 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
             overlay.videoHeight = height
             applyRendererFitLayout(width, height)
             if (changed) {
+                com.soul2soul.app.util.Prefs.setLastVideoSize(this, width, height)
                 val (sw, sh) = com.soul2soul.app.util.ScreenSize.real(this)
                 Log.d(
                     "S2S-Geom",
@@ -696,6 +745,7 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
         fxRow.visibility = if (inPip || !live || !emojiOpen) View.GONE else View.VISIBLE
         overlay.visibility = if (inPip || !live) View.GONE else View.VISIBLE
         if (!inPip && live) {
+            applyImmersiveBars(false) // 小窗返回全屏：系统栏随控件一起先回来
             mainHandler.removeCallbacks(hideControls)
             // 操控模式：菜单只能长按唤出，唤出后 8 秒自动收回让出全屏（旧版"永不收纳"是怕再也切不回画笔，现在长按就是出口）
             if (!overlay.controlMode) mainHandler.postDelayed(hideControls, 5000)

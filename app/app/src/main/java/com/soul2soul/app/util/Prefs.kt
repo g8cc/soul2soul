@@ -33,4 +33,16 @@ object Prefs {
     fun romGuideShown(ctx: Context): Boolean = sp(ctx).getBoolean("romGuideShown", false)
 
     fun setRomGuideShown(ctx: Context, v: Boolean) = sp(ctx).edit().putBoolean("romGuideShown", v).apply()
+
+    /** 上次作为观看端收到的远端视频尺寸：新会话开场先按缓存套等比布局，
+     *  消除首帧尺寸事件到达前 match_parent 被合成层铺满拉伸的裁切闪跳 */
+    fun lastVideoSize(ctx: Context): Pair<Int, Int>? {
+        val sp = sp(ctx)
+        val w = sp.getInt("lastVideoW", 0)
+        val h = sp.getInt("lastVideoH", 0)
+        return if (w > 0 && h > 0) Pair(w, h) else null
+    }
+
+    fun setLastVideoSize(ctx: Context, w: Int, h: Int) =
+        sp(ctx).edit().putInt("lastVideoW", w).putInt("lastVideoH", h).apply()
 }
