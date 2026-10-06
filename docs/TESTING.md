@@ -130,11 +130,11 @@ bash scripts/test.sh --coverage
 | SignalRouter (9) | sdp/ice Buffer↔Dispatch；迟到 bye 忽略；call.canceled 双语义；ctl_denied×非操控；screenon×!live | §4 状态机 / v0.2.10 竞态 |
 | VersionManifest (9) | 缺字段→0；非 JSON→null；降级→false；remote==local→false | v0.2.16 内联事故 |
 | SignalEnvelope (4) | hello 无 token 省略字段；type 信封 | §2 协议 |
-| StrokeMapping (9) | video=0 回退；0.05 容差边界；往返一致 | FR-5 / §5 |
+| StrokeMapping (11) | video=0 回退；0.05 容差边界；往返一致；整屏尺寸还原；非有限坐标拒绝 | FR-5 / §5 |
 | IceServerParser (7) | 多 urls；urls 缺失跳过；凭证携带 | §2.3 |
 | PairCodeBook (9) | +4999/+5000ms；旧码作废；第 5/6 次尝试；TTL ±1ms；sweep；self_pair | §2 防爆破（repo 常量） |
 | MessageBook (10) | 限速 999/1000ms；发件人隔离；text 500/501；voice 校验（bad id/时长）；list 时序+拷贝+过期；ack 只删自己；容量溢出丢最旧；forgetDevice 双向；sweep TTL±1ms；self/空收件人 | 离线留言（未发版） |
 | turn (5) | 固定 HMAC 向量（openssl 交叉验证）；udp+tcp；username 过期秒 | §2.3 |
 | InboxStore (6) | fromJson 语音字段保留/缺 id→null/kind 缺省；按 id 去重；received 排 mine+时序；conversation 合并时序；remove 只删收到的；回调次数+重复 addAll 不触发 | 离线留言（未发版） |
 
-> 括号内为用例数（2026-10 时点，合计 Kotlin 91 / node 24 / 黑盒 48）。
+> 括号内为用例数（2026-10 时点，合计 Kotlin 93 / node 24 / 黑盒 48）。

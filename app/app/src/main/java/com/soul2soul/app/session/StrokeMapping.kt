@@ -5,7 +5,7 @@ import kotlin.math.abs
 /**
  * 观看端/共享端笔迹坐标映射的纯逻辑（SPEC §5），无 Android 依赖，可单测。
  * 视频帧与共享端屏幕是同一内容：观看端把触点归一化到视频显示矩形，
- * 共享端用 归一化 × 屏幕尺寸 还原，与两端分辨率/宽高比无关。
+ * 共享端按实际显示尺寸还原，与两端分辨率/宽高比无关。
  */
 object StrokeMapping {
 
@@ -46,6 +46,10 @@ object StrokeMapping {
     /** 共享端：归一化坐标 → 本机屏幕像素 */
     fun denormalize(xn: Float, yn: Float, screenW: Float, screenH: Float): Pair<Float, Float> =
         (xn.coerceIn(0f, 1f) * screenW) to (yn.coerceIn(0f, 1f) * screenH)
+
+    /** 无效浮点坐标拒绝，有限坐标钳制；统一用于边缘手势判定和像素注入。 */
+    fun normalizedOrNull(value: Float): Float? =
+        value.takeIf { it.isFinite() }?.coerceIn(0f, 1f)
 
     /** 验收容差（PRD AC-3: 位置偏差 ≤ 画面宽度 5%） */
     fun withinTolerance(a: Pair<Float, Float>, b: Pair<Float, Float>, tolerance: Float = 0.05f): Boolean =

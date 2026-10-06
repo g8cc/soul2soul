@@ -193,6 +193,7 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
         pendingSignals.clear()
         webRtc?.close()
         webRtc = null
+        stopService(Intent(this, AnnotationOverlayService::class.java))
         super.onDestroy()
     }
 
@@ -282,6 +283,14 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
         com.soul2soul.app.util.SelfCheck.report(
             this, "sharer",
             JSONObject().put("ctlAllowed", ctlAllowed),
+        )
+        // 诊断只写 log，不参与坐标计算；保留“整屏 vs 应用窗口 vs 采集帧”三组尺寸，
+        // 真机出现漂移时可以直接判断是哪一层用了错误的矩形。
+        val (sw, sh) = com.soul2soul.app.util.ScreenSize.real(this)
+        Log.d(
+            "S2S-Geom",
+            "sharer display=${sw}x${sh} app=${resources.displayMetrics.widthPixels}x${resources.displayMetrics.heightPixels} " +
+                "capture=${webRtc?.captureWidth}x${webRtc?.captureHeight}",
         )
     }
 

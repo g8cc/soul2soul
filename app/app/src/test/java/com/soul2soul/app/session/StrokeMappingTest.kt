@@ -87,4 +87,22 @@ class StrokeMappingTest {
         assertTrue(StrokeMapping.withinTolerance(0f to 0f, 0.05f to 0f))
         assertTrue(!StrokeMapping.withinTolerance(0f to 0f, 0.051f to 0f))
     }
+
+    @Test
+    fun `操控坐标必须按整屏尺寸还原而不是应用窗口高度`() {
+        // 典型全面屏：应用内容区只有 2148px，但 dispatchGesture 的坐标系是 2340px
+        // 整屏。用错误的应用高度会把底部点压到上方；这里锁定真正的全屏还原公式。
+        val (x, y) = StrokeMapping.denormalize(0.5f, 0.9f, 1080f, 2340f)
+        assertEquals(540f, x, 0.01f)
+        assertEquals(2106f, y, 0.01f)
+    }
+
+    @Test
+    fun `非有限输入拒绝_有限值钳制到归一化范围`() {
+        assertEquals(0.0f, StrokeMapping.normalizedOrNull(-1f)!!, 0.0f)
+        assertEquals(0.5f, StrokeMapping.normalizedOrNull(0.5f)!!, 0.0f)
+        assertEquals(1.0f, StrokeMapping.normalizedOrNull(2f)!!, 0.0f)
+        assertEquals(null, StrokeMapping.normalizedOrNull(Float.NaN))
+        assertEquals(null, StrokeMapping.normalizedOrNull(Float.POSITIVE_INFINITY))
+    }
 }

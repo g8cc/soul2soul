@@ -132,7 +132,15 @@ videoRect = aspectFit(videoW×videoH, 容器W×H)     # letterbox 后视频实�
 xn = (touchX - videoRect.left) / videoRect.width
 yn = (touchY - videoRect.top)  / videoRect.height
 ```
-共享端（归一化 → 屏幕像素）：`px = xn × screenW`，`py = yn × screenH`。
+共享端的**远程操控**（归一化 → 无障碍注入）使用共享手机的整块物理显示尺寸：
+`px = xn × realDisplayW`，`py = yn × realDisplayH`。`realDisplayW/H` 必须来自
+`Display.getRealSize()`/`getRealMetrics()`，不能来自 `currentWindowMetrics.bounds` 或
+`resources.displayMetrics`（后两者可能扣掉状态栏/导航栏，只代表应用窗口；这会让所有纵坐标
+系统性偏到上方）。`dispatchGesture` 的原点就是整屏左上角，因此不再额外加状态栏 inset。
+
+共享端的**悬浮标注**也以同一整屏矩形为视口；包围盒窗口通过
+`FLAG_LAYOUT_IN_SCREEN` 保持 `x/y` 与物理屏幕原点一致。采集帧只按长边缩放并保持整屏宽高比，
+所以手势和标注使用同一组归一化坐标，不需要再按包围盒窗口宽高比缩放。
 正确性依据：视频帧内容 = 共享端屏幕内容，归一化坐标在两侧指向同一语义位置，与两端分辨率/比例无关。
 `videoW×videoH` 来自观看端收到的首帧（VideoSink onFrame 上报）。
 

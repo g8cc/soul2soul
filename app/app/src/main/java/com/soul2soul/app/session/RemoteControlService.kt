@@ -57,7 +57,15 @@ class RemoteControlService : AccessibilityService() {
             // y=1px 也让系统边缘手势区不认，硬模仿只会画出四不像。识别意图后改走
             // performGlobalAction —— 本机播放真·系统动画，动画再随视频回显给观看端。
             // 阈值判定在 GestureIntent（纯逻辑，单测锁定）。
-            val norm = pts.map { GestureIntent.NormPt(it.x, it.y) }
+            // 先校验/钳制，再做边缘手势判定和像素换算；否则 NaN/Infinity 可能绕过
+            // 普通路径检查，导致无效坐标仍被识别成系统级 BACK/HOME 手势。
+            val normalized = pts.mapNotNull { p ->
+                val xn = StrokeMapping.normalizedOrNull(p.x) ?: return@mapNotNull null
+                val yn = StrokeMapping.normalizedOrNull(p.y) ?: return@mapNotNull null
+                xn to yn
+            }
+            if (normalized.isEmpty()) return false
+            val norm = normalized.map { (x, y) -> GestureIntent.NormPt(x, y) }
             GestureIntent.edgeGlobalAction(norm, durMs)?.let { action ->
                 // 返回键打在我们自己的通话界面上 = 退出会话断线（实测踩坑）。
                 // 共享进行中改按 HOME：通话界面退到后台、共享继续，她立刻落到桌面接着操作
@@ -78,16 +86,22 @@ class RemoteControlService : AccessibilityService() {
             val path = Path()
             var prevX = 0f
             var prevY = 0f
-            pts.forEachIndexed { i, p ->
-                val x = (p.x * screenW)
-                    .coerceIn(1f, (screenW - 1).toFloat())
-                val y = (p.y * screenH)
-                    .coerceIn(1f, (screenH - 1).toFloat())
+            normalized.forEachIndexed { i, (xn, yn) ->
+                val (rawX, rawY) = StrokeMapping.denormalize(
+                    xn, yn, screenW.toFloat(), screenH.toFloat()
+                )
+                val x = rawX.coerceIn(1f, (screenW - 1).coerceAtLeast(1).toFloat())
+                val y = rawY.coerceIn(1f, (screenH - 1).coerceAtLeast(1).toFloat())
                 if (i == 0) path.moveTo(x, y) else path.lineTo(x, y)
                 prevX = x
                 prevY = y
             }
-            if (pts.size == 1) path.lineTo(prevX + 0.5f, prevY + 0.5f) // 纯点击也要有位移
+            if (normalized.size == 1) {
+                // 纯点击也要有非零路径；在右边缘向左补点，避免钳制后仍是零长度。
+                val maxX = (screenW - 1).coerceAtLeast(1).toFloat()
+                val clickEndX = if (prevX + 0.5f <= maxX) prevX + 0.5f else prevX - 0.5f
+                path.lineTo(clickEndX.coerceIn(1f, maxX), prevY)
+            }
             val stroke = GestureDescription.StrokeDescription(
                 path, 0L, durMs.coerceIn(50L, 3000L),
             )
@@ -95,7 +109,7 @@ class RemoteControlService : AccessibilityService() {
                 // 不注册回调：注入结果只记录发起，被系统打断时也不重试，避免"幽灵操作"
                 svc.dispatchGesture(GestureDescription.Builder().addStroke(stroke).build(), null, null)
             }.getOrDefault(false)
-            Log.d(TAG, "dispatchGesture pts=${pts.size} dur=$durMs ok=$ok")
+            Log.d(TAG, "dispatchGesture pts=${normalized.size}/${pts.size} dur=$durMs display=${screenW}x${screenH} ok=$ok")
             return ok
         }
     }

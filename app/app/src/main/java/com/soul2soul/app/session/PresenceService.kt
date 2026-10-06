@@ -132,6 +132,7 @@ class PresenceService : Service() {
                 runCatching {
                     startActivity(
                         Intent(this, SessionActivity::class.java)
+                            .putExtra(SessionActivity.EXTRA_INCOMING, true)
                             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                     )
                 }

@@ -114,7 +114,11 @@ class AnnotationOverlayService : Service() {
             rect.height(),
             overlayWindowType(),
             WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
-                or WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+                or WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                // rect/x/y are expressed in the physical display coordinate space. Without
+                // this flag WindowManager may inset an overlay below the status bar, so a
+                // perfectly normalized point is rendered one inset above/below its target.
+                or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
             PixelFormat.TRANSLUCENT,
         ).apply {
             gravity = Gravity.TOP or Gravity.START

@@ -36,6 +36,7 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
 
     private lateinit var renderer: SurfaceViewRenderer
     private lateinit var overlay: DrawingOverlayView
+    private var remoteVideoTrack: VideoTrack? = null
     private lateinit var boxIncoming: View
     private lateinit var tvState: TextView
     private lateinit var tvCountdown: TextView
@@ -62,6 +63,10 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
     private var client: WebRtcClient? = null
     private val pendingSignals = mutableListOf<JSONObject>() // client 就绪前缓存 offer/ice
     private var accepted = false
+    /** 本 Activity 是否占用了 Presence.sessionBusy；未接听退出也必须对称释放。 */
+    private var sessionClaimed = false
+    /** 来电已取消/拒绝/页面已退出时，拦住迟到的权限和 WebRTC 回调。 */
+    private var callInvalidated = false
     private var endedRemotely = false
     private var byeSent = false
     private var hdOn = false
@@ -84,6 +89,9 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
 
     private val micPermission =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+            if (isFinishing || isDestroyed || callInvalidated || accepted) {
+                return@registerForActivityResult
+            }
             if (granted) {
                 accept()
             } else {
@@ -100,6 +108,7 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
         // 只有真来电（带 EXTRA_INCOMING 或 PresenceService 拉起）才占用会话；
         // 测试钩子/误启动不置位，避免误吞后续真实来电
         if (intent?.getBooleanExtra(EXTRA_INCOMING, false) == true) {
+            sessionClaimed = true
             Presence.sessionBusy = true
         }
         // 返回键等价挂断：通知对方正常结束，而不是靠掉线兜底
@@ -152,6 +161,8 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
             ensureMicThenAccept()
         }
         findViewById<View>(R.id.btnDecline).setOnClickListener {
+            callInvalidated = true
+            stopRinging()
             Presence.client.send("decline")
             finish()
         }
@@ -241,6 +252,14 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
     override fun onNewIntent(intent: android.content.Intent?) {
         super.onNewIntent(intent)
         setIntent(intent)
+        if (intent?.getBooleanExtra(EXTRA_INCOMING, false) == true && !accepted) {
+            sessionClaimed = true
+            callInvalidated = false
+            Presence.sessionBusy = true
+            showIncoming()
+            if (intent.getBooleanExtra(EXTRA_AUTO_ACCEPT, false)) ensureMicThenAccept()
+            return
+        }
         if (!accepted) {
             boxIncoming.visibility = View.VISIBLE
             if (intent?.getBooleanExtra(EXTRA_AUTO_ACCEPT, false) == true) {
@@ -331,6 +350,8 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
     // ---------- 来电状态 ----------
 
     private fun showIncoming() {
+        // singleTask 的通知点击/新来电会复用 Activity；先清掉旧计时器和铃声，避免双计时器竞态。
+        stopRinging()
         boxIncoming.visibility = View.VISIBLE
         boxLive.visibility = View.GONE
         startRinging()
@@ -342,6 +363,7 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
 
             override fun onFinish() {
                 if (!accepted) {
+                    callInvalidated = true
                     Presence.client.send("decline")
                     finish()
                 }
@@ -386,6 +408,7 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
     // ---------- 接听 ----------
 
     private fun ensureMicThenAccept() {
+        if (callInvalidated || isFinishing || isDestroyed || accepted) return
         if (checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) ==
             android.content.pm.PackageManager.PERMISSION_GRANTED
         ) {
@@ -425,8 +448,9 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
     }
 
     private fun accept() {
-        if (accepted) return
+        if (accepted || callInvalidated || isFinishing || isDestroyed) return
         accepted = true
+        sessionClaimed = true
         Presence.sessionBusy = true
         stopRinging()
         com.soul2soul.app.util.WifiKeeper.acquire(this) // 观看端同样持 WiFi 高性能锁
@@ -457,6 +481,7 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
                 finishWithCleanup(sendBye = false, notice = action.noticeRes)
             }
             SignalRouter.SignalAction.CallerCanceledBeforeAccept -> {
+                callInvalidated = true
                 stopRinging()
                 android.widget.Toast.makeText(this, R.string.peer_canceled, android.widget.Toast.LENGTH_SHORT).show()
                 finish()
@@ -478,6 +503,10 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
 
     override fun onRemoteVideo(track: VideoTrack) {
         runOnUiThread {
+            if (isFinishing || isDestroyed) return@runOnUiThread
+            if (remoteVideoTrack === track) return@runOnUiThread
+            remoteVideoTrack?.removeSink(renderer)
+            remoteVideoTrack = track
             track.addSink(renderer)
             Log.d("S2S-Session", "remote video attached")
         }
@@ -485,17 +514,28 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
 
     override fun onRemoteVideoSize(width: Int, height: Int) {
         runOnUiThread {
-            if (overlay.videoWidth != width) {
+            if (isFinishing || isDestroyed || callInvalidated) return@runOnUiThread
+            val changed = overlay.videoWidth != width || overlay.videoHeight != height
+            if (changed) {
                 Log.d("S2S-Session", "video size: ${width}x$height") // 首帧到达即证明视频链路在出帧
             }
             overlay.videoWidth = width
             overlay.videoHeight = height
+            if (changed) {
+                val (sw, sh) = com.soul2soul.app.util.ScreenSize.real(this)
+                Log.d(
+                    "S2S-Geom",
+                    "viewer display=${sw}x${sh} app=${resources.displayMetrics.widthPixels}x${resources.displayMetrics.heightPixels} " +
+                        "video=${width}x${height} view=${overlay.width}x${overlay.height}",
+                )
+            }
         }
     }
 
     /** 共享端 DataChannel 状态通知（锁屏等），在观看端显示明确状态 */
     override fun onDataMessage(json: JSONObject) {
         runOnUiThread {
+            if (isFinishing || isDestroyed || callInvalidated) return@runOnUiThread
             // 判据（controlMode/live）与 UI 更新同在主线程：与提取前的读取时序一致
             when (val action = SignalRouter.routeData(json.optString("k"), overlay.controlMode, live)) {
                 SignalRouter.DataAction.None -> Unit
@@ -525,6 +565,7 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
     /** 实时性可视化：网络 RTT 每 2 秒刷新，颜色分级（绿<100ms / 橙<250ms / 红≥250ms） */
     override fun onRtt(ms: Long) {
         runOnUiThread {
+            if (isFinishing || isDestroyed || callInvalidated) return@runOnUiThread
             tvRtt.text = getString(R.string.rtt_display, ms)
             tvRtt.setTextColor(
                 when {
@@ -538,6 +579,7 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
 
     override fun onLive() {
         runOnUiThread {
+            if (isFinishing || isDestroyed || callInvalidated) return@runOnUiThread
             acceptTimeout?.let { mainHandler.removeCallbacks(it) }
             acceptTimeout = null
             tvState.visibility = View.GONE
@@ -556,11 +598,17 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
                 this, "viewer",
                 JSONObject().put("ctlSupported", client?.controlSupported == true),
             )
+            Log.d(
+                "S2S-Geom",
+                "viewer-ready app=${resources.displayMetrics.widthPixels}x${resources.displayMetrics.heightPixels} " +
+                    "view=${overlay.width}x${overlay.height}",
+            )
         }
     }
 
     override fun onEnded(reason: String) {
         runOnUiThread {
+            if (isFinishing || isDestroyed || callInvalidated) return@runOnUiThread
             // 这是本端 PeerConnection 报告的失败/超时，需要通知共享端立即收口；
             // 远端主动挂断仍由 bye/peer.gone 信令分支处理。
             finishWithCleanup(sendBye = true, notice = R.string.peer_lost)
@@ -570,6 +618,7 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
     // ---------- 生命周期 ----------
 
     private fun finishWithCleanup(sendBye: Boolean, notice: Int? = null) {
+        callInvalidated = true
         if (notice != null) {
             android.widget.Toast.makeText(this, notice, android.widget.Toast.LENGTH_SHORT).show()
         }
@@ -630,7 +679,8 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
     }
 
     override fun onDestroy() {
-        if (accepted) Presence.sessionBusy = false
+        callInvalidated = true
+        if (sessionClaimed) Presence.sessionBusy = false
         stopRinging()
         setSpeakerphone(false)
         com.soul2soul.app.util.WifiKeeper.release()
@@ -643,6 +693,8 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
             byeSent = true
             Presence.client.send("bye")
         }
+        remoteVideoTrack?.removeSink(renderer)
+        remoteVideoTrack = null
         client?.close()
         client = null
         renderer.release()

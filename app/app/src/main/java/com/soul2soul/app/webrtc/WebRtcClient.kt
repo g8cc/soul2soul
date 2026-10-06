@@ -92,6 +92,10 @@ class WebRtcClient(
     @Volatile private var remoteDescriptionSet = false
     private val pendingRemoteIce = mutableListOf<IceCandidate>()
     private var videoSender: org.webrtc.RtpSender? = null
+    private var remoteVideoTrack: VideoTrack? = null
+    private var remoteVideoSizeSink: VideoSink? = null
+    private var lastRemoteVideoWidth = 0
+    private var lastRemoteVideoHeight = 0
 
     private val connectTimeoutRunner = Runnable {
         if (!closed && !established) notifyEnded("connect_TIMEOUT")
@@ -103,6 +107,15 @@ class WebRtcClient(
     /** 当前采集长边上限（观看端可通过 DataChannel 切 1280/1920） */
     @Volatile
     var captureLongEdge = 1280
+        private set
+
+    /** 当前传给 ScreenCapturerAndroid 的尺寸（用于真机尺寸诊断）。 */
+    @Volatile
+    var captureWidth: Int = 0
+        private set
+
+    @Volatile
+    var captureHeight: Int = 0
         private set
 
     /** 用户意图档位（观看端 HD 开关设定）：弱网自动降档后，RTT 好转回升到这里 */
@@ -139,11 +152,11 @@ class WebRtcClient(
         val source = factory.createVideoSource(true) // isScreencast: 启用内容编码模式
         videoSource = source
 
-        // 真实显示尺寸：displayMetrics 在全面屏上是 app 视角、少一截，采集会裁掉导航条区域
-        val (sw, sh) = com.soul2soul.app.util.ScreenSize.real(context)
-        val scale = minOf(1f, captureLongEdge.toFloat() / maxOf(sw, sh))
-        val w = (sw * scale).toInt() / 2 * 2
-        val h = (sh * scale).toInt() / 2 * 2
+        // 与无障碍手势、悬浮窗使用同一套整屏像素尺寸；不能用 app 视角
+        // displayMetrics，否则全面屏的状态栏/导航栏会从采集源中被截掉。
+        val (w, h) = captureSize()
+        captureWidth = w
+        captureHeight = h
         val helper = SurfaceTextureHelper.create("s2s-capture", eglContext)
         surfaceHelper = helper
         // 计帧观察者：只透传不碰引用计数（在轨道上加 Sink 会破坏 VideoFrame 引用计数导致崩溃）
@@ -226,16 +239,26 @@ class WebRtcClient(
     private fun applyCaptureLongEdge(edge: Int) {
         captureLongEdge = edge
         val capturer = capturer ?: return
-        // 真实显示尺寸：displayMetrics 在全面屏上是 app 视角、少一截，采集会裁掉导航条区域
-        val (sw, sh) = com.soul2soul.app.util.ScreenSize.real(context)
-        val scale = minOf(1f, captureLongEdge.toFloat() / maxOf(sw, sh))
-        val w = (sw * scale).toInt() / 2 * 2
-        val h = (sh * scale).toInt() / 2 * 2
+        val (w, h) = captureSize()
+        captureWidth = w
+        captureHeight = h
         runCatching {
             capturer.stopCapture()
             capturer.startCapture(w, h, CAPTURE_FPS)
         }.onFailure { Log.w(TAG, "resolution switch failed", it) }
         videoSender?.let { applyBitrate(it) }
+    }
+
+    /**
+     * 计算屏幕采集尺寸：长边不超过档位、短边按原始比例缩放，并偶数对齐。
+     * ScreenCapturerAndroid/编码器对奇数尺寸支持不一致，因此最后至少保留 2px。
+     */
+    private fun captureSize(): Pair<Int, Int> {
+        val (sw, sh) = com.soul2soul.app.util.ScreenSize.real(context)
+        val scale = minOf(1f, captureLongEdge.toFloat() / maxOf(sw, sh).toFloat())
+        val w = ((sw * scale).toInt() / 2 * 2).coerceAtLeast(2)
+        val h = ((sh * scale).toInt() / 2 * 2).coerceAtLeast(2)
+        return w to h
     }
 
     private fun applyBitrate(sender: org.webrtc.RtpSender) {
@@ -357,7 +380,9 @@ class WebRtcClient(
         val dc = dataChannel ?: run { Log.w(TAG, "sendAnnotation: channel null"); return }
         val state = try { dc.state().name } catch (e: Exception) { "?" }
         val bytes = json.toString().toByteArray(Charsets.UTF_8)
-        val ok = dc.send(DataChannel.Buffer(ByteBuffer.wrap(bytes), false))
+        val ok = runCatching { dc.send(DataChannel.Buffer(ByteBuffer.wrap(bytes), false)) }
+            .onFailure { Log.w(TAG, "annotation send failed k=${json.opt("k")}", it) }
+            .getOrDefault(false)
         Log.d(TAG, "dc send k=${json.opt("k")} state=$state ok=$ok")
     }
 
@@ -371,7 +396,9 @@ class WebRtcClient(
         }
         val state = try { dc.state().name } catch (e: Exception) { "?" }
         val bytes = json.toString().toByteArray(Charsets.UTF_8)
-        val ok = dc.send(DataChannel.Buffer(ByteBuffer.wrap(bytes), false))
+        val ok = runCatching { dc.send(DataChannel.Buffer(ByteBuffer.wrap(bytes), false)) }
+            .onFailure { Log.w(TAG, "control send failed k=${json.opt("k")}", it) }
+            .getOrDefault(false)
         Log.d(TAG, "ctl send k=${json.opt("k")} state=$state ok=$ok")
     }
 
@@ -524,22 +551,39 @@ class WebRtcClient(
 
     override fun onDataChannel(dc: DataChannel) {
         // 观看端：channel 均由共享端创建，按 label 分流
-        if (dc.label() == "ctl") ctlChannel = dc else dataChannel = dc
+        if (dc.label() == "ctl") {
+            runCatching { ctlChannel?.unregisterObserver() }
+            ctlChannel = dc
+        } else {
+            runCatching { dataChannel?.unregisterObserver() }
+            dataChannel = dc
+        }
         dc.registerObserver(this)
     }
 
     override fun onTrack(transceiver: RtpTransceiver) {
         val track = transceiver.receiver.track()
         if (track is VideoTrack) {
+            if (remoteVideoTrack === track) return
+            remoteVideoSizeSink?.let { sink -> runCatching { remoteVideoTrack?.removeSink(sink) } }
+            remoteVideoTrack = track
+            lastRemoteVideoWidth = 0
+            lastRemoteVideoHeight = 0
             listener.onRemoteVideo(track)
             // 测量远端视频尺寸（观看端 letterbox 映射用）。
             // 注意：VideoTrack 分发给多个 Sink 的同一帧由分发器负责释放，
             // 这里绝不能调 frame.release()（否则 native 渲染还在用就 SIGABRT）。
-            track.addSink(VideoSink { frame ->
+            val sizeSink = VideoSink { frame ->
                 val w = frame.rotatedWidth
                 val h = frame.rotatedHeight
-                if (w > 0 && h > 0) listener.onRemoteVideoSize(w, h)
-            })
+                if (w > 0 && h > 0 && (w != lastRemoteVideoWidth || h != lastRemoteVideoHeight)) {
+                    lastRemoteVideoWidth = w
+                    lastRemoteVideoHeight = h
+                    listener.onRemoteVideoSize(w, h)
+                }
+            }
+            remoteVideoSizeSink = sizeSink
+            track.addSink(sizeSink)
         }
     }
 
@@ -608,8 +652,13 @@ class WebRtcClient(
         videoSource?.dispose(); videoSource = null
         audioTrack?.dispose(); audioTrack = null
         audioSource?.dispose(); audioSource = null
-        dataChannel?.close(); dataChannel = null
-        ctlChannel?.close(); ctlChannel = null
+        runCatching { dataChannel?.unregisterObserver() }
+        runCatching { dataChannel?.close() }; dataChannel = null
+        runCatching { ctlChannel?.unregisterObserver() }
+        runCatching { ctlChannel?.close() }; ctlChannel = null
+        remoteVideoSizeSink?.let { sink -> runCatching { remoteVideoTrack?.removeSink(sink) } }
+        remoteVideoSizeSink = null
+        remoteVideoTrack = null
         pc?.close(); pc = null
         surfaceHelper?.dispose(); surfaceHelper = null
         factory.dispose()
