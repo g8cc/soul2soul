@@ -121,12 +121,27 @@ class MessageActivity : AppCompatActivity() {
         ackAll()
     }
 
-    /** 看见即读：从服务端删掉未读条目（阅后即删），本地列表继续展示 */
+    /**
+     * 看见即读：从服务端删掉未读条目（阅后即删），本地列表继续展示。
+     * 语音例外：本地还没下载到缓存就不 ack——服务端 ack 会连带删语音文件，
+     * 抢先 ack 导致点了才下载、必然 403（v0.2.28 真机实锤"下载失败"）。
+     */
     private fun ackAll() {
-        val ids = shown.filter { !it.mine }.map { it.id }
+        val ids = shown.filter { !it.mine && (it.kind != "voice" || voiceCached(it.voiceId)) }
+            .map { it.id }
+        if (ids.isEmpty()) return
+        ackIds(ids)
+    }
+
+    private fun ackIds(ids: List<String>) {
         if (ids.isEmpty()) return
         InboxStore.remove(ids)
         Presence.client.send("msg.read") { put("ids", JSONArray(ids)) }
+    }
+
+    private fun voiceCached(voiceId: String): Boolean {
+        val f = File(cacheDir, "voice_$voiceId.m4a")
+        return f.exists() && f.length() > 0L
     }
 
     private fun render() {
@@ -358,8 +373,19 @@ class MessageActivity : AppCompatActivity() {
         VoiceClient.upload(file) { voiceId ->
             voiceBusy = false
             if (recorder == null) btnHoldTalk.setText(R.string.msg_hold_talk)
-            file.delete()
-            if (voiceId == null || !Presence.client.send("msg.post") {
+            if (voiceId == null) {
+                file.delete()
+                toast(getString(R.string.msg_send_failed))
+                return@upload
+            }
+            // 服务端只给收件人下发语音的权限，发送方想回听只能靠这份本地缓存：
+            // 改名成 VoiceClient 的缓存路径，"我的"语音气泡直接点着播
+            val target = File(cacheDir, "voice_$voiceId.m4a")
+            if (!file.renameTo(target)) {
+                runCatching { file.copyTo(target, overwrite = true) }
+                file.delete()
+            }
+            if (!Presence.client.send("msg.post") {
                     put("kind", "voice")
                     put("voiceId", voiceId)
                     put("durMs", durMs)
@@ -387,6 +413,16 @@ class MessageActivity : AppCompatActivity() {
         if (msg.kind != "voice" || msg.voiceId.isEmpty()) return
         if (playingId == msg.id) { stopPlay(); return }
         stopPlay()
+        if (msg.mine) {
+            // 自己发的：服务端不下发给自己，只认发送时留下的本地缓存
+            val f = File(cacheDir, "voice_${msg.voiceId}.m4a")
+            if (!f.exists() || f.length() == 0L) {
+                toast(getString(R.string.msg_voice_failed))
+                return
+            }
+            startPlaying(msg.id, f)
+            return
+        }
         loadingId = msg.id
         adapter.notifyItemRangeChanged(0, shown.size)
         VoiceClient.download(msg.voiceId) { file ->
@@ -397,22 +433,28 @@ class MessageActivity : AppCompatActivity() {
                 toast(getString(R.string.msg_voice_failed))
                 return@download
             }
-            player = try {
-                MediaPlayer().apply {
-                    setDataSource(file.path)
-                    setOnCompletionListener { stopPlay() }
-                    prepare()
-                    start()
-                }
-            } catch (e: Exception) {
-                stopPlay()
-                toast(getString(R.string.msg_voice_failed))
-                null
+            // 落到本地缓存了才"阅"：此时删服务端副本是安全的
+            ackIds(listOf(msg.id))
+            startPlaying(msg.id, file)
+        }
+    }
+
+    private fun startPlaying(id: String, file: File) {
+        player = try {
+            MediaPlayer().apply {
+                setDataSource(file.path)
+                setOnCompletionListener { stopPlay() }
+                prepare()
+                start()
             }
-            if (player != null) {
-                playingId = msg.id
-                adapter.notifyItemRangeChanged(0, shown.size)
-            }
+        } catch (e: Exception) {
+            stopPlay()
+            toast(getString(R.string.msg_voice_failed))
+            null
+        }
+        if (player != null) {
+            playingId = id
+            adapter.notifyItemRangeChanged(0, shown.size)
         }
     }
 
@@ -474,8 +516,8 @@ class MessageActivity : AppCompatActivity() {
                     holder.bubble.resources.displayMetrics.density).toInt()
                 else ViewGroup.LayoutParams.WRAP_CONTENT
             if (voice) {
-                holder.bubble.isClickable = !m.mine
-                if (!m.mine) holder.bubble.setOnClickListener { play(m) } else holder.bubble.setOnClickListener(null)
+                holder.bubble.isClickable = true
+                holder.bubble.setOnClickListener { play(m) }
             } else {
                 holder.bubble.isClickable = false
                 holder.bubble.setOnClickListener(null)
