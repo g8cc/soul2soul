@@ -86,6 +86,8 @@
     <string name="ctl_consent_close">关闭</string>
     <string name="acc_service_desc">开启后，在屏幕共享会话内由你决定是否允许伴侣远程操控你的屏幕（通知栏一键收回）</string>
     <string name="clear_strokes">清屏</string>
+    <string name="doodle_done">完成</string>
+    <string name="doodle_enter_hint">画的圈 TA 能直接看到；点「完成」退出并清除</string>
     <string name="emoji_toggle">😊+</string>
     <string name="hd_on">高清 ✓</string>
     <string name="hd_off">流畅</string>

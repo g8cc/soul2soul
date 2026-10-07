@@ -111,6 +111,48 @@ class OverlayGestureEngineTest {
         assertEquals(255, snaps[0].alpha)
     }
 
+    // ---------- 共享端自画模式（v0.2.28 双向涂鸦） ----------
+
+    @Test
+    fun persistStrokes_surviveFarBeyondGhostFade() {
+        val e = engine().apply { persistStrokes = true }
+        e.onDown(0, 0f, 0f)
+        e.onMove(0, 100f, 100f)
+        now = 2000
+        e.onUp(0)
+        now = 99_000 // 远超 GHOST_FADE_MS：持久笔迹仍在且全不透明
+        val snaps = e.visibleStrokes(now)
+        assertEquals(1, snaps.size)
+        assertEquals(255, snaps[0].alpha)
+        e.clearStrokes()
+        assertTrue(e.visibleStrokes(now).isEmpty())
+    }
+
+    @Test
+    fun tapDrawsDot_tapBecomesSinglePointStrokeNotTapAction() {
+        val e = engine().apply { tapDrawsDot = true }
+        e.onDown(0, 50f, 60f)
+        now = 1300
+        val acts = e.onUp(0)
+        assertTrue(acts.none { it === Action.Tap })
+        assertTrue(acts.filterIsInstance<Action.StrokeStart>().size == 1)
+        val pt = acts.filterIsInstance<Action.StrokePoint>().single()
+        assertEquals(0.05, pt.xn, 1e-6) // 归一化到全屏矩形 (0,0,1000,1000)；float 除法有末位舍入
+        assertEquals(0.06, pt.yn, 1e-6)
+        val snaps = e.visibleStrokes(now)
+        assertEquals(1, snaps.size)
+        assertEquals(1, snaps[0].points.size)
+    }
+
+    @Test
+    fun tapDrawsDot_slowPressAfter400ms_leavesNothing() {
+        val e = engine().apply { tapDrawsDot = true }
+        e.onDown(0, 50f, 60f)
+        now = 1400 // 400ms 整：不算轻点，也不落点
+        assertTrue(e.onUp(0).isEmpty())
+        assertTrue(e.visibleStrokes(now).isEmpty())
+    }
+
     // ---------- 操控采样 ----------
 
     private fun ctlEngine(): OverlayGestureEngine = engine().apply {

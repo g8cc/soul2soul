@@ -13,6 +13,7 @@ import android.view.Gravity
 import android.view.WindowManager
 import com.soul2soul.app.R
 import org.json.JSONObject
+import kotlin.math.hypot
 
 /**
  * 共享端悬浮层（懒加载 + 按需最小化）：
@@ -47,6 +48,7 @@ class AnnotationOverlayService : Service() {
             stopSelf()
             return START_NOT_STICKY
         }
+        addBall()
         return START_STICKY
     }
 
@@ -56,6 +58,9 @@ class AnnotationOverlayService : Service() {
         canvas?.let { runCatching { wm.removeView(it) } }
         canvas = null
         winRect = null
+        exitDoodle()
+        ball?.let { runCatching { wm.removeView(it) } }
+        ball = null
         super.onDestroy()
     }
 
@@ -84,6 +89,16 @@ class AnnotationOverlayService : Service() {
         super.onConfigurationChanged(newConfig)
         // post 一拍：部分机型回调内 Resources 指标尚未刷新完
         mainHandler.post {
+            // 自画层/工具条按旧屏幕尺寸挂的，旋转后直接退出（笔迹随窗口一起清掉）
+            if (doodle != null) exitDoodle()
+            ball?.let { b ->
+                val (sw, sh) = com.soul2soul.app.util.ScreenSize.real(this)
+                val lp = b.layoutParams as WindowManager.LayoutParams
+                lp.x = lp.x.coerceIn(0, (sw - b.width).coerceAtLeast(0))
+                lp.y = lp.y.coerceIn(0, (sh - b.height).coerceAtLeast(0))
+                ballX = lp.x; ballY = lp.y
+                runCatching { wm.updateViewLayout(b, lp) }
+            }
             val cv = canvas ?: return@post
             if (cv.parent == null) return@post // 未挂窗就别借旋转之机挂上去
             if (!cv.hasVisibleContent()) {
@@ -188,6 +203,173 @@ class AnnotationOverlayService : Service() {
         runCatching { wm.removeView(cv) }
         canvas = null
         winRect = null
+    }
+
+    // ---------- 共享端自画：悬浮画笔球 + 全屏绘制层 + 工具条 ----------
+
+    private var ball: android.widget.TextView? = null
+    private var ballX = -1
+    private var ballY = -1
+    private var doodle: SharerDoodleView? = null
+    private var doodleBar: android.widget.LinearLayout? = null
+
+    private fun dp(v: Float): Int = (v * resources.displayMetrics.density).toInt()
+
+    /** 画笔球：可拖动，轻点进出自画模式。自画期间隐藏（球会被全屏绘制层压住） */
+    private fun addBall() {
+        if (ball != null || !Settings.canDrawOverlays(this)) return
+        val (sw, sh) = com.soul2soul.app.util.ScreenSize.real(this)
+        val size = dp(56f)
+        if (ballX < 0) {
+            ballX = sw - size - dp(10f)
+            ballY = sh * 2 / 3
+        }
+        val tv = android.widget.TextView(this).apply {
+            text = "✏️"
+            textSize = 22f
+            gravity = Gravity.CENTER
+            background = androidx.core.content.ContextCompat.getDrawable(this@AnnotationOverlayService, R.drawable.bg_bubble)
+            setTextColor(android.graphics.Color.WHITE)
+        }
+        val slop = android.view.ViewConfiguration.get(this).scaledTouchSlop
+        var startX = 0f; var startY = 0f; var ox = 0; var oy = 0; var dragged = false
+        tv.setOnTouchListener { v, ev ->
+            when (ev.actionMasked) {
+                android.view.MotionEvent.ACTION_DOWN -> {
+                    startX = ev.rawX; startY = ev.rawY; ox = ballX; oy = ballY; dragged = false; true
+                }
+                android.view.MotionEvent.ACTION_MOVE -> {
+                    val dx = ev.rawX - startX; val dy = ev.rawY - startY
+                    if (!dragged && hypot(dx, dy) > slop) dragged = true
+                    if (dragged) {
+                        val (w2, h2) = com.soul2soul.app.util.ScreenSize.real(this@AnnotationOverlayService)
+                        ballX = (ox + dx.toInt()).coerceIn(0, (w2 - v.width).coerceAtLeast(0))
+                        ballY = (oy + dy.toInt()).coerceIn(0, (h2 - v.height).coerceAtLeast(0))
+                        val lp = v.layoutParams as WindowManager.LayoutParams
+                        lp.x = ballX; lp.y = ballY
+                        runCatching { wm.updateViewLayout(v, lp) }
+                    }
+                    true
+                }
+                android.view.MotionEvent.ACTION_UP -> {
+                    if (!dragged) toggleDoodle()
+                    true
+                }
+                else -> false
+            }
+        }
+        val lp = WindowManager.LayoutParams(
+            size, size, overlayWindowType(),
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+            PixelFormat.TRANSLUCENT,
+        ).apply {
+            gravity = Gravity.TOP or Gravity.START
+            x = ballX; y = ballY
+        }
+        runCatching { wm.addView(tv, lp) }
+            .onSuccess { ball = tv }
+            .onFailure { android.util.Log.e("Overlay", "ball addView failed", it) }
+    }
+
+    private fun toggleDoodle() {
+        if (doodle != null) {
+            exitDoodle()
+            return
+        }
+        if (!Settings.canDrawOverlays(this)) return
+        val dv = SharerDoodleView(this)
+        val layerLp = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.MATCH_PARENT,
+            WindowManager.LayoutParams.MATCH_PARENT,
+            overlayWindowType(),
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+            PixelFormat.TRANSLUCENT,
+        )
+        // 自画层吃掉全部触摸：这是"模式"，画到桌面图标上不该触发图标
+        runCatching { wm.addView(dv, layerLp) }.onFailure {
+            android.util.Log.e("Overlay", "doodle layer addView failed", it)
+            return
+        }
+        doodle = dv
+        ball?.visibility = android.view.View.INVISIBLE
+        addDoodleBar(dv)
+        android.widget.Toast.makeText(this, R.string.doodle_enter_hint, android.widget.Toast.LENGTH_SHORT).show()
+    }
+
+    private fun addDoodleBar(dv: SharerDoodleView) {
+        val bar = android.widget.LinearLayout(this).apply {
+            orientation = android.widget.LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setBackgroundResource(R.drawable.bg_bubble)
+            setPadding(dp(12f), dp(8f), dp(12f), dp(8f))
+        }
+        val dots = ArrayList<android.view.View>()
+        StrokeColors.COLORS.forEachIndexed { i, color ->
+            val dot = android.view.View(this).apply {
+                background = androidx.core.content.ContextCompat.getDrawable(this@AnnotationOverlayService, R.drawable.bg_dot)
+                backgroundTintList = android.content.res.ColorStateList.valueOf(color)
+                alpha = if (i == dv.engine.colorIndex) 1f else 0.4f
+            }
+            dot.layoutParams = android.widget.LinearLayout.LayoutParams(dp(28f), dp(28f)).apply {
+                marginStart = if (i == 0) 0 else dp(8f)
+            }
+            dot.setOnClickListener {
+                dv.setColor(i)
+                dots.forEachIndexed { j, d -> d.alpha = if (j == i) 1f else 0.4f }
+            }
+            dots.add(dot)
+            bar.addView(dot)
+        }
+        val clear = android.widget.TextView(this).apply {
+            text = getString(R.string.clear_strokes)
+            setTextColor(android.graphics.Color.WHITE)
+            textSize = 13f
+            setBackgroundResource(R.drawable.bg_chip)
+            setPadding(dp(10f), dp(6f), dp(10f), dp(6f))
+            layoutParams = android.widget.LinearLayout.LayoutParams(
+                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT,
+                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT,
+            ).apply { marginStart = dp(10f) }
+            setOnClickListener { dv.clearAll() }
+        }
+        val done = android.widget.TextView(this).apply {
+            text = getString(R.string.doodle_done)
+            setTextColor(android.graphics.Color.WHITE)
+            textSize = 13f
+            setBackgroundResource(R.drawable.bg_chip)
+            setPadding(dp(10f), dp(6f), dp(10f), dp(6f))
+            layoutParams = android.widget.LinearLayout.LayoutParams(
+                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT,
+                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT,
+            ).apply { marginStart = dp(6f) }
+            setOnClickListener { exitDoodle() }
+        }
+        bar.addView(clear)
+        bar.addView(done)
+        val lp = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            overlayWindowType(),
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+            PixelFormat.TRANSLUCENT,
+        ).apply {
+            gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
+            y = dp(20f)
+        }
+        runCatching { wm.addView(bar, lp) }
+            .onSuccess { doodleBar = bar }
+            .onFailure { android.util.Log.e("Overlay", "doodle bar addView failed", it) }
+    }
+
+    private fun exitDoodle() {
+        doodleBar?.let { runCatching { wm.removeView(it) } }
+        doodleBar = null
+        doodle?.let { runCatching { wm.removeView(it) } }
+        doodle = null
+        ball?.visibility = android.view.View.VISIBLE
     }
 
     companion object {

@@ -56,6 +56,17 @@ class OverlayGestureEngine(
     }
 
     var colorIndex = 0
+
+    /**
+     * 持久笔迹（共享端自画模式）：收笔后不淡出、不回收，直到 clearStrokes。
+     * 观看端的短留存(GHOST_FADE_MS)是为了避免与视频回显叠成两条线；
+     * 共享端自己就是"原画"，找茬类玩法需要圈选内容一直留在屏上。
+     */
+    var persistStrokes = false
+
+    /** 轻点落点（共享端自画模式）：无移动的点击也记为单点笔迹，而不是 Tap 动作 */
+    var tapDrawsDot = false
+
     var controlMode = false
         set(value) {
             field = value
@@ -186,7 +197,18 @@ class OverlayGestureEngine(
             }
             current = null
         } else if (withTap && clock() - downTime < TAP_MAX_MS) {
-            acts.add(Action.Tap) // 轻点：切换控件可见性
+            if (tapDrawsDot) {
+                // 自画模式："就点这里"直接落一个点，不产生 Tap 语义
+                val s = Stroke(idGen(), colorIndex)
+                s.points.add(downX to downY)
+                s.endAt = clock()
+                strokes.add(s)
+                acts.add(Action.StrokeStart(s.id, s.colorIndex))
+                acts.add(Action.StrokePoint(s.id, normalize(downX, downY).first, normalize(downX, downY).second))
+                acts.add(Action.StrokeEnd(s.id, s.endAt + END_RESEND_MS))
+            } else {
+                acts.add(Action.Tap) // 轻点：切换控件可见性
+            }
         }
         return acts
     }
@@ -241,17 +263,18 @@ class OverlayGestureEngine(
 
     // ---------- 渲染快照（onDraw 只读这些） ----------
 
-    /** 书写中永不淡出；收笔后本地笔迹只做短暂留存(GHOST_FADE_MS)，过期即回收 */
+    /** 书写中永不淡出；收笔后本地笔迹只做短暂留存(GHOST_FADE_MS)，过期即回收。
+     *  persistStrokes=true（共享端自画）时收笔也永久保留，alpha 恒为 255 */
     fun visibleStrokes(now: Long): List<StrokeSnapshot> {
         val out = ArrayList<StrokeSnapshot>(strokes.size)
         val iter = strokes.iterator()
         while (iter.hasNext()) {
             val s = iter.next()
-            if (s !== current && s.endAt > 0L && now - s.endAt > GHOST_FADE_MS) {
+            if (!persistStrokes && s !== current && s.endAt > 0L && now - s.endAt > GHOST_FADE_MS) {
                 iter.remove()
                 continue
             }
-            val fade = if (s === current || s.endAt == 0L) 1f
+            val fade = if (persistStrokes || s === current || s.endAt == 0L) 1f
             else (1f - (now - s.endAt).toFloat() / GHOST_FADE_MS).coerceIn(0f, 1f)
             out.add(StrokeSnapshot(s.id, s.colorIndex, ArrayList(s.points), (255f * fade).toInt()))
         }
