@@ -118,6 +118,22 @@ class SignalRouterTest {
     }
 
     @Test
+    fun `远程注入失败只在操控模式显示诊断`() {
+        assertEquals(
+            SignalRouter.DataAction.ControlFailure(R.string.ctl_error_service),
+            SignalRouter.routeData("ctl_error", controlMode = true, live = true, reason = "service_unavailable"),
+        )
+        assertEquals(
+            SignalRouter.DataAction.ControlFailure(R.string.ctl_error_capability),
+            SignalRouter.routeData("ctl_error", controlMode = true, live = true, reason = "gesture_capability_missing"),
+        )
+        assertEquals(
+            SignalRouter.DataAction.None,
+            SignalRouter.routeData("ctl_error", controlMode = false, live = true, reason = "service_unavailable"),
+        )
+    }
+
+    @Test
     fun `未知 k 走静默 由悬浮窗层自行消费`() {
         assertEquals(
             SignalRouter.DataAction.None,

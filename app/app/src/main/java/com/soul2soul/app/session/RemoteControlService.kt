@@ -15,9 +15,26 @@ import android.view.accessibility.AccessibilityEvent
  */
 class RemoteControlService : AccessibilityService() {
 
+    enum class Readiness { READY, SERVICE_DISCONNECTED, GESTURE_CAPABILITY_MISSING, UNSUPPORTED }
+
+    enum class DispatchResult {
+        ACCEPTED,
+        SERVICE_UNAVAILABLE,
+        GESTURE_CAPABILITY_MISSING,
+        INVALID_GESTURE,
+        SYSTEM_ACTION_REJECTED,
+        GESTURE_REJECTED,
+    }
+
     override fun onServiceConnected() {
         super.onServiceConnected()
         instance = this
+        Log.i(
+            TAG,
+            "accessibility connected: sdk=${Build.VERSION.SDK_INT} " +
+                "capabilities=${runCatching { serviceInfo.capabilities }.getOrDefault(0)} " +
+                "gesture=${hasGestureCapability(this)}",
+        )
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
@@ -30,7 +47,10 @@ class RemoteControlService : AccessibilityService() {
     override fun onInterrupt() {}
 
     override fun onDestroy() {
-        if (instance === this) instance = null
+        if (instance === this) {
+            instance = null
+            lastForegroundPkg = null
+        }
         super.onDestroy()
     }
 
@@ -43,19 +63,63 @@ class RemoteControlService : AccessibilityService() {
         @Volatile
         private var lastForegroundPkg: String? = null
 
-        /** dispatchGesture 是 API 24（本应用 minSdk 23，必须运行时判级） */
-        fun isReady(): Boolean = instance != null && Build.VERSION.SDK_INT >= 24
+        /** dispatchGesture 是 API 24；同时检查 ROM 实际加载的服务能力，而不只看实例是否存在。 */
+        fun readiness(): Readiness {
+            if (Build.VERSION.SDK_INT < 24) return Readiness.UNSUPPORTED
+            val svc = instance ?: return Readiness.SERVICE_DISCONNECTED
+            return if (hasGestureCapability(svc)) Readiness.READY else Readiness.GESTURE_CAPABILITY_MISSING
+        }
+
+        fun isReady(): Boolean = readiness() == Readiness.READY
+
+        fun hasConnectedInstance(): Boolean = instance != null
+
+        fun hasGestureCapability(): Boolean = instance?.let(::hasGestureCapability) == true
+
+        private fun hasGestureCapability(service: RemoteControlService): Boolean =
+            Build.VERSION.SDK_INT >= 24 && runCatching {
+                service.serviceInfo.capabilities and
+                    android.accessibilityservice.AccessibilityServiceInfo.CAPABILITY_CAN_PERFORM_GESTURES != 0
+            }.getOrDefault(false)
+
+        /** Execute navigation on the shared/remote device, never on the viewer device. */
+        fun dispatchSystemAction(action: GestureIntent.GlobalAction): DispatchResult {
+            val svc = instance ?: return DispatchResult.SERVICE_UNAVAILABLE
+            if (Build.VERSION.SDK_INT < 24) return DispatchResult.SERVICE_UNAVAILABLE
+            if (!hasGestureCapability(svc)) return DispatchResult.GESTURE_CAPABILITY_MISSING
+            val resolved = GestureIntent.resolveGlobalAction(
+                action,
+                ScreenShareService.isLive(),
+                lastForegroundPkg == svc.packageName,
+            )
+            val target = when (resolved) {
+                GestureIntent.GlobalAction.BACK -> GLOBAL_ACTION_BACK
+                GestureIntent.GlobalAction.HOME -> GLOBAL_ACTION_HOME
+                GestureIntent.GlobalAction.RECENTS -> GLOBAL_ACTION_RECENTS
+            }
+            val accepted = runCatching { svc.performGlobalAction(target) }
+                .onFailure { Log.w(TAG, "performGlobalAction threw action=$target", it) }
+                .getOrDefault(false)
+            Log.d(TAG, "performGlobalAction action=$target raw=$action accepted=$accepted")
+            return if (accepted) DispatchResult.ACCEPTED else DispatchResult.SYSTEM_ACTION_REJECTED
+        }
 
         /**
-         * 归一化手势点（0..1，含 letterbox 语义）→ 本机屏幕像素路径 → 立即注入。
+         * 归一化手势点（0..1，含 letterbox 语义）→ 共享端屏幕像素路径 → 立即注入。
          * 抬手即发、整笔一次，端到端延迟只剩网络单向 + 系统注入。
          */
-        fun dispatchNormalized(pts: List<PointF>, durMs: Long): Boolean {
-            val svc = instance ?: return false
-            if (Build.VERSION.SDK_INT < 24 || pts.isEmpty()) return false
+        fun dispatchNormalized(
+            pts: List<PointF>,
+            durMs: Long,
+            onFailure: ((String) -> Unit)? = null,
+        ): DispatchResult {
+            val svc = instance ?: return DispatchResult.SERVICE_UNAVAILABLE
+            if (Build.VERSION.SDK_INT < 24) return DispatchResult.SERVICE_UNAVAILABLE
+            if (!hasGestureCapability(svc)) return DispatchResult.GESTURE_CAPABILITY_MISSING
+            if (pts.isEmpty()) return DispatchResult.INVALID_GESTURE
             // 边缘手势（侧滑返回/底部上滑回桌面·多任务）：dispatchGesture 落在
             // y=1px 也让系统边缘手势区不认，硬模仿只会画出四不像。识别意图后改走
-            // performGlobalAction —— 本机播放真·系统动画，动画再随视频回显给观看端。
+            // performGlobalAction —— 在共享端执行系统动作，动画再随视频回显给观看端。
             // 阈值判定在 GestureIntent（纯逻辑，单测锁定）。
             // 先校验/钳制，再做边缘手势判定和像素换算；否则 NaN/Infinity 可能绕过
             // 普通路径检查，导致无效坐标仍被识别成系统级 BACK/HOME 手势。
@@ -64,22 +128,12 @@ class RemoteControlService : AccessibilityService() {
                 val yn = StrokeMapping.normalizedOrNull(p.y) ?: return@mapNotNull null
                 xn to yn
             }
-            if (normalized.isEmpty()) return false
+            if (normalized.isEmpty()) return DispatchResult.INVALID_GESTURE
             val norm = normalized.map { (x, y) -> GestureIntent.NormPt(x, y) }
             GestureIntent.edgeGlobalAction(norm, durMs)?.let { action ->
                 // 返回键打在我们自己的通话界面上 = 退出会话断线（实测踩坑）。
                 // 共享进行中改按 HOME：通话界面退到后台、共享继续，她立刻落到桌面接着操作
-                val resolved = GestureIntent.resolveGlobalAction(
-                    action, ScreenShareService.isLive(), lastForegroundPkg == svc.packageName
-                )
-                val target = when (resolved) {
-                    GestureIntent.GlobalAction.BACK -> GLOBAL_ACTION_BACK
-                    GestureIntent.GlobalAction.HOME -> GLOBAL_ACTION_HOME
-                    GestureIntent.GlobalAction.RECENTS -> GLOBAL_ACTION_RECENTS
-                }
-                val ok = runCatching { svc.performGlobalAction(target) }.getOrDefault(false)
-                Log.d(TAG, "performGlobalAction action=$target (raw=$action) ok=$ok")
-                return ok
+                return dispatchSystemAction(action)
             }
             // 真实显示尺寸：dispatchGesture 的坐标系是全屏幕，用 app 视角 dm 会整体偏小、底部点不到
             val (screenW, screenH) = com.soul2soul.app.util.ScreenSize.real(svc)
@@ -106,11 +160,23 @@ class RemoteControlService : AccessibilityService() {
                 path, 0L, durMs.coerceIn(50L, 3000L),
             )
             val ok = runCatching {
-                // 不注册回调：注入结果只记录发起，被系统打断时也不重试，避免"幽灵操作"
-                svc.dispatchGesture(GestureDescription.Builder().addStroke(stroke).build(), null, null)
-            }.getOrDefault(false)
+                svc.dispatchGesture(
+                    GestureDescription.Builder().addStroke(stroke).build(),
+                    object : GestureResultCallback() {
+                        override fun onCompleted(gestureDescription: GestureDescription?) {
+                            Log.v(TAG, "dispatchGesture completed")
+                        }
+
+                        override fun onCancelled(gestureDescription: GestureDescription?) {
+                            Log.w(TAG, "dispatchGesture cancelled by system")
+                            onFailure?.invoke("gesture_interrupted")
+                        }
+                    },
+                    null,
+                )
+            }.onFailure { Log.w(TAG, "dispatchGesture threw", it) }.getOrDefault(false)
             Log.d(TAG, "dispatchGesture pts=${normalized.size}/${pts.size} dur=$durMs display=${screenW}x${screenH} ok=$ok")
-            return ok
+            return if (ok) DispatchResult.ACCEPTED else DispatchResult.GESTURE_REJECTED
         }
     }
 }

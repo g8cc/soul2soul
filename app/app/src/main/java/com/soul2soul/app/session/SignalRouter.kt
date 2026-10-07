@@ -33,12 +33,22 @@ object SignalRouter {
         object PeerScreenOff : DataAction()  // 显示「对方锁屏了」
         object HideBanner : DataAction()     // 解锁且仍连通 → 收起状态条
         object RevokedBanner : DataAction()  // 操控中被收回授权 → 横幅说明原因
+        data class ControlFailure(val messageRes: Int) : DataAction()
     }
 
-    fun routeData(k: String, controlMode: Boolean, live: Boolean): DataAction = when (k) {
+    fun routeData(k: String, controlMode: Boolean, live: Boolean, reason: String = ""): DataAction = when (k) {
         "screenoff" -> DataAction.PeerScreenOff
         "screenon" -> if (live) DataAction.HideBanner else DataAction.None
         "ctl_denied" -> if (controlMode) DataAction.RevokedBanner else DataAction.None
+        "ctl_error" -> if (controlMode) {
+            DataAction.ControlFailure(
+                when (reason) {
+                    "service_unavailable" -> R.string.ctl_error_service
+                    "gesture_capability_missing" -> R.string.ctl_error_capability
+                    else -> R.string.ctl_error_generic
+                }
+            )
+        } else DataAction.None
         else -> DataAction.None
     }
 }

@@ -12,6 +12,12 @@ class GestureIntentTest {
 
     private fun pt(x: Float, y: Float) = GestureIntent.NormPt(x, y)
 
+    @Test
+    fun remoteBackCommand_usesRemoteRightEdgeBackGesture() {
+        val points = GestureIntent.remoteBackPoints()
+        assertEquals(GestureIntent.GlobalAction.BACK, GestureIntent.edgeGlobalAction(points, 180L))
+    }
+
     // ---------- BACK：左右边缘水平长滑 ----------
 
     @Test

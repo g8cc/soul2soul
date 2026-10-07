@@ -65,6 +65,10 @@
     <string name="ctl_off">操控</string>
     <string name="ctl_on">操控中</string>
     <string name="ctl_banner">操控中 · 滑动=操作 TA 的手机 · 长按画面唤出菜单</string>
+    <string name="ctl_remote_back">远端返回</string>
+    <string name="ctl_error_service">对方手机的无障碍服务已断开，请重新开启远程操控</string>
+    <string name="ctl_error_capability">对方系统未启用手势注入能力，请更新 App 并重新开启无障碍</string>
+    <string name="ctl_error_generic">对方系统未接受操作，请检查无障碍权限或重试</string>
     <string name="ctl_revoked_banner">操控未生效：TA 锁屏或已收回授权，请 TA 重新点「允许TA操控」</string>
     <string name="ctl_allow">允许TA操控</string>
     <string name="ctl_disallow">收回操控</string>
@@ -157,4 +161,3 @@
     <string name="msg_fail_empty">还没写字呢～</string>
     <string name="msg_fail_generic">留言没发出去，稍后再试试</string>
 </resources>
-

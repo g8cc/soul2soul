@@ -14,6 +14,9 @@ object GestureIntent {
     /** 归一化手势点（0..1，含 letterbox 语义） */
     data class NormPt(val x: Float, val y: Float)
 
+    /** Route Back from the local system to the remote screen using the existing gesture protocol. */
+    fun remoteBackPoints(): List<NormPt> = listOf(NormPt(0.99f, 0.5f), NormPt(0.5f, 0.5f))
+
     /**
      * 边缘手势识别（阈值即"贴边"语义，宁可漏判也不误判普通滑动）：
      *  - 左右边缘水平长滑 → 返回

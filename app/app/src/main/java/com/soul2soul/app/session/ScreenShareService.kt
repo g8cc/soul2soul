@@ -38,7 +38,10 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
     @Volatile private var micMuted = false
 
     @Volatile private var live = false
+    @Volatile private var stopping = false
     private val pendingSignals = mutableListOf<JSONObject>()
+    private var audioRoute: AudioRouteController? = null
+    private var lastCtlErrorAt = 0L
 
     /**
      * 锁屏看门狗（PRD FR-8）：锁屏后 VirtualDisplay 停止出帧，15 秒后自动结束防挂死。
@@ -128,8 +131,11 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
         // 每次新会话必须从零开始收授权：服务实例若跨会话存活(onDestroy 未及时跑)，
         // 上一通话的"允许TA操控"绝不能带进这一通
         consent.resetForNewSession()
+        lastCtlErrorAt = 0L
         updateNotification(statusText())
         com.soul2soul.app.util.WifiKeeper.acquire(this) // WiFi 高性能锁：防省电断流
+        // AudioDeviceModule 构造时会读取系统音频参数，必须先固定通信模式和扬声器路由。
+        audioRoute = AudioRouteController(this).also { it.start() }
 
         androidx.core.content.ContextCompat.registerReceiver(
             this,
@@ -180,6 +186,7 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
     }
 
     override fun onDestroy() {
+        stopping = true
         watchdog.removeCallbacks(screenOffStop)
         watchdog.removeCallbacksAndMessages(null) // 排队中的手势注入一并作废（服务已亡不再代表会话授权）
         consent.resetForNewSession()
@@ -188,11 +195,11 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
         live = false
         liveState = false
         Presence.sessionBusy = false
-        setSpeakerphone(false)
         com.soul2soul.app.util.WifiKeeper.release()
         pendingSignals.clear()
         webRtc?.close()
         webRtc = null
+        audioRoute?.stop()
         stopService(Intent(this, AnnotationOverlayService::class.java))
         super.onDestroy()
     }
@@ -217,19 +224,21 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
     override fun onRemoteVideoSize(width: Int, height: Int) {}
 
     override fun onDataMessage(json: JSONObject) {
-        Log.d("S2S-DC", "recv k=${json.opt("k")} id=${json.opt("id")}")
-        // 观看端清晰度切换 → 共享端；笔迹/表情/特效 → 悬浮窗服务（懒加载画布）
-        when (json.optString("k")) {
-            "res" -> webRtc?.setCaptureLongEdgeOnMain(json.optInt("edge", 1280))
-            "g" -> handleGesture(json)
-            // 观看端「喊TA画」：远程开/关本机自画模式，省掉摇一摇
-            "doodle" -> runCatching {
-                startService(
-                    Intent(this, AnnotationOverlayService::class.java)
-                        .setAction(AnnotationOverlayService.ACTION_DOODLE)
-                )
+        // WebRTC 在 signaling 线程回调；悬浮窗、授权状态机和采集切档统一回主线程串行。
+        watchdog.post {
+            if (stopping) return@post
+            when (json.optString("k")) {
+                "res" -> webRtc?.setCaptureLongEdgeOnMain(json.optInt("edge", 1280))
+                "g" -> handleGesture(json)
+                // 观看端「喊TA画」：远程开/关本机自画模式，省掉摇一摇。
+                "doodle" -> runCatching {
+                    startService(
+                        Intent(this, AnnotationOverlayService::class.java)
+                            .setAction(AnnotationOverlayService.ACTION_DOODLE)
+                    )
+                }
+                else -> AnnotationOverlayService.hook?.invoke(json)
             }
-            else -> AnnotationOverlayService.hook?.invoke(json)
         }
     }
 
@@ -245,10 +254,14 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
         // dispatchGesture 要求带 Looper 的线程；WebRTC 回调在 signaling 线程
         watchdog.post {
             // 收回授权可能发生在入队之后：注入前必须以主线程上的最新状态再判一次
-            when (val pre = consent.preInjectCheck(RemoteControlService.isReady())) {
+            val readiness = RemoteControlService.readiness()
+            when (val pre = consent.preInjectCheck(readiness == RemoteControlService.Readiness.READY)) {
                 is CtlConsentMachine.Decision.Allow -> Unit
                 is CtlConsentMachine.Decision.Deny -> {
                     dispatchConsent(pre.effects)
+                    if (readiness != RemoteControlService.Readiness.READY) {
+                        sendControlError(readiness.toControlErrorReason())
+                    }
                     return@post
                 }
             }
@@ -258,8 +271,40 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
                 val p = pts.optJSONArray(i) ?: continue
                 list.add(PointF(p.optDouble(0).toFloat(), p.optDouble(1).toFloat()))
             }
-            RemoteControlService.dispatchNormalized(list, json.optLong("dur", 120L))
+            val result = RemoteControlService.dispatchNormalized(
+                list,
+                json.optLong("dur", 120L),
+            ) { reason -> sendControlError(reason) }
+            if (result != RemoteControlService.DispatchResult.ACCEPTED) {
+                sendControlError(result.toControlErrorReason())
+            }
         }
+    }
+
+    private fun sendControlError(reason: String) {
+        val now = android.os.SystemClock.elapsedRealtime()
+        if (now - lastCtlErrorAt < CTL_ERROR_THROTTLE_MS) return
+        lastCtlErrorAt = now
+        Log.w("S2S-Ctl", "remote control injection failed: reason=$reason")
+        runCatching {
+            webRtc?.sendControl(JSONObject().put("k", "ctl_error").put("reason", reason))
+        }
+    }
+
+    private fun RemoteControlService.DispatchResult.toControlErrorReason(): String = when (this) {
+        RemoteControlService.DispatchResult.ACCEPTED -> "accepted"
+        RemoteControlService.DispatchResult.SERVICE_UNAVAILABLE -> "service_unavailable"
+        RemoteControlService.DispatchResult.GESTURE_CAPABILITY_MISSING -> "gesture_capability_missing"
+        RemoteControlService.DispatchResult.INVALID_GESTURE -> "invalid_gesture"
+        RemoteControlService.DispatchResult.SYSTEM_ACTION_REJECTED -> "system_action_rejected"
+        RemoteControlService.DispatchResult.GESTURE_REJECTED -> "gesture_rejected"
+    }
+
+    private fun RemoteControlService.Readiness.toControlErrorReason(): String = when (this) {
+        RemoteControlService.Readiness.SERVICE_DISCONNECTED,
+        RemoteControlService.Readiness.UNSUPPORTED -> "service_unavailable"
+        RemoteControlService.Readiness.GESTURE_CAPABILITY_MISSING -> "gesture_capability_missing"
+        RemoteControlService.Readiness.READY -> "accepted"
     }
 
     /** 执行状态机产出的副作用：Toast/被拒回灌/通知栏刷新（节流判定已在状态机内完成） */
@@ -281,28 +326,28 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
     }
 
     override fun onLive() {
-        live = true
-        liveState = true
-        SignalBus.emit(JSONObject().put("type", "local.sessionLive"))
-        updateNotification(statusText())
-        setSpeakerphone(true)
-        // 共享端也报一份：断线/操控问题时两份矩阵对起来看是谁的环境缺了什么
-        com.soul2soul.app.util.SelfCheck.report(
-            this, "sharer",
-            JSONObject().put("ctlAllowed", ctlAllowed),
-        )
-        // 诊断只写 log，不参与坐标计算；保留“整屏 vs 应用窗口 vs 采集帧”三组尺寸，
-        // 真机出现漂移时可以直接判断是哪一层用了错误的矩形。
-        val (sw, sh) = com.soul2soul.app.util.ScreenSize.real(this)
-        Log.d(
-            "S2S-Geom",
-            "sharer display=${sw}x${sh} app=${resources.displayMetrics.widthPixels}x${resources.displayMetrics.heightPixels} " +
-                "capture=${webRtc?.captureWidth}x${webRtc?.captureHeight}",
-        )
+        watchdog.post {
+            if (stopping || webRtc == null) return@post
+            live = true
+            liveState = true
+            SignalBus.emit(JSONObject().put("type", "local.sessionLive"))
+            updateNotification(statusText())
+            // 共享端也报一份：断线/操控问题时两份矩阵对起来看是谁的环境缺了什么
+            com.soul2soul.app.util.SelfCheck.report(
+                this, "sharer",
+                JSONObject().put("ctlAllowed", ctlAllowed),
+            )
+            val (sw, sh) = com.soul2soul.app.util.ScreenSize.real(this)
+            Log.d(
+                "S2S-Geom",
+                "sharer display=${sw}x${sh} app=${resources.displayMetrics.widthPixels}x${resources.displayMetrics.heightPixels} " +
+                    "capture=${webRtc?.captureWidth}x${webRtc?.captureHeight}",
+            )
+        }
     }
 
     override fun onEnded(reason: String) {
-        stopSession(sendBye = reason != "bye")
+        watchdog.post { stopSession(sendBye = reason != "bye") }
     }
 
     override fun onRtt(ms: Long) {}
@@ -310,11 +355,12 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
     // ---------- 会话控制 ----------
 
     private fun stopSession(sendBye: Boolean) {
+        if (stopping) return
+        stopping = true
         live = false
         liveState = false
         Presence.sessionBusy = false
         watchdog.removeCallbacks(screenOffStop)
-        setSpeakerphone(false)
         micMuted = false
         consent.resetForNewSession() // 会话结束立即收回操控授权
         // 静音是发送轨属性，随 AudioSource 销毁而复位，无需再全局恢复系统麦克风
@@ -323,6 +369,8 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
         val client = webRtc
         webRtc = null
         client?.close()
+        // 先停音轨再还原系统路由，防止销毁窗口里出现短促残音。
+        audioRoute?.stop()
         stopService(Intent(this, AnnotationOverlayService::class.java))
         ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
         // 关键：主叫端主页的"呼叫中"状态必须同步复位，否则对端挂断后主叫永远卡在呼叫中
@@ -333,19 +381,6 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
             )
         }
         stopSelf()
-    }
-
-    private fun setSpeakerphone(on: Boolean) {
-        val am = getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager
-        if (on) {
-            am.mode = android.media.AudioManager.MODE_IN_COMMUNICATION
-            @Suppress("DEPRECATION")
-            am.isSpeakerphoneOn = true
-        } else {
-            @Suppress("DEPRECATION")
-            am.isSpeakerphoneOn = false
-            am.mode = android.media.AudioManager.MODE_NORMAL
-        }
     }
 
     private fun updateNotification(text: String) {
@@ -448,6 +483,7 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
         const val EXTRA_CTL_ON = "ctl_on"
         const val EXTRA_PROJECTION = "projection"
         private const val SCREEN_OFF_TIMEOUT_MS = 15_000L
+        private const val CTL_ERROR_THROTTLE_MS = 2_000L
 
         /** 操控授权状态机（会话级）：通知按钮与授权对话框都经它读写，跨 Activity/Service 共享 */
         val consent = CtlConsentMachine { android.os.SystemClock.elapsedRealtime() }

@@ -62,7 +62,7 @@
 ### 2.3 ICE 凭证与遥测
 
 - `iceServers` 由服务端签发（`server/src/turn.js#buildIceServers`）：`username = floor(now/1000)+ttlSec`（默认 ttl 3600s），`credential = base64(HMAC-SHA1(secret, username))`（reverse-proxy 限时凭证）。含 1 条 `stun:` + 2 条 `turn:`（udp/tcp）。
-- `app.diag` 字段：`role`(viewer/sharer), `model`, `os`, `sdk`, `app`, `notif`, `overlay`, `acc`, `mic`, `battery`，外加扩展位（观看端 `ctlSupported`、共享端 `ctlAllowed`）。
+- `app.diag` 字段：`role`(viewer/sharer), `model`, `brand`, `os`, `sdk`, `rom`, `app`, `notif`, `overlay`, `acc`, `accConnected`, `accGestureCap`, `mic`, `battery`，外加扩展位（观看端 `ctlSupported`、共享端 `ctlAllowed`）。服务端只落诊断日志、不转发。
 - `app.version` 字段：`localCode`, `localName`, `remoteCode`, `remoteName`, `hasUpdate`。
 
 ### 2.4 语音留言文件（HTTP，与信令同端口）

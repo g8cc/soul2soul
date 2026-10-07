@@ -339,7 +339,7 @@ wss.on('connection', (ws) => {
       }
       case 'app.diag': {
         // 会话能力自检矩阵（机型/系统/权限）：跨机型问题远程定位用，只含公开设备信息
-        console.log(`[diag.selfcheck] ${ws.deviceId} role=${msg.role} model=${msg.model} os=${msg.os}/sdk${msg.sdk} app=${msg.app} notif=${msg.notif} overlay=${msg.overlay} acc=${msg.acc} mic=${msg.mic} battery=${msg.battery} ctl=${msg.ctlAllowed ?? msg.ctlSupported ?? '-'}`);
+        console.log(`[diag.selfcheck] ${ws.deviceId} role=${msg.role} model=${msg.model} brand=${msg.brand ?? '-'} os=${msg.os}/sdk${msg.sdk} rom=${msg.rom ?? '-'} app=${msg.app} notif=${msg.notif} overlay=${msg.overlay} acc=${msg.acc} accConnected=${msg.accConnected ?? '-'} accGestureCap=${msg.accGestureCap ?? '-'} mic=${msg.mic} battery=${msg.battery} ctl=${msg.ctlAllowed ?? msg.ctlSupported ?? '-'}`);
         break;
       }
       default: break;

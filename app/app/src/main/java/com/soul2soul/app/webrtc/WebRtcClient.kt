@@ -2,7 +2,6 @@ package com.soul2soul.app.webrtc
 
 import android.content.Context
 import android.content.Intent
-import android.media.audiofx.AudioEffect
 import android.util.Log
 import com.soul2soul.app.App
 import org.json.JSONObject
@@ -28,6 +27,7 @@ import org.webrtc.VideoSink
 import org.webrtc.VideoSource
 import org.webrtc.VideoTrack
 import org.webrtc.ScreenCapturerAndroid
+import org.webrtc.audio.JavaAudioDeviceModule
 import java.nio.ByteBuffer
 
 /**
@@ -42,6 +42,39 @@ class WebRtcClient(
     private val iceServers: List<PeerConnection.IceServer>,
     private val listener: Listener,
 ) : PeerConnection.Observer, DataChannel.Observer {
+    private val audioRecordErrorCallback = object : JavaAudioDeviceModule.AudioRecordErrorCallback {
+        override fun onWebRtcAudioRecordInitError(error: String) {
+            Log.e(TAG, "audio record init error: $error")
+        }
+
+        override fun onWebRtcAudioRecordStartError(
+            errorCode: JavaAudioDeviceModule.AudioRecordStartErrorCode,
+            error: String,
+        ) {
+            Log.e(TAG, "audio record start error: code=$errorCode message=$error")
+        }
+
+        override fun onWebRtcAudioRecordError(error: String) {
+            Log.e(TAG, "audio record runtime error: $error")
+        }
+    }
+
+    private val audioTrackErrorCallback = object : JavaAudioDeviceModule.AudioTrackErrorCallback {
+        override fun onWebRtcAudioTrackInitError(error: String) {
+            Log.e(TAG, "audio playout init error: $error")
+        }
+
+        override fun onWebRtcAudioTrackStartError(
+            errorCode: JavaAudioDeviceModule.AudioTrackStartErrorCode,
+            error: String,
+        ) {
+            Log.e(TAG, "audio playout start error: code=$errorCode message=$error")
+        }
+
+        override fun onWebRtcAudioTrackError(error: String) {
+            Log.e(TAG, "audio playout runtime error: $error")
+        }
+    }
 
     interface Listener {
         /** 需要经信令外发的消息（ice candidate 等），已按信令协议组好包 */
@@ -56,21 +89,36 @@ class WebRtcClient(
     }
 
     private val eglContext = App.instance.eglBase.eglBaseContext
-    private val audioModule: org.webrtc.audio.JavaAudioDeviceModule =
+    private val audioModule: JavaAudioDeviceModule =
         // 啸叫(尖锐声不断变大)=「扬声器→自己麦克风」的正反馈环，只有 AEC 能掐断，NS 挡不住。
         // 软件 AEC3 依赖系统上报准确的播放延迟，MIUI 上经常偏差过大 → 对齐失败 ≈ 没有 AEC。
         // 因此设备支持时改走系统 DSP 硬件回声消除（即"打电话不啸叫"的那条链路）；
-        // 硬件 NS 只在同一 DSP 链路上启用——纯软 AEC3 时叠加硬件 NS 会进一步破坏线性对齐。
+        // AEC/NS 分别判定；不可用的一项由原生 APM 单独回退到软件实现。
         run {
-            // 本机 SDK jar 无 android.media.AudioEffect（被裁剪），用 audiofx 桩里的 queryEffects 探测
+            // 使用 libwebrtc 自己的兼容性判定：它会排除不能用于 VoIP 的 AOSP 占位实现。
+            // AEC 与 NS 必须分别探测；任一不可用时 libwebrtc 会自动启用对应的软件处理。
             val hwAec = runCatching {
-                AudioEffect.queryEffects()?.any { it.type == AudioEffect.EFFECT_TYPE_AEC } == true
-            }.getOrDefault(false)
-            Log.i(TAG, "audio: hardwareAEC=$hwAec")
-            org.webrtc.audio.JavaAudioDeviceModule.builder(context)
+                JavaAudioDeviceModule.isBuiltInAcousticEchoCancelerSupported()
+            }.onFailure { Log.w(TAG, "hardware AEC probe failed; use software AEC", it) }
+                .getOrDefault(false)
+            val hwNs = runCatching {
+                JavaAudioDeviceModule.isBuiltInNoiseSuppressorSupported()
+            }.onFailure { Log.w(TAG, "hardware NS probe failed; use software NS", it) }
+                .getOrDefault(false)
+            Log.i(
+                TAG,
+                "audio config: sdk=${android.os.Build.VERSION.SDK_INT} " +
+                    "device=${android.os.Build.MANUFACTURER}/${android.os.Build.MODEL} " +
+                    "hardwareAEC=$hwAec hardwareNS=$hwNs",
+            )
+            JavaAudioDeviceModule.builder(context)
                 .setAudioSource(android.media.MediaRecorder.AudioSource.VOICE_COMMUNICATION)
                 .setUseHardwareAcousticEchoCanceler(hwAec)
-                .setUseHardwareNoiseSuppressor(hwAec)
+                .setUseHardwareNoiseSuppressor(hwNs)
+                // 依赖默认每 30 秒记录一次系统音量；通话功能不需要，关闭可减少唤醒与日志 I/O。
+                .setEnableVolumeLogger(false)
+                .setAudioRecordErrorCallback(audioRecordErrorCallback)
+                .setAudioTrackErrorCallback(audioTrackErrorCallback)
                 .createAudioDeviceModule()
         }
     private val factory: PeerConnectionFactory = PeerConnectionFactory.builder()
@@ -88,10 +136,10 @@ class WebRtcClient(
     private var ctlChannel: DataChannel? = null
     private var surfaceHelper: SurfaceTextureHelper? = null
     private var closed = false
-    private val frameCount = java.util.concurrent.atomic.AtomicLong()
     private val rttHandler = android.os.Handler(android.os.Looper.getMainLooper())
     private var highRttStreak = 0
     private var lowRttStreak = 0
+    private var statsPollCount = 0
     private val iceHandler = android.os.Handler(android.os.Looper.getMainLooper())
     private var iceRestartCount = 0
     @Volatile private var established = false
@@ -136,9 +184,6 @@ class WebRtcClient(
             .onFailure { Log.w(TAG, "muteLocalAudio failed", it) }
     }
 
-    /** 共享端已采集的帧数（统计用；锁屏看门狗走 SCREEN_OFF 广播，见 ScreenShareService） */
-    fun framesReceived(): Long = frameCount.get()
-
     // ---------- 建立流程 ----------
 
     /** 共享端入口。projectionData 为系统屏幕录制授权返回的 Intent */
@@ -167,22 +212,19 @@ class WebRtcClient(
         captureHeight = h
         val helper = SurfaceTextureHelper.create("s2s-capture", eglContext)
         surfaceHelper = helper
-        // 计帧观察者：只透传不碰引用计数（在轨道上加 Sink 会破坏 VideoFrame 引用计数导致崩溃）
+        // 保留异步启动失败通知，但不再为每一帧做 AtomicLong 计数。
         val upstream = source.capturerObserver
-        val countingObserver = object : org.webrtc.CapturerObserver {
-            override fun onFrameCaptured(frame: VideoFrame) {
-                frameCount.incrementAndGet()
-                upstream.onFrameCaptured(frame)
-            }
-
+        val observingCapturer = object : CapturerObserver {
             override fun onCapturerStarted(success: Boolean) {
                 upstream.onCapturerStarted(success)
                 if (!success) notifyEnded("capture_START_FAILED")
             }
 
             override fun onCapturerStopped() = upstream.onCapturerStopped()
+
+            override fun onFrameCaptured(frame: VideoFrame) = upstream.onFrameCaptured(frame)
         }
-        capturer.initialize(helper, context, countingObserver)
+        capturer.initialize(helper, context, observingCapturer)
         capturer.startCapture(w, h, CAPTURE_FPS)
 
         val videoTrack = factory.createVideoTrack("v0", source)
@@ -386,12 +428,16 @@ class WebRtcClient(
 
     fun sendAnnotation(json: JSONObject) {
         val dc = dataChannel ?: run { Log.w(TAG, "sendAnnotation: channel null"); return }
-        val state = try { dc.state().name } catch (e: Exception) { "?" }
+        val state = runCatching { dc.state() }.getOrNull()
+        if (state != DataChannel.State.OPEN) {
+            Log.w(TAG, "annotation dropped: channel state=$state k=${json.opt("k")}")
+            return
+        }
         val bytes = json.toString().toByteArray(Charsets.UTF_8)
         val ok = runCatching { dc.send(DataChannel.Buffer(ByteBuffer.wrap(bytes), false)) }
             .onFailure { Log.w(TAG, "annotation send failed k=${json.opt("k")}", it) }
             .getOrDefault(false)
-        Log.d(TAG, "dc send k=${json.opt("k")} state=$state ok=$ok")
+        if (!ok) Log.w(TAG, "annotation send rejected k=${json.opt("k")}")
     }
 
     /** 操控能力握手即通道本身：只有新版共享端会创建 ctl。旧版对端 = null，观看端据此禁用操控 */
@@ -402,12 +448,16 @@ class WebRtcClient(
         val dc = ctlChannel ?: dataChannel ?: run {
             Log.w(TAG, "sendControl: no channel"); return
         }
-        val state = try { dc.state().name } catch (e: Exception) { "?" }
+        val state = runCatching { dc.state() }.getOrNull()
+        if (state != DataChannel.State.OPEN) {
+            Log.w(TAG, "control dropped: channel state=$state k=${json.opt("k")}")
+            return
+        }
         val bytes = json.toString().toByteArray(Charsets.UTF_8)
         val ok = runCatching { dc.send(DataChannel.Buffer(ByteBuffer.wrap(bytes), false)) }
             .onFailure { Log.w(TAG, "control send failed k=${json.opt("k")}", it) }
             .getOrDefault(false)
-        Log.d(TAG, "ctl send k=${json.opt("k")} state=$state ok=$ok")
+        if (!ok) Log.w(TAG, "control send rejected k=${json.opt("k")}")
     }
 
     // ---------- PeerConnection.Observer ----------
@@ -455,7 +505,12 @@ class WebRtcClient(
             }
             PeerConnection.IceConnectionState.FAILED -> {
                 iceHandler.removeCallbacks(iceRestartRunner)
-                notifyEnded("ice_FAILED")
+                val recovery = IceRecoveryPolicy.onFailed(established, isSharer)
+                if (recovery.armRecoveryTimeout) {
+                    iceHandler.removeCallbacks(disconnectTimeoutRunner)
+                    iceHandler.postDelayed(disconnectTimeoutRunner, DISCONNECT_TIMEOUT_MS)
+                }
+                if (recovery.restartNow) iceHandler.post(iceRestartRunner)
             }
             PeerConnection.IceConnectionState.CLOSED -> if (!closed) {
                 iceHandler.removeCallbacks(iceRestartRunner)
@@ -478,12 +533,13 @@ class WebRtcClient(
             .onFailure { Log.w(TAG, "restartIce unsupported", it) }
     }
 
-    /** 每 2 秒取一次 candidate-pair 的 RTT + 视频流质量统计（实时性可视化与诊断） */
+    /** 每 2 秒取 RTT 做实时显示/自适应，详细音视频统计每 10 秒记录一次。 */
     private fun startRttPolling() {
         rttHandler.post(object : Runnable {
             override fun run() {
                 val pc = pc ?: return
                 pc.getStats { report ->
+                    if (closed) return@getStats
                     var best = -1L
                     for ((_, stats) in report.statsMap) {
                         if (stats.type == "candidate-pair" &&
@@ -498,8 +554,11 @@ class WebRtcClient(
                     }
                     if (best >= 0) listener.onRtt(best)
 
-                    // 编解码实现与帧率诊断：确认软硬编解码（性能调优的依据）
-                    for ((_, stats) in report.statsMap) {
+                    // 统计仍每 2 秒用于自适应；详细媒体诊断每 10 秒记录一次。
+                    statsPollCount += 1
+                    if (statsPollCount % DIAGNOSTIC_EVERY_POLLS == 0) {
+                        // 编解码实现与帧率诊断：确认软硬编解码（性能调优的依据）
+                        for ((_, stats) in report.statsMap) {
                         when (stats.type) {
                             "outbound-rtp" -> if (stats.members["kind"] == "video") {
                                 val impl = stats.members["encoderImplementation"]?.toString() ?: "?"
@@ -514,13 +573,18 @@ class WebRtcClient(
                                 val recv = (stats.members["packetsReceived"] as? Number)?.toLong() ?: 1L
                                 val jitter = (stats.members["jitter"] as? Number)?.toDouble() ?: 0.0
                                 Log.d(TAG, "DEC impl=$impl fps=${"%.1f".format(fps)} loss=$lost recv=$recv jitter=${"%.1f".format(jitter * 1000)}ms")
+                            } else if (stats.members["kind"] == "audio") {
+                                val lost = (stats.members["packetsLost"] as? Number)?.toLong() ?: 0L
+                                val jitter = (stats.members["jitter"] as? Number)?.toDouble() ?: 0.0
+                                val concealed = (stats.members["concealedSamples"] as? Number)?.toLong() ?: 0L
+                                Log.d(TAG, "audio loss=$lost jitter=${"%.1f".format(jitter * 1000)}ms concealed=$concealed")
                             }
                         }
                     }
 
-                    // 视频流质量诊断（观看端）：丢包/抖动/帧率
-                    if (!isSharer) {
-                        for ((_, stats) in report.statsMap) {
+                        // 视频流质量诊断（观看端）：丢包/抖动/帧率
+                        if (!isSharer) {
+                            for ((_, stats) in report.statsMap) {
                             if (stats.type == "inbound-rtp" &&
                                 stats.members["kind"] == "video"
                             ) {
@@ -529,6 +593,7 @@ class WebRtcClient(
                                 val jitter = (stats.members["jitter"] as? Number)?.toDouble() ?: 0.0
                                 val fps = (stats.members["framesPerSecond"] as? Number)?.toDouble()
                                 Log.d(TAG, "video loss=${lost} recv=${recv} jitter=${"%.3f".format(jitter)}s fps=${"%.1f".format(fps ?: 0.0)}")
+                            }
                             }
                         }
                     }
@@ -540,10 +605,10 @@ class WebRtcClient(
                         if (best < 150) lowRttStreak += 1 else lowRttStreak = 0
                         if (highRttStreak >= 3 && captureLongEdge > 960) {
                             Log.d(TAG, "high rtt ${best}ms, degrade to 960")
-                            applyCaptureLongEdge(960)
+                            rttHandler.post { if (!closed) applyCaptureLongEdge(960) }
                         } else if (lowRttStreak >= 10 && captureLongEdge < preferredLongEdge) {
                             Log.d(TAG, "rtt recovered, restore $preferredLongEdge")
-                            applyCaptureLongEdge(preferredLongEdge)
+                            rttHandler.post { if (!closed) applyCaptureLongEdge(preferredLongEdge) }
                             lowRttStreak = 0
                         }
                     }
@@ -678,6 +743,8 @@ class WebRtcClient(
     private fun createPeerConnection(): PeerConnection {
         val config = PeerConnection.RTCConfiguration(iceServers).apply {
             sdpSemantics = PeerConnection.SdpSemantics.UNIFIED_PLAN
+            // Wi-Fi/蜂窝切换后继续收集新候选，避免只能依赖失效的旧地址。
+            continualGatheringPolicy = PeerConnection.ContinualGatheringPolicy.GATHER_CONTINUALLY
         }
         return factory.createPeerConnection(config, this) ?: error("createPeerConnection failed")
     }
@@ -749,6 +816,7 @@ class WebRtcClient(
         private const val STREAM = "soul"
         private const val CAPTURE_FPS = 30
         private const val RTT_POLL_MS = 2000L
+        private const val DIAGNOSTIC_EVERY_POLLS = 5
         private const val CONNECT_TIMEOUT_MS = 30_000L
         private const val DISCONNECT_TIMEOUT_MS = 15_000L
         private const val ICE_RESTART_AFTER_MS = 6000L

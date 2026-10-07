@@ -2,7 +2,6 @@ package com.soul2soul.app.session
 
 import android.content.Context
 import android.content.res.Configuration
-import android.media.AudioManager
 import android.media.RingtoneManager
 import android.os.Bundle
 import android.os.CountDownTimer
@@ -75,6 +74,7 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
     private var hdOn = false
     private var live = false
     private var elapsedBase = 0L
+    private var audioRoute: AudioRouteController? = null
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private var ringtone: android.media.Ringtone? = null
@@ -114,11 +114,15 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
             sessionClaimed = true
             Presence.sessionBusy = true
         }
-        // 返回键等价挂断：通知对方正常结束，而不是靠掉线兜底
+        // 普通模式下返回键等价挂断；操控模式下明确把 Back 发到共享端，不得退出本地 Activity。
         onBackPressedDispatcher.addCallback(
             this,
             object : androidx.activity.OnBackPressedCallback(true) {
                 override fun handleOnBackPressed() {
+                    if (::overlay.isInitialized && LocalBackPolicy.shouldRouteBackToRemote(live, overlay.controlMode)) {
+                        sendRemoteBack()
+                        return
+                    }
                     finishWithCleanup(sendBye = true)
                 }
             },
@@ -251,6 +255,11 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
             } else {
                 setControlsVisible(true)
             }
+            findViewById<View>(R.id.btnRemoteBack).visibility =
+                if (overlay.controlMode) View.VISIBLE else View.GONE
+        }
+        findViewById<View>(R.id.btnRemoteBack).setOnClickListener {
+            sendRemoteBack()
         }
         listOf(
             R.id.emoji0 to "❤️", R.id.emoji1 to "😂", R.id.emoji2 to "👍",
@@ -515,7 +524,16 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
         Presence.sessionBusy = true
         stopRinging()
         com.soul2soul.app.util.WifiKeeper.acquire(this) // 观看端同样持 WiFi 高性能锁
-        ensureClient()
+        // 先稳定通信模式/扬声器路由，再创建 WebRTC 音频模块，避免连通瞬间切路由爆音。
+        try {
+            audioRoute = AudioRouteController(this).also { it.start() }
+            ensureClient()
+        } catch (e: Exception) {
+            Log.e("SessionActivity", "start WebRTC failed", e)
+            android.widget.Toast.makeText(this, R.string.connect_timeout, android.widget.Toast.LENGTH_LONG).show()
+            finishWithCleanup(sendBye = true)
+            return
+        }
         // 前提：PresenceService 在线（呼叫通知就是它发出来的，说明连接活着）
         Presence.client.send("accept")
         boxIncoming.visibility = View.GONE
@@ -626,7 +644,9 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
         runOnUiThread {
             if (isFinishing || isDestroyed || callInvalidated) return@runOnUiThread
             // 判据（controlMode/live）与 UI 更新同在主线程：与提取前的读取时序一致
-            when (val action = SignalRouter.routeData(json.optString("k"), overlay.controlMode, live)) {
+            when (val action = SignalRouter.routeData(
+                json.optString("k"), overlay.controlMode, live, json.optString("reason")
+            )) {
                 SignalRouter.DataAction.None -> Unit
                 SignalRouter.DataAction.PeerScreenOff -> {
                     tvState.visibility = View.VISIBLE
@@ -643,12 +663,26 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
                     mainHandler.removeCallbacks(restoreCtlBanner)
                     mainHandler.postDelayed(restoreCtlBanner, 5000)
                 }
+                is SignalRouter.DataAction.ControlFailure -> {
+                    val banner = findViewById<TextView>(R.id.tvCtlMode)
+                    banner.setText(action.messageRes)
+                    mainHandler.removeCallbacks(restoreCtlBanner)
+                    mainHandler.postDelayed(restoreCtlBanner, 5000)
+                }
             }
         }
     }
 
     private val restoreCtlBanner = Runnable {
         if (overlay.controlMode) findViewById<TextView>(R.id.tvCtlMode).setText(R.string.ctl_banner)
+    }
+
+    private fun sendRemoteBack() {
+        val pts = org.json.JSONArray()
+        GestureIntent.remoteBackPoints().forEach { point ->
+            pts.put(org.json.JSONArray().put(point.x).put(point.y))
+        }
+        client?.sendControl(JSONObject().put("k", "g").put("pts", pts).put("dur", 180L))
     }
 
     /** 实时性可视化：网络 RTT 每 2 秒刷新，颜色分级（绿<100ms / 橙<250ms / 红≥250ms） */
@@ -674,7 +708,6 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
             tvState.visibility = View.GONE
             setControlsVisible(true)
             overlay.visibility = View.VISIBLE // 接听并连通前不显示/不响应画笔层
-            setSpeakerphone(true)
             live = true
             micGranted = checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) ==
                 android.content.pm.PackageManager.PERMISSION_GRANTED
@@ -718,19 +751,6 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
         finish()
     }
 
-    private fun setSpeakerphone(on: Boolean) {
-        val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
-        if (on) {
-            am.mode = AudioManager.MODE_IN_COMMUNICATION
-            @Suppress("DEPRECATION")
-            am.isSpeakerphoneOn = true
-        } else {
-            @Suppress("DEPRECATION")
-            am.isSpeakerphoneOn = false
-            am.mode = AudioManager.MODE_NORMAL
-        }
-    }
-
     /** 离开全屏时自动进入画中画，继续陪看（观看端核心体验） */
     override fun onUserLeaveHint() {
         super.onUserLeaveHint()
@@ -772,7 +792,6 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
         callInvalidated = true
         if (sessionClaimed) Presence.sessionBusy = false
         stopRinging()
-        setSpeakerphone(false)
         com.soul2soul.app.util.WifiKeeper.release()
         acceptTimeout?.let { mainHandler.removeCallbacks(it) }
         mainHandler.removeCallbacks(elapsedTicker)
@@ -787,6 +806,8 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
         remoteVideoTrack = null
         client?.close()
         client = null
+        // WebRTC 播放/采集彻底停止后才恢复系统路由，避免关闭阶段漏出残音。
+        audioRoute?.stop()
         renderer.release()
         super.onDestroy()
     }

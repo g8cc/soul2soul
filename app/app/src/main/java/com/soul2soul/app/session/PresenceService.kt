@@ -104,7 +104,6 @@ class PresenceService : Service() {
         scope.cancel()
         com.soul2soul.app.msg.InboxStore.removeListener(inboxListener)
         Presence.sessionBusy = false
-        com.soul2soul.app.util.WifiKeeper.release()
         Presence.client.close()
         started = false
         super.onDestroy()

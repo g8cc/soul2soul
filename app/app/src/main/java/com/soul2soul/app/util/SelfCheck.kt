@@ -21,12 +21,16 @@ object SelfCheck {
         val json = JSONObject().apply {
             put("role", role)
             put("model", Build.MANUFACTURER + " " + Build.MODEL)
+            put("brand", Build.BRAND)
             put("os", Build.VERSION.RELEASE)
             put("sdk", Build.VERSION.SDK_INT)
+            put("rom", Build.DISPLAY)
             put("app", BuildConfig.VERSION_NAME + "(" + BuildConfig.VERSION_CODE + ")")
             put("notif", androidx.core.app.NotificationManagerCompat.from(ctx).areNotificationsEnabled())
             put("overlay", Settings.canDrawOverlays(ctx))
             put("acc", RemoteControlService.isReady())
+            put("accConnected", RemoteControlService.hasConnectedInstance())
+            put("accGestureCap", RemoteControlService.hasGestureCapability())
             put("mic", ctx.checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) ==
                 PackageManager.PERMISSION_GRANTED)
             put("battery", batteryIgnoring(ctx))

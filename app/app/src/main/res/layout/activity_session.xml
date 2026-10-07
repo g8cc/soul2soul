@@ -365,7 +365,22 @@
                     android:text="@string/ctl_off"
                     android:textColor="@color/white"
                     android:textSize="12sp" />
+
             </LinearLayout>
+
+            <TextView
+                android:id="@+id/btnRemoteBack"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_gravity="center_horizontal"
+                android:layout_marginTop="6dp"
+                android:background="@drawable/bg_chip_active"
+                android:paddingHorizontal="10dp"
+                android:paddingVertical="6dp"
+                android:text="@string/ctl_remote_back"
+                android:textColor="@color/white"
+                android:textSize="12sp"
+                android:visibility="gone" />
         </LinearLayout>
 
         <!-- 第二行：通话状态 + 挂断 -->
