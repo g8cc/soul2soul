@@ -66,6 +66,7 @@ class MessageActivity : AppCompatActivity() {
     private var playingId: String? = null
     private var loadingId: String? = null
     private var player: MediaPlayer? = null
+    private var playingAnim: android.graphics.drawable.AnimationDrawable? = null
     private val timeFmt = SimpleDateFormat("MM-dd HH:mm", Locale.getDefault())
 
     private val storeListener: () -> Unit = { runOnUiThread { syncFromStore() } }
@@ -461,6 +462,8 @@ class MessageActivity : AppCompatActivity() {
     private fun stopPlay() {
         player?.let { runCatching { it.release() } }
         player = null
+        playingAnim?.stop()
+        playingAnim = null
         if (playingId != null) {
             playingId = null
             adapter.notifyItemRangeChanged(0, shown.size)
@@ -491,23 +494,25 @@ class MessageActivity : AppCompatActivity() {
             val label = timeFmt.format(Date(m.ts))
             val voice = m.kind == "voice"
             holder.bubble.setTextIsSelectable(!voice)
-            holder.bubble.text = if (voice) {
-                val secs = ceil(m.durMs / 1000.0).toInt().coerceAtLeast(1)
-                when {
-                    m.id == loadingId && !m.mine -> getString(R.string.msg_voice_loading)
-                    m.id == playingId -> getString(R.string.msg_voice_playing)
-                    else -> getString(R.string.msg_voice_play, secs)
+            val secs = ceil(m.durMs / 1000.0).toInt().coerceAtLeast(1)
+            holder.bubble.text = if (voice) getString(R.string.msg_voice_play, secs)
+            else "$label\n${m.text}"
+            // 微信式语音气泡：喇叭图标（播放中声波逐帧跳动）+ 随时长增长的宽度
+            val d = if (!voice) null else run {
+                val res = when {
+                    m.id == playingId && m.mine -> R.drawable.anim_voice_out
+                    m.id == playingId -> R.drawable.anim_voice_in
+                    m.mine -> R.drawable.ic_voice_out
+                    else -> R.drawable.ic_voice_in
                 }
-            } else {
-                "$label\n${m.text}"
+                val dr = resources.getDrawable(res, theme).mutate()
+                if (m.id == playingId && dr is android.graphics.drawable.AnimationDrawable) {
+                    playingAnim?.stop()
+                    playingAnim = dr
+                    dr.start()
+                }
+                dr
             }
-            // 微信式语音气泡：小喇叭图标 + 随时长增长的宽度（短=窄泡，长=宽泡）
-            val d = resources.getDrawable(
-                if (voice) {
-                    if (m.mine) R.drawable.ic_voice_out else R.drawable.ic_voice_in
-                } else 0,
-                theme
-            )
             holder.bubble.setCompoundDrawablesRelativeWithIntrinsicBounds(d, null, null, null)
             holder.bubble.compoundDrawablePadding =
                 if (voice) (6 * holder.bubble.resources.displayMetrics.density).toInt() else 0

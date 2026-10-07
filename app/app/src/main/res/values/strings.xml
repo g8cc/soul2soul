@@ -141,9 +141,7 @@
     <string name="msg_rec_too_short">话太短啦，按住多说几个字</string>
     <string name="msg_send_failed">语音没发出去，检查一下网络再试试</string>
     <string name="msg_not_connected">还没连上服务器，稍等一下再发吧</string>
-    <string name="msg_voice_loading">下载中…</string>
     <string name="msg_voice_play">%1$d″</string>
-    <string name="msg_voice_playing">播放中…</string>
     <string name="msg_voice_failed">语音没下载下来，检查网络再试试</string>
     <string name="msg_peer_offline_title">TA 现在不在线</string>
     <string name="msg_peer_offline_msg">要不要给 TA 留个言？TA 打开 App 就能看到，也能回你。</string>

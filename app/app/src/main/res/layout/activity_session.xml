@@ -257,7 +257,8 @@
                 android:textSize="28sp" />
         </LinearLayout>
 
-        <!-- 第一行：画笔工具（小色点+短标签，Mi5 小屏也放得下） -->
+        <!-- 第一行：画笔工具（小色点+短标签，Mi5 小屏也放得下）。
+             按钮全挤一行会超屏宽，末尾"操控"被裁掉（v0.2.29 实锤）→ 拆两行 -->
         <LinearLayout
             android:id="@+id/boxLive"
             android:layout_width="wrap_content"
@@ -265,93 +266,106 @@
             android:layout_gravity="center_horizontal"
             android:layout_marginBottom="6dp"
             android:background="@drawable/bg_bubble"
-            android:gravity="center_vertical"
-            android:orientation="horizontal"
+            android:orientation="vertical"
             android:paddingHorizontal="10dp"
             android:paddingVertical="6dp">
 
-            <View
-                android:id="@+id/btnColor0"
-                android:layout_width="28dp"
-                android:layout_height="28dp"
-                android:background="@drawable/bg_dot"
-                android:backgroundTint="@color/primary" />
-
-            <View
-                android:id="@+id/btnColor1"
-                android:layout_width="28dp"
-                android:layout_height="28dp"
-                android:layout_marginStart="8dp"
-                android:background="@drawable/bg_dot"
-                android:backgroundTint="@color/green" />
-
-            <View
-                android:id="@+id/btnColor2"
-                android:layout_width="28dp"
-                android:layout_height="28dp"
-                android:layout_marginStart="8dp"
-                android:background="@drawable/bg_dot"
-                android:backgroundTint="@color/blue" />
-
-            <TextView
-                android:id="@+id/btnClear"
+            <LinearLayout
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:layout_marginStart="10dp"
-                android:background="@drawable/bg_chip"
-                android:paddingHorizontal="10dp"
-                android:paddingVertical="6dp"
-                android:text="@string/clear_strokes"
-                android:textColor="@color/white"
-                android:textSize="12sp" />
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
 
-            <TextView
-                android:id="@+id/btnAskDraw"
+                <View
+                    android:id="@+id/btnColor0"
+                    android:layout_width="28dp"
+                    android:layout_height="28dp"
+                    android:background="@drawable/bg_dot"
+                    android:backgroundTint="@color/primary" />
+
+                <View
+                    android:id="@+id/btnColor1"
+                    android:layout_width="28dp"
+                    android:layout_height="28dp"
+                    android:layout_marginStart="8dp"
+                    android:background="@drawable/bg_dot"
+                    android:backgroundTint="@color/green" />
+
+                <View
+                    android:id="@+id/btnColor2"
+                    android:layout_width="28dp"
+                    android:layout_height="28dp"
+                    android:layout_marginStart="8dp"
+                    android:background="@drawable/bg_dot"
+                    android:backgroundTint="@color/blue" />
+
+                <TextView
+                    android:id="@+id/btnClear"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="10dp"
+                    android:background="@drawable/bg_chip"
+                    android:paddingHorizontal="10dp"
+                    android:paddingVertical="6dp"
+                    android:text="@string/clear_strokes"
+                    android:textColor="@color/white"
+                    android:textSize="12sp" />
+
+                <TextView
+                    android:id="@+id/btnEmoji"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="6dp"
+                    android:background="@drawable/bg_chip"
+                    android:paddingHorizontal="10dp"
+                    android:paddingVertical="6dp"
+                    android:text="@string/emoji_toggle"
+                    android:textColor="@color/white"
+                    android:textSize="12sp" />
+            </LinearLayout>
+
+            <LinearLayout
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:layout_marginStart="6dp"
-                android:background="@drawable/bg_chip"
-                android:paddingHorizontal="10dp"
-                android:paddingVertical="6dp"
-                android:text="@string/ask_draw"
-                android:textColor="@color/white"
-                android:textSize="12sp" />
+                android:layout_marginTop="6dp"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
 
-            <TextView
-                android:id="@+id/btnHd"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginStart="6dp"
-                android:background="@drawable/bg_chip"
-                android:paddingHorizontal="10dp"
-                android:paddingVertical="6dp"
-                android:text="@string/hd_on"
-                android:textColor="@color/white"
-                android:textSize="12sp" />
+                <TextView
+                    android:id="@+id/btnAskDraw"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:background="@drawable/bg_chip"
+                    android:paddingHorizontal="10dp"
+                    android:paddingVertical="6dp"
+                    android:text="@string/ask_draw"
+                    android:textColor="@color/white"
+                    android:textSize="12sp" />
 
-            <TextView
-                android:id="@+id/btnEmoji"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginStart="6dp"
-                android:background="@drawable/bg_chip"
-                android:paddingHorizontal="10dp"
-                android:paddingVertical="6dp"
-                android:text="@string/emoji_toggle"
-                android:textColor="@color/white"
-                android:textSize="12sp" />
+                <TextView
+                    android:id="@+id/btnHd"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="6dp"
+                    android:background="@drawable/bg_chip"
+                    android:paddingHorizontal="10dp"
+                    android:paddingVertical="6dp"
+                    android:text="@string/hd_on"
+                    android:textColor="@color/white"
+                    android:textSize="12sp" />
 
-            <TextView
-                android:id="@+id/btnCtl"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginStart="6dp"
-                android:background="@drawable/bg_chip"
-                android:paddingHorizontal="10dp"
-                android:paddingVertical="6dp"
-                android:text="@string/ctl_off"
-                android:textColor="@color/white"
-                android:textSize="12sp" />
+                <TextView
+                    android:id="@+id/btnCtl"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="6dp"
+                    android:background="@drawable/bg_chip"
+                    android:paddingHorizontal="10dp"
+                    android:paddingVertical="6dp"
+                    android:text="@string/ctl_off"
+                    android:textColor="@color/white"
+                    android:textSize="12sp" />
+            </LinearLayout>
         </LinearLayout>
 
         <!-- 第二行：通话状态 + 挂断 -->
