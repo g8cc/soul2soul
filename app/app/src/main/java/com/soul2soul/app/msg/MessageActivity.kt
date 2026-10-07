@@ -45,6 +45,9 @@ class MessageActivity : AppCompatActivity() {
     private lateinit var tvEmpty: TextView
     private lateinit var etInput: EditText
     private lateinit var btnMic: android.widget.ImageView
+    private lateinit var btnEmoji: android.widget.ImageView
+    private lateinit var emojiPanel: View
+    private var emojiOpen = false
     private lateinit var btnSend: Button
     private lateinit var btnHoldTalk: Button
     private lateinit var recOverlay: View
@@ -88,6 +91,8 @@ class MessageActivity : AppCompatActivity() {
         tvEmpty = findViewById(R.id.tvEmpty)
         etInput = findViewById(R.id.etInput)
         btnMic = findViewById(R.id.btnMic)
+        btnEmoji = findViewById(R.id.btnEmoji)
+        emojiPanel = findViewById(R.id.emojiPanel)
         btnSend = findViewById(R.id.btnSend)
         btnHoldTalk = findViewById(R.id.btnHoldTalk)
         recOverlay = findViewById(R.id.recOverlay)
@@ -104,6 +109,15 @@ class MessageActivity : AppCompatActivity() {
         findViewById<View>(R.id.btnBack).setOnClickListener { finish() }
         btnSend.setOnClickListener { sendText() }
         btnMic.setOnClickListener { setVoiceMode(!voiceMode) }
+        btnEmoji.setOnClickListener { toggleEmojiPanel() }
+        val emojiIds = listOf(
+            R.id.emoji0, R.id.emoji1, R.id.emoji2, R.id.emoji3, R.id.emoji4,
+            R.id.emoji5, R.id.emoji6, R.id.emoji7, R.id.emoji8, R.id.emoji9,
+        )
+        for (id in emojiIds) {
+            val tv = findViewById<TextView>(id)
+            tv.setOnClickListener { insertEmoji(tv.text.toString()) }
+        }
         btnHoldTalk.setOnTouchListener { _, ev -> onHoldTouch(ev) }
         syncFromStore()
         InboxStore.addListener(storeListener)
@@ -249,7 +263,31 @@ class MessageActivity : AppCompatActivity() {
             val imm = getSystemService(android.content.Context.INPUT_SERVICE)
                 as android.view.inputmethod.InputMethodManager
             imm.hideSoftInputFromWindow(etInput.windowToken, 0)
+        } else {
+            setEmojiPanel(false) // 语音输入和表情面板互斥（面板插的是文字）
         }
+    }
+
+    private fun toggleEmojiPanel() = setEmojiPanel(!emojiOpen)
+
+    /** 😊 面板开合：语音模式先来一个回键盘；面板替代软键盘的位置，不抢焦点 */
+    private fun setEmojiPanel(open: Boolean) {
+        if (open && voiceMode) setVoiceMode(false)
+        emojiOpen = open
+        emojiPanel.visibility = if (open) View.VISIBLE else View.GONE
+        if (!open) return
+        val imm = getSystemService(android.content.Context.INPUT_SERVICE)
+            as android.view.inputmethod.InputMethodManager
+        imm.hideSoftInputFromWindow(etInput.windowToken, 0)
+    }
+
+    /** 点表情插到光标处（可连续点多个），超长部分和文字一样被 500 字过滤挡下 */
+    private fun insertEmoji(emoji: String) {
+        etInput.requestFocus()
+        val t = etInput.text
+        val s = etInput.selectionStart.coerceIn(0, t.length)
+        val e = etInput.selectionEnd.coerceIn(0, t.length)
+        t.replace(minOf(s, e), maxOf(s, e), emoji)
     }
 
     private fun newRecorder(): MediaRecorder =
@@ -531,6 +569,19 @@ class MessageActivity : AppCompatActivity() {
     }
 
     // ---------- 生命周期 ----------
+
+    override fun onResume() {
+        super.onResume()
+        // 屏上正看着留言：通知栏条数收起，别和自己抢提醒
+        UnreadNotifier.suppressed = true
+        UnreadNotifier.sync(this)
+    }
+
+    override fun onPause() {
+        UnreadNotifier.suppressed = false
+        UnreadNotifier.sync(this) // 离开时还有没播的语音 → 通知栏重新挂上条数
+        super.onPause()
+    }
 
     override fun onDestroy() {
         InboxStore.removeListener(storeListener)

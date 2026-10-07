@@ -58,12 +58,19 @@ class PresenceService : Service() {
         }
     }
 
+    /** 留言箱任何变化都同步通知栏常驻条数（服务常驻，UI 不在也一样跟） */
+    private val inboxListener: () -> Unit = {
+        com.soul2soul.app.msg.UnreadNotifier.sync(this)
+    }
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
         super.onCreate()
         Notif.ensureChannels(this)
         startForeground(Notif.ID_PRESENCE, buildPresenceNotification())
+        com.soul2soul.app.msg.InboxStore.addListener(inboxListener)
+        com.soul2soul.app.msg.UnreadNotifier.sync(this) // 进程重启后补挂/清掉残留条数
 
         if (!started) {
             started = true
@@ -94,6 +101,7 @@ class PresenceService : Service() {
     override fun onDestroy() {
         handler.removeCallbacksAndMessages(null)
         scope.cancel()
+        com.soul2soul.app.msg.InboxStore.removeListener(inboxListener)
         Presence.sessionBusy = false
         com.soul2soul.app.util.WifiKeeper.release()
         Presence.client.close()

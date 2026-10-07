@@ -128,6 +128,10 @@
     <string name="msg_sending">上传中…</string>
     <string name="msg_hold_talk">按住 说话</string>
     <string name="msg_voice_toggle_desc">语音/键盘切换</string>
+    <string name="msg_emoji_toggle_desc">表情</string>
+    <string name="msg_unread_one">TA 留了 1 条留言</string>
+    <string name="msg_unread_many">TA 留了 %1$d 条留言</string>
+    <string name="msg_unread_tap">点我查看</string>
     <string name="msg_hold_talking">松开 发送</string>
     <string name="msg_hold_canceling">松开 取消</string>
     <string name="msg_hold_release">松开发送 · 手指不松开</string>

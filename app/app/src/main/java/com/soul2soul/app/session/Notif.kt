@@ -8,9 +8,11 @@ object Notif {
     const val CH_PRESENCE = "presence"
     const val CH_SESSION = "session"
     const val CH_CALL = "call"
+    const val CH_MSG = "msg"
     const val ID_PRESENCE = 1
     const val ID_SESSION = 2
     const val ID_CALL = 3
+    const val ID_MSG = 4
 
     fun ensureChannels(ctx: Context) {
         if (android.os.Build.VERSION.SDK_INT < 26) return // 26 以下无通知渠道概念，NotificationCompat 优先级兜底
@@ -23,6 +25,10 @@ object Notif {
         )
         nm.createNotificationChannel(
             NotificationChannel(CH_CALL, "呼叫", NotificationManager.IMPORTANCE_HIGH)
+        )
+        // 未读留言：常驻条数、静音、不横幅弹出（IMPORTANCE_LOW 不发声不 heads-up）
+        nm.createNotificationChannel(
+            NotificationChannel(CH_MSG, "留言提醒", NotificationManager.IMPORTANCE_LOW)
         )
     }
 }

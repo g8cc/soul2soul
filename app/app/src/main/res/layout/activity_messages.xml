@@ -51,6 +51,75 @@
         android:textSize="15sp"
         android:visibility="gone" />
 
+    <!-- 表情面板：点 😊 弹出，点表情插到输入框光标处（微信式）。和会话页飘表情不同，这里是"发进留言" -->
+    <HorizontalScrollView
+        android:id="@+id/emojiPanel"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:background="@color/white"
+        android:paddingHorizontal="8dp"
+        android:scrollbars="none"
+        android:visibility="gone">
+
+        <LinearLayout
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:paddingVertical="6dp">
+
+            <TextView
+                android:id="@+id/emoji0"
+                style="@style/MsgEmoji"
+                android:text="❤️" />
+
+            <TextView
+                android:id="@+id/emoji1"
+                style="@style/MsgEmoji"
+                android:text="😘" />
+
+            <TextView
+                android:id="@+id/emoji2"
+                style="@style/MsgEmoji"
+                android:text="🥰" />
+
+            <TextView
+                android:id="@+id/emoji3"
+                style="@style/MsgEmoji"
+                android:text="😊" />
+
+            <TextView
+                android:id="@+id/emoji4"
+                style="@style/MsgEmoji"
+                android:text="😭" />
+
+            <TextView
+                android:id="@+id/emoji5"
+                style="@style/MsgEmoji"
+                android:text="😂" />
+
+            <TextView
+                android:id="@+id/emoji6"
+                style="@style/MsgEmoji"
+                android:text="👍" />
+
+            <TextView
+                android:id="@+id/emoji7"
+                style="@style/MsgEmoji"
+                android:text="🌹" />
+
+            <TextView
+                android:id="@+id/emoji8"
+                style="@style/MsgEmoji"
+                android:text="🫶" />
+
+            <TextView
+                android:id="@+id/emoji9"
+                style="@style/MsgEmoji"
+                android:text="💤" />
+        </LinearLayout>
+    </HorizontalScrollView>
+
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
@@ -58,6 +127,15 @@
         android:gravity="center_vertical"
         android:orientation="horizontal"
         android:padding="10dp">
+
+        <ImageView
+            android:id="@+id/btnEmoji"
+            android:layout_width="44dp"
+            android:layout_height="44dp"
+            android:background="?android:attr/selectableItemBackgroundBorderless"
+            android:contentDescription="@string/msg_emoji_toggle_desc"
+            android:padding="8dp"
+            android:src="@drawable/ic_emoji_toggle" />
 
         <ImageView
             android:id="@+id/btnMic"
