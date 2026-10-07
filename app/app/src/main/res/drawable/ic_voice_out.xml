@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 微信式我方语音气泡图标：白色实心小喇叭（镜像由布局 gravity 视觉决定，此处箭头朝右即可） -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="20dp"
+    android:height="20dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24"
+    android:tint="@color/white">
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M3,9 L3,15 L7,15 L12,19 L12,5 L7,9 Z" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M14.5,8 C16.6,10 16.6,14 14.5,16 L16,16 C18.6,13.4 18.6,10.6 16,8 Z" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M17.5,4.5 C21.5,8.5 21.5,15.5 17.5,19.5 L19,19.5 C23.4,15.1 23.4,8.9 19,4.5 Z" />
+</vector>

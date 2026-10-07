@@ -12,6 +12,7 @@ import android.view.Gravity
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
+import android.view.MotionEvent
 import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
@@ -43,8 +44,14 @@ class MessageActivity : AppCompatActivity() {
     private lateinit var rv: RecyclerView
     private lateinit var tvEmpty: TextView
     private lateinit var etInput: EditText
-    private lateinit var btnMic: Button
+    private lateinit var btnMic: android.widget.ImageView
     private lateinit var btnSend: Button
+    private lateinit var btnHoldTalk: Button
+    private lateinit var recOverlay: View
+    private lateinit var tvRecTimer: TextView
+    private lateinit var tvRecHint: TextView
+    private lateinit var tvRecCancel: TextView
+    private lateinit var recBars: List<View>
     private val adapter by lazy { MsgAdapter() }
     private val uiTick = Handler(Looper.getMainLooper())
 
@@ -52,6 +59,10 @@ class MessageActivity : AppCompatActivity() {
     private var recStartAt = 0L
     private var recFile: File? = null
     private var voiceBusy = false
+    private var voiceMode = false
+    private var holdStarted = false
+    private var cancelState = false
+    private var touchDownY = 0f
     private var playingId: String? = null
     private var loadingId: String? = null
     private var player: MediaPlayer? = null
@@ -61,7 +72,12 @@ class MessageActivity : AppCompatActivity() {
 
     private val micPermission =
         registerForActivityResult(androidx.activity.result.contract.ActivityResultContracts.RequestPermission()) { granted ->
-            if (granted) startRecording() else toast(getString(R.string.msg_need_mic))
+            if (granted && voiceMode && !holdStarted && recorder == null) {
+                // 手指还按着不放：授权回来直接续上这次"按住说话"
+                startRecording()
+            } else if (!granted) {
+                toast(getString(R.string.msg_need_mic))
+            }
         }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -72,12 +88,22 @@ class MessageActivity : AppCompatActivity() {
         etInput = findViewById(R.id.etInput)
         btnMic = findViewById(R.id.btnMic)
         btnSend = findViewById(R.id.btnSend)
+        btnHoldTalk = findViewById(R.id.btnHoldTalk)
+        recOverlay = findViewById(R.id.recOverlay)
+        tvRecTimer = findViewById(R.id.tvRecTimer)
+        tvRecHint = findViewById(R.id.tvRecHint)
+        tvRecCancel = findViewById(R.id.tvRecCancel)
+        recBars = listOf(
+            findViewById(R.id.bar1), findViewById(R.id.bar2), findViewById(R.id.bar3),
+            findViewById(R.id.bar4), findViewById(R.id.bar5),
+        )
         etInput.filters = arrayOf(InputFilter.LengthFilter(500))
         rv.layoutManager = LinearLayoutManager(this)
         rv.adapter = adapter
         findViewById<View>(R.id.btnBack).setOnClickListener { finish() }
         btnSend.setOnClickListener { sendText() }
-        btnMic.setOnClickListener { onMicClicked() }
+        btnMic.setOnClickListener { setVoiceMode(!voiceMode) }
+        btnHoldTalk.setOnTouchListener { _, ev -> onHoldTouch(ev) }
         syncFromStore()
         InboxStore.addListener(storeListener)
     }
@@ -135,19 +161,79 @@ class MessageActivity : AppCompatActivity() {
         }
     }
 
-    private fun onMicClicked() {
-        if (voiceBusy) return
-        if (recorder != null) { stopRecordingAndSend(); return }
-        if (!Presence.client.isConnected) {
-            toast(getString(R.string.msg_not_connected)); return
+    // ---------- 按住说话（微信式） ----------
+
+    private val holdStart = Runnable { startRecording() }
+    private val shortPressHint = Runnable {
+        toast(getString(R.string.msg_hold_short_press))
+    }
+
+    /** 短按不算录音：按下 400ms 后才真的开始录，避免误触冒出一堆 0″ 语音 */
+    private fun onHoldTouch(ev: MotionEvent): Boolean {
+        when (ev.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                if (voiceBusy) return true
+                if (recorder != null) return true // 卡死兜底：按住时上一段还在录，不重开计时
+                if (!Presence.client.isConnected) {
+                    toast(getString(R.string.msg_not_connected)); return true
+                }
+                touchDownY = ev.rawY
+                cancelState = false
+                if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) !=
+                    android.content.pm.PackageManager.PERMISSION_GRANTED
+                ) {
+                    micPermission.launch(Manifest.permission.RECORD_AUDIO)
+                    return true
+                }
+                holdStarted = true
+                uiTick.removeCallbacks(holdStart)
+                uiTick.postDelayed(holdStart, HOLD_START_DELAY_MS)
+            }
+            MotionEvent.ACTION_MOVE -> {
+                if (!holdStarted && recorder == null) return true
+                val up = touchDownY - ev.rawY > resources.displayMetrics.density * CANCEL_SLIDE_DP
+                if (up != cancelState) applyCancelState(up)
+            }
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                if (recorder != null) {
+                    if (cancelState) endRecording("canceled")
+                    else endRecording("send")
+                } else if (holdStarted) {
+                    endRecording("short_press")
+                }
+                holdStarted = false
+                cancelState = false
+                uiTick.removeCallbacks(holdStart)
+            }
         }
-        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) !=
-            android.content.pm.PackageManager.PERMISSION_GRANTED
-        ) {
-            micPermission.launch(Manifest.permission.RECORD_AUDIO)
-            return
+        return true
+    }
+
+    private fun applyCancelState(up: Boolean) {
+        cancelState = up
+        val col = if (up) android.graphics.Color.parseColor("#FF6B6B") else android.graphics.Color.WHITE
+        btnHoldTalk.text = getString(if (up) R.string.msg_hold_canceling else R.string.msg_hold_talking)
+        tvRecHint.setText(if (up) R.string.msg_hold_canceled else R.string.msg_hold_release)
+        tvRecHint.setTextColor(col)
+        tvRecTimer.setTextColor(col)
+        for (bar in recBars) bar.setBackgroundColor(col)
+    }
+
+    /** 文字 ⇄ 语音输入区切换（微信：左下开关，输入区整体换成"按住 说话"） */
+    private fun setVoiceMode(on: Boolean) {
+        voiceMode = on
+        if (!on && recorder != null) endRecording("discard")
+        etInput.visibility = if (on) View.GONE else View.VISIBLE
+        btnHoldTalk.visibility = if (on) View.VISIBLE else View.GONE
+        btnSend.visibility = if (on) View.GONE else View.VISIBLE
+        btnMic.setImageResource(
+            if (on) R.drawable.ic_keyboard_toggle else R.drawable.ic_mic_toggle
+        )
+        if (!on) {
+            val imm = getSystemService(android.content.Context.INPUT_SERVICE)
+                as android.view.inputmethod.InputMethodManager
+            imm.hideSoftInputFromWindow(etInput.windowToken, 0)
         }
-        startRecording()
     }
 
     private fun newRecorder(): MediaRecorder =
@@ -155,9 +241,12 @@ class MessageActivity : AppCompatActivity() {
         else @Suppress("DEPRECATION") MediaRecorder()
 
     private fun startRecording() {
+        if (recorder != null) return
         val file = File(cacheDir, "rec_${System.currentTimeMillis()}.m4a")
-        val rec = try {
-            newRecorder().apply {
+        val rec = newRecorder()
+        recorder = rec
+        try {
+            rec.apply {
                 setAudioSource(MediaRecorder.AudioSource.MIC)
                 setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
                 setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
@@ -169,46 +258,106 @@ class MessageActivity : AppCompatActivity() {
                 start()
             }
         } catch (e: Exception) {
+            recorder = null
+            runCatching { rec.release() }
             file.delete()
             toast(getString(R.string.msg_rec_failed))
             return
         }
-        recorder = rec
         recFile = file
         recStartAt = System.currentTimeMillis()
-        btnMic.text = getString(R.string.msg_rec_stop, "0")
+        holdStarted = true
+        showRecordingVisuals()
         uiTick.post(tickStop)
+    }
+
+    private fun showRecordingVisuals() {
+        recOverlay.visibility = View.VISIBLE
+        tvRecCancel.visibility = View.VISIBLE
+        tvRecHint.visibility = View.VISIBLE
+        tvRecHint.setText(R.string.msg_hold_release)
+        tvRecHint.setTextColor(android.graphics.Color.WHITE)
+        tvRecTimer.setTextColor(android.graphics.Color.WHITE)
+        for (bar in recBars) bar.setBackgroundColor(android.graphics.Color.WHITE)
+        btnHoldTalk.setText(R.string.msg_hold_talking)
+        updateRecDisplay()
+    }
+
+    private fun updateRecDisplay() {
+        val secs = ((System.currentTimeMillis() - recStartAt) / 1000).toInt().coerceAtMost(30)
+        tvRecTimer.text = "$secs″"
+        // 微信式跳动音柱：每拍随机高度
+        val density = resources.displayMetrics.density
+        for (bar in recBars) {
+            bar.layoutParams = bar.layoutParams.apply {
+                height = ((10 + Math.random() * 30) * density).toInt()
+            }
+            bar.requestLayout()
+        }
+        if (secs >= 25) tvRecHint.setText(R.string.msg_rec_warning)
     }
 
     private val tickStop = object : Runnable {
         override fun run() {
             if (recorder == null) return
-            val secs = ((System.currentTimeMillis() - recStartAt) / 1000).toInt()
-            btnMic.text = getString(R.string.msg_rec_stop, secs.toString())
-            if (secs >= 30) { stopRecordingAndSend(); return }
-            uiTick.postDelayed(this, 500)
+            updateRecDisplay()
+            if (System.currentTimeMillis() - recStartAt >= REC_MAX_MS) {
+                endRecording("send")
+                return
+            }
+            uiTick.postDelayed(this, 200)
         }
     }
 
-    private fun stopRecordingAndSend() {
+    /** 收口所有录音结束路径：mode = send（上传发送）/ canceled（提示已取消）/ short_press / discard */
+    private fun endRecording(mode: String) {
         uiTick.removeCallbacks(tickStop)
+        uiTick.removeCallbacks(shortPressHint)
+        holdStarted = false
+        cancelState = false
         val rec = recorder ?: return
         recorder = null
         val durMs = System.currentTimeMillis() - recStartAt
         val file = recFile
-        runCatching { rec.stop() }.onFailure { file?.delete() }
+        recFile = null
+        // stop() 必须调（m4a 落盘要收尾），失败/取消场景也一样，文件随后删掉
+        runCatching { rec.stop() }
         runCatching { rec.release() }
-        btnMic.text = getString(R.string.msg_rec)
-        if (file == null || durMs < 500 || !file.exists() || file.length() == 0L) {
+        recOverlay.visibility = View.GONE
+        btnHoldTalk.setText(R.string.msg_hold_talk)
+        if (mode == "canceled") {
+            file?.delete()
+            toast(getString(R.string.msg_hold_canceled))
+            return
+        }
+        if (mode == "discard") {
+            file?.delete()
+            return
+        }
+        if (mode == "short_press") {
+            file?.delete()
+            if (durMs < 500) {
+                uiTick.postDelayed(shortPressHint, 300)
+            } else {
+                toast(getString(R.string.msg_rec_too_short))
+            }
+            return
+        }
+        // send：先清掉半途 stop 可能留下的坏文件，重新录一条的路径由 startRecording 负责
+        if (durMs < 500 || file == null || !file.exists() || file.length() == 0L) {
             file?.delete()
             toast(getString(R.string.msg_rec_too_short))
             return
         }
+        uploadAndSend(file, durMs)
+    }
+
+    private fun uploadAndSend(file: File, durMs: Long) {
         voiceBusy = true
-        btnMic.text = getString(R.string.msg_sending)
+        btnHoldTalk.text = getString(R.string.msg_sending)
         VoiceClient.upload(file) { voiceId ->
             voiceBusy = false
-            btnMic.text = getString(R.string.msg_rec)
+            if (recorder == null) btnHoldTalk.setText(R.string.msg_hold_talk)
             file.delete()
             if (voiceId == null || !Presence.client.send("msg.post") {
                     put("kind", "voice")
@@ -300,20 +449,35 @@ class MessageActivity : AppCompatActivity() {
             val label = timeFmt.format(Date(m.ts))
             val voice = m.kind == "voice"
             holder.bubble.setTextIsSelectable(!voice)
-            holder.bubble.text = when {
-                m.kind == "voice" -> {
-                    val secs = ceil(m.durMs / 1000.0).toInt().coerceAtLeast(1)
-                    when {
-                        m.id == loadingId && !m.mine -> getString(R.string.msg_voice_loading)
-                        m.id == playingId -> getString(R.string.msg_voice_playing, secs)
-                        else -> getString(R.string.msg_voice_play, secs)
-                    }
+            holder.bubble.text = if (voice) {
+                val secs = ceil(m.durMs / 1000.0).toInt().coerceAtLeast(1)
+                when {
+                    m.id == loadingId && !m.mine -> getString(R.string.msg_voice_loading)
+                    m.id == playingId -> getString(R.string.msg_voice_playing)
+                    else -> getString(R.string.msg_voice_play, secs)
                 }
-                else -> "$label\n${m.text}"
-            }
-            if (voice && !m.mine) {
-                holder.bubble.setOnClickListener { play(m) }
             } else {
+                "$label\n${m.text}"
+            }
+            // 微信式语音气泡：小喇叭图标 + 随时长增长的宽度（短=窄泡，长=宽泡）
+            val d = resources.getDrawable(
+                if (voice) {
+                    if (m.mine) R.drawable.ic_voice_out else R.drawable.ic_voice_in
+                } else 0,
+                theme
+            )
+            holder.bubble.setCompoundDrawablesRelativeWithIntrinsicBounds(d, null, null, null)
+            holder.bubble.compoundDrawablePadding =
+                if (voice) (6 * holder.bubble.resources.displayMetrics.density).toInt() else 0
+            (holder.bubble.layoutParams as ViewGroup.LayoutParams).width =
+                if (voice) ((90.0 + 5.0 * ceil(m.durMs / 1000.0)).coerceAtMost(240.0) *
+                    holder.bubble.resources.displayMetrics.density).toInt()
+                else ViewGroup.LayoutParams.WRAP_CONTENT
+            if (voice) {
+                holder.bubble.isClickable = !m.mine
+                if (!m.mine) holder.bubble.setOnClickListener { play(m) } else holder.bubble.setOnClickListener(null)
+            } else {
+                holder.bubble.isClickable = false
                 holder.bubble.setOnClickListener(null)
             }
         }
@@ -338,5 +502,7 @@ class MessageActivity : AppCompatActivity() {
 
     companion object {
         private const val REC_MAX_MS = 30_000L
+        private const val HOLD_START_DELAY_MS = 400L
+        private const val CANCEL_SLIDE_DP = 110f
     }
 }
