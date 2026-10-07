@@ -69,8 +69,9 @@ class PresenceService : Service() {
         super.onCreate()
         Notif.ensureChannels(this)
         startForeground(Notif.ID_PRESENCE, buildPresenceNotification())
+        // 只在"本次会话期间新来的留言"才挂条数通知：不在服务启动时补挂历史未读
+        // （用户要求：通知栏不要常驻，有留言了才显示条数）
         com.soul2soul.app.msg.InboxStore.addListener(inboxListener)
-        com.soul2soul.app.msg.UnreadNotifier.sync(this) // 进程重启后补挂/清掉残留条数
 
         if (!started) {
             started = true
