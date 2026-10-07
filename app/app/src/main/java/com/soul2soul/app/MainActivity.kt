@@ -176,11 +176,7 @@ class MainActivity : AppCompatActivity() {
         }
         permOverlay.setOnClickListener { openOverlayPermissionPage() }
         permAccessibility.setOnClickListener {
-            runCatching {
-                startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
-            }.onFailure {
-                toast(R.string.ctl_need_acc)
-            }
+            com.soul2soul.app.util.AccessibilityLauncher.open(this)
         }
 
         lifecycleScope.launch {
@@ -623,6 +619,7 @@ class MainActivity : AppCompatActivity() {
             android.content.pm.PackageManager.PERMISSION_GRANTED
         val overlayOk = Settings.canDrawOverlays(this)
         val accOk = isAppAccessibilityEnabled()
+        if (accOk) Prefs.setAccWasEnabled(this, true)
         bindPermRow(permNotification, R.id.permStateNotif, notifOk)
         bindPermRow(permMic, R.id.permStateMic, micOk)
         bindPermRow(permOverlay, R.id.permStateOverlay, overlayOk)
@@ -678,6 +675,22 @@ class MainActivity : AppCompatActivity() {
             checkForUpdate()
         }
         updateUi()
+        maybePromptAccReset()
+    }
+
+    /** 更新安装后 ROM 常把无障碍授权悄悄关掉：以前开过、现在没了 → 主动递上一键重开 */
+    private var accResetPrompted = false
+    private fun maybePromptAccReset() {
+        if (accResetPrompted || !Prefs.accWasEnabled(this) || isAppAccessibilityEnabled()) return
+        accResetPrompted = true
+        AlertDialog.Builder(this)
+            .setTitle(R.string.acc_reset_title)
+            .setMessage(R.string.acc_reset_msg)
+            .setPositiveButton(R.string.acc_reset_go) { _, _ ->
+                com.soul2soul.app.util.AccessibilityLauncher.open(this)
+            }
+            .setNegativeButton(R.string.acc_reset_later, null)
+            .show()
     }
 
     private fun toast(resId: Int) {

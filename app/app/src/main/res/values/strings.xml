@@ -84,6 +84,16 @@
     <string name="ctl_consent_on_enable">允许TA操控</string>
     <string name="ctl_consent_on_disable">收回操控</string>
     <string name="ctl_consent_close">关闭</string>
+    <string name="acc_guide_title">开启远程操控</string>
+    <string name="acc_guide_miui">进去后按这个路径打开开关：\n\n设置 → 更多设置 → 无障碍 → 已下载的应用 → 陪着你 → 开启「使用 陪着你」\n\n找不到就在设置顶部的搜索框输入「无障碍」。</string>
+    <string name="acc_guide_huawei">进去后按这个路径打开开关：\n\n设置 → 辅助功能 → 无障碍 → 已下载的应用 → 陪着你 → 开启。</string>
+    <string name="acc_guide_generic">进去后找「无障碍」→「已下载的应用 / 已安装的服务」→ 陪着你 → 开启。</string>
+    <string name="acc_guide_go">前往设置</string>
+    <string name="acc_guide_copy">复制路径</string>
+    <string name="acc_reset_title">远程操控被重置了</string>
+    <string name="acc_reset_msg">App 更新后，系统把「远程操控」的无障碍权限关掉了（很多手机更新后都会这样）。点「重新开启」一步打开回来。</string>
+    <string name="acc_reset_go">重新开启</string>
+    <string name="acc_reset_later">稍后</string>
     <string name="acc_service_desc">开启后，在屏幕共享会话内由你决定是否允许伴侣远程操控你的屏幕（通知栏一键收回）</string>
     <string name="clear_strokes">清屏</string>
     <string name="doodle_done">完成</string>

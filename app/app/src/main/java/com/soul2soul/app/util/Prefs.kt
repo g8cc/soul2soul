@@ -34,6 +34,12 @@ object Prefs {
 
     fun setRomGuideShown(ctx: Context, v: Boolean) = sp(ctx).edit().putBoolean("romGuideShown", v).apply()
 
+    /** 无障碍服务历史上开启过：更新安装后国产 ROM 常把它悄悄关掉，
+     *  靠这个标记检测"从有到无"，提示一键重开（无法替用户保留授权，但别让用户自己发现） */
+    fun accWasEnabled(ctx: Context): Boolean = sp(ctx).getBoolean("accWasEnabled", false)
+
+    fun setAccWasEnabled(ctx: Context, v: Boolean) = sp(ctx).edit().putBoolean("accWasEnabled", v).apply()
+
     /** 上次作为观看端收到的远端视频尺寸：新会话开场先按缓存套等比布局，
      *  消除首帧尺寸事件到达前 match_parent 被合成层铺满拉伸的裁切闪跳 */
     fun lastVideoSize(ctx: Context): Pair<Int, Int>? {

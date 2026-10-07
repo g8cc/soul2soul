@@ -53,13 +53,9 @@ class CtlConsentActivity : AppCompatActivity() {
                 when {
                     !ScreenShareService.isRunning() -> finish()
                     !RemoteControlService.isReady() -> {
-                        // 无障碍没开：先去系统设置，回来再点允许（服务侧也会拒绝，双保险）
-                        runCatching {
-                            startActivity(
-                                Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
-                                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                            )
-                        }
+                        // 无障碍没开：直达最终授权页（详情页 intent 不可用时给路径指引再进列表），
+                        // 回来再点允许（服务侧也会拒绝，双保险）
+                        com.soul2soul.app.util.AccessibilityLauncher.open(this@CtlConsentActivity)
                     }
                     ScreenShareService.ctlAllowed -> setCtl(false)
                     else -> setCtl(true)
