@@ -5,7 +5,6 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.PointF
-import android.graphics.RectF
 import android.os.SystemClock
 import android.util.AttributeSet
 import android.view.View
@@ -194,23 +193,23 @@ class OverlayCanvasView @JvmOverloads constructor(
         invalidate()
     }
 
-    /** 笔迹的归一化包围盒（无笔迹返回 null），服务据此收缩悬浮窗尺寸 */
-    fun strokesBboxN(): RectF? {
-        var l = 2f; var t = 2f; var r = -1f; var b = -1f
-        for (s in strokes) for (p in s.points) {
-            if (p.x < l) l = p.x
-            if (p.x > r) r = p.x
-            if (p.y < t) t = p.y
-            if (p.y > b) b = p.y
-        }
-        if (r < 0f) return null
-        return RectF(l, t, r, b)
-    }
-
     fun hasEmojiOrFx(): Boolean = emojis.isNotEmpty() || fx.isNotEmpty()
 
     fun hasVisibleContent(): Boolean =
         strokes.any { it.points.isNotEmpty() } || emojis.isNotEmpty() || fx.isNotEmpty()
+
+    /** 动画循环唯一驱动源：有新点/表情才续帧；静默笔迹收笔后让循环自然熄灭，
+     *  不再每帧空转（空转 + bbox 窗口重排叠加 = 笔迹"一直飘"）。
+     *  兜底收笔判定与 hasVisibleContent 同口径，保证循环停前最后一帧一定把过期笔迹清掉 */
+    private fun needsAnotherFrame(now: Long): Boolean {
+        for (s in strokes) {
+            if (s.points.isEmpty()) continue
+            val aliveMs = if (s.endAt > 0L) now - s.endAt else now - s.lastPointAt
+            val budget = if (s.endAt > 0L) StrokeColors.FADE_MS else STROKE_SILENCE_MS + StrokeColors.FADE_MS
+            if (aliveMs < budget) return true
+        }
+        return emojis.isNotEmpty() || fx.isNotEmpty()
+    }
 
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
@@ -342,7 +341,7 @@ class OverlayCanvasView @JvmOverloads constructor(
         }
         canvas.restoreToCount(saveCount)
 
-        if (hasVisibleContent()) postInvalidateOnAnimation()
+        if (needsAnotherFrame(now)) postInvalidateOnAnimation()
     }
 
     private fun paintStroke(canvas: Canvas, s: Stroke, fade: Float, strokeW: Float) {

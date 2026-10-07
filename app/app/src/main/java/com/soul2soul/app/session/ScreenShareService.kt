@@ -392,11 +392,19 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
             Intent(this, ScreenShareService::class.java).setAction(ACTION_TOGGLE_MUTE),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
-        val ctlIntent = PendingIntent.getService(
+        // 操控按钮走对话框（Activity PendingIntent），不再用服务 PendingIntent+Toast：
+        // Android 7/MIUI 通知面板不是 secure 窗口且不会因服务动作自动收起，
+        // 面板盖住 toast → 授权失败时用户只感觉"点了没反应"（真机实锤）。
+        // 对话框一出现面板自动收起；无障碍没就绪时对话框驻留显示引导
+        val ctlIntent = PendingIntent.getActivity(
             this, 23,
-            Intent(this, ScreenShareService::class.java).setAction(ACTION_TOGGLE_CTL),
+            Intent(this, CtlConsentActivity::class.java)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                .putExtra(CtlConsentActivity.EXTRA_AUTO_APPROVE, true),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
+        // 自画入口是摇一摇（见 AnnotationOverlayService）：通知按钮 Android 7 只放得下 3 个，
+        // 这里保持 静音/操控/结束 不变
         // HyperOS/Android13+ 默认折叠 FGS 通知，动作按钮经常根本看不见——
         // 把"点通知整体"变成授权对话框入口，授权路径不再依赖按钮可见性
         val consentIntent = PendingIntent.getActivity(

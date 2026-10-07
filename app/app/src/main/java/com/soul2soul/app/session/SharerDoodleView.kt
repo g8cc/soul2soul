@@ -26,6 +26,9 @@ class SharerDoodleView(context: Context) : View(context) {
         tapDrawsDot = true
     }
 
+    /** 本机任何一笔触摸都回调一次（服务据此唤回自动隐藏的工具条） */
+    var onActivity: (() -> Unit)? = null
+
     fun setColor(index: Int) {
         engine.colorIndex = index.mod(StrokeColors.COLORS.size)
     }
@@ -41,6 +44,7 @@ class SharerDoodleView(context: Context) : View(context) {
     }
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
+        if (event.actionMasked == MotionEvent.ACTION_DOWN) onActivity?.invoke()
         val acts = when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> engine.onDown(event.getPointerId(0), event.x, event.y)
             MotionEvent.ACTION_MOVE -> {

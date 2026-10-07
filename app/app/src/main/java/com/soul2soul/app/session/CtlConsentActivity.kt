@@ -24,6 +24,7 @@ class CtlConsentActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        if (intent?.getBooleanExtra(EXTRA_AUTO_APPROVE, false) == true && handleAuto()) return
         setContentView(buildUi())
         refresh()
     }
@@ -79,6 +80,24 @@ class CtlConsentActivity : AppCompatActivity() {
         return ScrollView(this).apply { addView(col) }
     }
 
+    /**
+     * 通知按钮一键授权：无障碍就绪 → 按当前状态取反、静默上屏并关闭；
+     * 未就绪（或会话已结束）→ 返回 false 留在对话框，这里能看到失败原因和开启路径，
+     * 不再依赖被通知面板盖住的 toast。
+     */
+    private fun handleAuto(): Boolean {
+        if (!ScreenShareService.isRunning() || !RemoteControlService.isReady()) return false
+        val turnOn = !ScreenShareService.ctlAllowed
+        ScreenShareService.ctlAllowed = turnOn // 乐观写，状态机同进程共享
+        startService(
+            Intent(this, ScreenShareService::class.java)
+                .setAction(ScreenShareService.ACTION_SET_CTL)
+                .putExtra(ScreenShareService.EXTRA_CTL_ON, turnOn),
+        )
+        finish()
+        return true
+    }
+
     private fun setCtl(on: Boolean) {
         if (!ScreenShareService.isRunning()) {
             finish() // 会话已结束：对话框别残留成假授权入口
@@ -113,5 +132,10 @@ class CtlConsentActivity : AppCompatActivity() {
                 else -> R.string.ctl_consent_on_enable
             }
         )
+    }
+
+    companion object {
+        /** 通知栏「允许TA操控」按钮：先当开关用，缺无障碍时才停留在对话框 */
+        const val EXTRA_AUTO_APPROVE = "auto_approve"
     }
 }
