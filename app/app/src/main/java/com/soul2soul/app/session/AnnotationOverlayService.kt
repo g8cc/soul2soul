@@ -72,7 +72,8 @@ class AnnotationOverlayService : Service() {
             stopSelf()
             return START_NOT_STICKY
         }
-        if (intent?.action == ACTION_DOODLE) toggleDoodle() // 调试/兼容入口，正式路径是摇一摇
+        // 观看端「喊TA画」→ ScreenShareService 转发到这里（摇一摇是直接调 toggleDoodle）
+        if (intent?.action == ACTION_DOODLE) toggleDoodle()
         return START_STICKY
     }
 

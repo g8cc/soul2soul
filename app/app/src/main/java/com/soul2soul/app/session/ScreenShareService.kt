@@ -222,6 +222,13 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
         when (json.optString("k")) {
             "res" -> webRtc?.setCaptureLongEdgeOnMain(json.optInt("edge", 1280))
             "g" -> handleGesture(json)
+            // 观看端「喊TA画」：远程开/关本机自画模式，省掉摇一摇
+            "doodle" -> runCatching {
+                startService(
+                    Intent(this, AnnotationOverlayService::class.java)
+                        .setAction(AnnotationOverlayService.ACTION_DOODLE)
+                )
+            }
             else -> AnnotationOverlayService.hook?.invoke(json)
         }
     }

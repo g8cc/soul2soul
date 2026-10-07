@@ -191,6 +191,19 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
             overlay.clearAll()
             client?.sendAnnotation(JSONObject().put("k", "clear"))
         }
+        findViewById<View>(R.id.btnAskDraw).setOnClickListener {
+            if (client?.controlSupported != true) {
+                android.widget.Toast.makeText(
+                    this, R.string.ask_draw_unsupported, android.widget.Toast.LENGTH_SHORT
+                ).show()
+                return@setOnClickListener
+            }
+            // 摇一摇太累：观看端远程把对方的自画模式打开，对方伸手画就行
+            client?.sendControl(JSONObject().put("k", "doodle"))
+            android.widget.Toast.makeText(
+                this, R.string.ask_draw_sent, android.widget.Toast.LENGTH_SHORT
+            ).show()
+        }
         findViewById<View>(R.id.btnHd).setOnClickListener { v ->
             hdOn = !hdOn
             (v as android.widget.TextView).setText(if (hdOn) R.string.hd_on else R.string.hd_off)
