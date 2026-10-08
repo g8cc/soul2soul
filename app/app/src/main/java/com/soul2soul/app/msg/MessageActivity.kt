@@ -271,7 +271,7 @@ class MessageActivity : AppCompatActivity() {
             if (on) R.drawable.ic_keyboard_toggle else R.drawable.ic_mic_toggle
         )
         if (!on) {
-            val imm = getSystemService(android.content.Context.INPUT_SERVICE)
+            val imm = getSystemService(android.content.Context.INPUT_METHOD_SERVICE)
                 as android.view.inputmethod.InputMethodManager
             imm.hideSoftInputFromWindow(etInput.windowToken, 0)
         } else {
@@ -347,7 +347,7 @@ class MessageActivity : AppCompatActivity() {
         emojiOpen = open
         emojiPanel.visibility = if (open) View.VISIBLE else View.GONE
         if (!open) return
-        val imm = getSystemService(android.content.Context.INPUT_SERVICE)
+        val imm = getSystemService(android.content.Context.INPUT_METHOD_SERVICE)
             as android.view.inputmethod.InputMethodManager
         imm.hideSoftInputFromWindow(etInput.windowToken, 0)
     }

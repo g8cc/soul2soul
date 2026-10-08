@@ -75,6 +75,13 @@ for p in paths:
         bad = 1
 sys.exit(bad)
 PY
+  # v0.2.34 真机踩坑锁定：Context.INPUT_SERVICE 返回硬件 InputManager， cast 成
+  # InputMethodManager 必崩 ClassCastException（点表情闪退="权限被重置"假象的元凶）
+  if grep -rn --include='*.kt' -A1 "Context.INPUT_SERVICE" "$ROOT/app/app/src/main/java" 2>/dev/null \
+     | grep -q "InputMethodManager"; then
+    echo "静态检查: INPUT_SERVICE 被 cast 成 InputMethodManager（应为 INPUT_METHOD_SERVICE）"
+    fail=1
+  fi
   [ "$fail" -eq 0 ]
 }
 
