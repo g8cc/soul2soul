@@ -332,21 +332,9 @@
                 android:orientation="horizontal">
 
                 <TextView
-                    android:id="@+id/btnAskDraw"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:background="@drawable/bg_chip"
-                    android:paddingHorizontal="10dp"
-                    android:paddingVertical="6dp"
-                    android:text="@string/ask_draw"
-                    android:textColor="@color/white"
-                    android:textSize="12sp" />
-
-                <TextView
                     android:id="@+id/btnHd"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:layout_marginStart="6dp"
                     android:background="@drawable/bg_chip"
                     android:paddingHorizontal="10dp"
                     android:paddingVertical="6dp"
@@ -436,4 +424,20 @@
                 android:textSize="12sp" />
         </LinearLayout>
     </LinearLayout>
+
+    <!-- 统一入口球（与被控端同款）：点它=展开/收起整套菜单；
+         挂在根 FrameLayout 上，菜单收起时它仍常驻右下角 -->
+    <ImageView
+        android:id="@+id/btnBall"
+        android:layout_width="48dp"
+        android:layout_height="48dp"
+        android:layout_gravity="end|bottom"
+        android:layout_marginEnd="12dp"
+        android:layout_marginBottom="96dp"
+        android:alpha="0.85"
+        android:background="@drawable/bg_ball"
+        android:contentDescription="@string/doodle_ball_desc"
+        android:padding="11dp"
+        android:src="@drawable/ic_ball_brush"
+        android:visibility="gone" />
 </FrameLayout>

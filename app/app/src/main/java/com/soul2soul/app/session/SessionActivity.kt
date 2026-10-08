@@ -45,6 +45,7 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
     private lateinit var tvElapsed: TextView
     private lateinit var tvRtt: TextView
     private lateinit var boxLive: View
+    private lateinit var btnBall: View
     private lateinit var emojiPanel: View
     private lateinit var fxRow: View
     private lateinit var controlsContainer: View
@@ -152,6 +153,9 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
         fxLayer = findViewById(R.id.fxLayer)
         controlsContainer = findViewById(R.id.controlsContainer)
         boxLive = findViewById(R.id.boxLive)
+        btnBall = findViewById(R.id.btnBall)
+        // 统一入口：与被控端同款球，点球=展开/收起整套菜单（与轻点画面同逻辑）
+        btnBall.setOnClickListener { toggleControls() }
 
         renderer.init(App.instance.eglBase.eglBaseContext, null)
         // 缩放模式必须与 DrawingOverlayView.videoRect() 的 letterbox 假设一致（SPEC §5）
@@ -194,19 +198,6 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
         findViewById<View>(R.id.btnClear).setOnClickListener {
             overlay.clearAll()
             client?.sendAnnotation(JSONObject().put("k", "clear"))
-        }
-        findViewById<View>(R.id.btnAskDraw).setOnClickListener {
-            if (client?.controlSupported != true) {
-                android.widget.Toast.makeText(
-                    this, R.string.ask_draw_unsupported, android.widget.Toast.LENGTH_SHORT
-                ).show()
-                return@setOnClickListener
-            }
-            // 摇一摇太累：观看端远程把对方的自画模式打开，对方伸手画就行
-            client?.sendControl(JSONObject().put("k", "doodle"))
-            android.widget.Toast.makeText(
-                this, R.string.ask_draw_sent, android.widget.Toast.LENGTH_SHORT
-            ).show()
         }
         findViewById<View>(R.id.btnHd).setOnClickListener { v ->
             hdOn = !hdOn
@@ -424,6 +415,7 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
         stopRinging()
         boxIncoming.visibility = View.VISIBLE
         boxLive.visibility = View.GONE
+        btnBall.visibility = View.GONE
         startRinging()
         // 30 秒不接听自动拒接（主叫端 30s 也会超时取消）
         incomingCountdown = object : CountDownTimer(INCOMING_TIMEOUT_MS, 1000) {
@@ -707,6 +699,7 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
             acceptTimeout = null
             tvState.visibility = View.GONE
             setControlsVisible(true)
+            btnBall.visibility = View.VISIBLE
             overlay.visibility = View.VISIBLE // 接听并连通前不显示/不响应画笔层
             live = true
             micGranted = checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) ==
@@ -777,6 +770,7 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
         emojiPanel.visibility = if (inPip || !live || !emojiOpen) View.GONE else View.VISIBLE
         fxRow.visibility = if (inPip || !live || !emojiOpen) View.GONE else View.VISIBLE
         overlay.visibility = if (inPip || !live) View.GONE else View.VISIBLE
+        btnBall.visibility = if (inPip || !live) View.GONE else View.VISIBLE
         if (!inPip && live) {
             applyImmersiveBars(false) // 小窗返回全屏：系统栏随控件一起先回来
             mainHandler.removeCallbacks(hideControls)

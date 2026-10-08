@@ -16,7 +16,7 @@ import org.json.JSONObject
  * 共享端悬浮层（懒加载 + 用完即拆）：
  *  - 标注画布：只在收到笔迹/表情/特效时添加，内容淡出后自动移除；
  *    窗口一次挂满全屏、存续期间绝不重排（重排会让旧帧被拉伸 = 笔迹残影）
- *  - 自画模式：摇一摇进出，全屏绘制层 + 自动隐现工具条（同窗口，见下）
+ *  - 自画模式：摇一摇/悬浮球进出，全屏绘制层 + 自动隐现工具条（同窗口，见下）
  *
  * 窗口存续期要短：MIUI 对全屏 TYPE_APPLICATION_OVERLAY 窗口的触摸穿透有版本相关
  * 怪癖（FLAG_NOT_TOUCHABLE 可能失效变成全屏"玻璃罩"冻死桌面），所以画布在内容
@@ -31,8 +31,8 @@ class AnnotationOverlayService : Service() {
     private val wm: WindowManager get() = getSystemService(WINDOW_SERVICE) as WindowManager
 
     // ---------- 摇一摇进出自画 ----------
-    // 悬浮球/通知栏入口都会被对方看见（球常驻画面；老 MIUI 通知面板不进采集失效，
-    // 下拉连通知内容一起泄进视频），摇动是唯一"本机可感、采集不可见"的入口。
+    // 摇动零成本入口但要"甩手机"（用户反馈累）；悬浮球是主动点击入口、代价是会入画
+    // （闲置淡化到 15% 缓解）。两者并存，任选其一。
     private val shakeDetector = ShakeDetector(clock = { android.os.SystemClock.uptimeMillis() })
     private var sensorManager: android.hardware.SensorManager? = null
     private val shakeListener = object : android.hardware.SensorEventListener {
@@ -72,8 +72,8 @@ class AnnotationOverlayService : Service() {
             stopSelf()
             return START_NOT_STICKY
         }
-        // 观看端「喊TA画」→ ScreenShareService 转发到这里（摇一摇是直接调 toggleDoodle）
-        if (intent?.action == ACTION_DOODLE) toggleDoodle()
+        // 会话期间球常驻（自画模式开启时临时拆除）
+        showBall()
         return START_STICKY
     }
 
@@ -85,6 +85,7 @@ class AnnotationOverlayService : Service() {
         canvas?.let { runCatching { wm.removeView(it) } }
         canvas = null
         exitDoodle()
+        hideBall()
         super.onDestroy()
     }
 
@@ -116,7 +117,14 @@ class AnnotationOverlayService : Service() {
         // post 一拍：部分机型回调内 Resources 指标尚未刷新完
         mainHandler.post {
             // 自画层/工具条按旧屏幕尺寸挂的，旋转后直接退出（笔迹随窗口一起清掉）
-            if (doodle != null) exitDoodle()
+            if (doodle != null) {
+                exitDoodle()
+                showBall()
+            } else {
+                // 球按旧屏幕坐标挂着，旋转后回默认位（丢一次拖异位可接受）
+                hideBall()
+                showBall()
+            }
             val cv = canvas ?: return@post
             if (cv.parent == null) return@post // 未挂窗就别借旋转之机挂上去
             if (!cv.hasVisibleContent()) {
@@ -204,9 +212,7 @@ class AnnotationOverlayService : Service() {
         canvas = null
     }
 
-    // ---------- 共享端自画：摇一摇进出 + 全屏绘制层 + 自动隐现工具条 ----------
-    // 悬浮球已移除：共享端的屏幕本身就是视频，球和菜单会被对方全程看见 = 满屏杂 UI。
-    // 入口是摇一摇（唯一"本机可感、采集不可见"通道）；工具条只在本机触摸后短暂出现，闲置即隐。
+    // ---------- 共享端自画：摇一摇/悬浮球进出 + 全屏绘制层 + 自动隐现工具条 ----------
 
     private var doodle: SharerDoodleView? = null
     private var doodleRoot: android.widget.FrameLayout? = null
@@ -218,8 +224,10 @@ class AnnotationOverlayService : Service() {
     private fun toggleDoodle() {
         if (doodle != null) {
             exitDoodle()
+            showBall()
             return
         }
+        hideBall()
         if (!Settings.canDrawOverlays(this)) return
         val dv = SharerDoodleView(this)
         dv.onActivity = { showBar() }
@@ -343,6 +351,128 @@ class AnnotationOverlayService : Service() {
         doodleBar = null
     }
 
+    // ---------- 涂鸦入口悬浮球：轻点/长按开画笔，可拖动，闲置淡化 ----------
+    // 独立小窗口（不吃全屏触摸、只占球那一块），所以长按/点击都能被我们感知——
+    // 全屏任意位置的触摸属于前台 App，后台服务收不到（这是当初做摇一摇的原因）。
+    // 入画代价用"闲置 3s 淡化到 15%"缓解；自画模式开启时球整体拆除，避免和工具条打架。
+    private var ballView: android.widget.ImageView? = null
+    private var ballLp: WindowManager.LayoutParams? = null
+    private var ballDim: Runnable? = null
+    private var ballDragging = false
+    private var ballDragHappened = false
+    private var ballDownRawX = 0f
+    private var ballDownRawY = 0f
+    private var ballBaseX = 0
+    private var ballBaseY = 0
+
+    private fun showBall() {
+        if (ballView != null || doodle != null) return
+        if (!Settings.canDrawOverlays(this)) return
+        val size = dp(BALL_SIZE_DP)
+        val (sw, sh) = com.soul2soul.app.util.ScreenSize.real(this)
+        val lp = WindowManager.LayoutParams(
+            size, size,
+            overlayWindowType(),
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+            PixelFormat.TRANSLUCENT,
+        ).apply {
+            gravity = Gravity.TOP or Gravity.START
+            x = sw - size - dp(6f)
+            y = (sh * BALL_INITIAL_Y).toInt()
+        }
+        val slop = android.view.ViewConfiguration.get(this).scaledTouchSlop
+        val gd = android.view.GestureDetector(this,
+            object : android.view.GestureDetector.SimpleOnGestureListener() {
+                override fun onDown(e: android.view.MotionEvent): Boolean { wakeBall(); return true }
+                override fun onSingleTapUp(e: android.view.MotionEvent): Boolean {
+                    if (!ballDragHappened) ballActivate()
+                    return true
+                }
+                override fun onLongPress(e: android.view.MotionEvent) {
+                    if (!ballDragHappened) ballActivate()
+                }
+            })
+        val iv = android.widget.ImageView(this).apply {
+            setImageResource(R.drawable.ic_ball_brush)
+            setBackgroundResource(R.drawable.bg_ball)
+            setPadding(dp(11f), dp(11f), dp(11f), dp(11f))
+            contentDescription = getString(R.string.doodle_ball_desc)
+            alpha = BALL_ACTIVE_ALPHA
+            setOnTouchListener { v, ev ->
+                gd.onTouchEvent(ev)
+                when (ev.actionMasked) {
+                    android.view.MotionEvent.ACTION_DOWN -> {
+                        ballDownRawX = ev.rawX; ballDownRawY = ev.rawY
+                        ballBaseX = lp.x; ballBaseY = lp.y
+                        ballDragging = false; ballDragHappened = false
+                    }
+                    android.view.MotionEvent.ACTION_MOVE -> {
+                        val dx = ev.rawX - ballDownRawX
+                        val dy = ev.rawY - ballDownRawY
+                        if (!ballDragging && dx * dx + dy * dy > slop * slop) ballDragging = true
+                        if (ballDragging) {
+                            ballDragHappened = true
+                            wakeBall()
+                            val (cx, cy) = DoodleBallPolicy.clamp(
+                                (ballBaseX + dx).toInt(), (ballBaseY + dy).toInt(), size, sw, sh
+                            )
+                            lp.x = cx; lp.y = cy
+                            runCatching { wm.updateViewLayout(v, lp) }
+                                .onFailure { android.util.Log.w("Overlay", "ball move failed", it) }
+                        }
+                    }
+                    android.view.MotionEvent.ACTION_UP,
+                    android.view.MotionEvent.ACTION_CANCEL -> {
+                        if (ballDragging) { ballDragging = false; scheduleBallDim() }
+                    }
+                }
+                true
+            }
+        }
+        ballLp = lp
+        runCatching { wm.addView(iv, lp) }.onFailure {
+            android.util.Log.e("Overlay", "ball addView failed", it)
+            ballLp = null
+            return
+        }
+        ballView = iv
+        scheduleBallDim()
+    }
+
+    private fun wakeBall() {
+        val v = ballView ?: return
+        ballDim?.let { mainHandler.removeCallbacks(it) }
+        v.animate().cancel()
+        v.alpha = BALL_ACTIVE_ALPHA
+        scheduleBallDim()
+    }
+
+    private fun scheduleBallDim() {
+        val v = ballView ?: return
+        ballDim?.let { mainHandler.removeCallbacks(it) }
+        val r = Runnable { v.animate().alpha(BALL_DIM_ALPHA).setDuration(400L).start() }
+        ballDim = r
+        mainHandler.postDelayed(r, BALL_IDLE_MS)
+    }
+
+    private fun hideBall() {
+        ballDim?.let { mainHandler.removeCallbacks(it) }
+        ballDim = null
+        ballView?.let { runCatching { wm.removeView(it) } }
+        ballView = null
+        ballLp = null
+        ballDragging = false
+        ballDragHappened = false
+    }
+
+    private fun ballActivate() {
+        runCatching {
+            (getSystemService(VIBRATOR_SERVICE) as android.os.Vibrator).vibrate(60L)
+        }
+        toggleDoodle()
+    }
+
     companion object {
         private const val CONTENT_LIFE_MS = 2400L
         /** 满屏窗口在最后一笔后的存续预算：静默收笔 1200 + 淡出 2000 + 裕量 */
@@ -352,8 +482,12 @@ class AnnotationOverlayService : Service() {
         /** 工具条在本机最后一次触摸后的可见时长 */
         private const val BAR_SHOW_MS = 2500L
 
-        /** 会话通知「画圈涂鸦」动作 → 进/出自画模式 */
-        const val ACTION_DOODLE = "com.soul2soul.app.action.TOGGLE_DOODLE"
+        /** 悬浮球：边长/闲置淡化延迟/两种透明度/初始纵向位置（屏高比例） */
+        private const val BALL_SIZE_DP = 48f
+        private const val BALL_IDLE_MS = 3000L
+        private const val BALL_ACTIVE_ALPHA = 0.85f
+        private const val BALL_DIM_ALPHA = 0.15f
+        private const val BALL_INITIAL_Y = 0.55f
 
         /** ScreenShareService 收到 DataChannel 消息时的入口（进程内单例转发） */
         @Volatile
