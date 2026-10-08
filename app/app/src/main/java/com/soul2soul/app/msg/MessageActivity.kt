@@ -76,13 +76,15 @@ class MessageActivity : AppCompatActivity() {
 
     private val micPermission =
         registerForActivityResult(androidx.activity.result.contract.ActivityResultContracts.RequestPermission()) { granted ->
-            if (granted && voiceMode && !holdStarted && recorder == null) {
-                // 手指还按着不放：授权回来直接续上这次"按住说话"
-                startRecording()
-            } else if (!granted) {
+            if (granted) {
+                // 只有"按住说话"发起的请求才续上这次录音；切语音模式时提前问的就别凭空开录
+                if (micAskFromHold && voiceMode && !holdStarted && recorder == null) startRecording()
+            } else {
                 toast(getString(R.string.msg_need_mic))
             }
+            micAskFromHold = false
         }
+    private var micAskFromHold = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -212,6 +214,7 @@ class MessageActivity : AppCompatActivity() {
                 if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) !=
                     android.content.pm.PackageManager.PERMISSION_GRANTED
                 ) {
+                    micAskFromHold = true
                     micPermission.launch(Manifest.permission.RECORD_AUDIO)
                     return true
                 }
@@ -265,6 +268,13 @@ class MessageActivity : AppCompatActivity() {
             imm.hideSoftInputFromWindow(etInput.windowToken, 0)
         } else {
             setEmojiPanel(false) // 语音输入和表情面板互斥（面板插的是文字）
+            // 微信式时机：切进语音就把权限缺失的弹窗问出来。绑在"按住说话"上会让
+            // 弹窗晚拍到下一次点击（MIUI 尤慢），用户会以为"点键盘才弹权限"（v0.2.33 实锤）
+            if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) !=
+                android.content.pm.PackageManager.PERMISSION_GRANTED
+            ) {
+                micPermission.launch(Manifest.permission.RECORD_AUDIO)
+            }
         }
     }
 
