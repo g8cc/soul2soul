@@ -76,12 +76,13 @@ class MessageActivity : AppCompatActivity() {
 
     private val micPermission =
         registerForActivityResult(androidx.activity.result.contract.ActivityResultContracts.RequestPermission()) { granted ->
-            if (granted) {
-                // 只有"按住说话"发起的请求才续上这次录音；切语音模式时提前问的就别凭空开录
-                if (micAskFromHold && voiceMode && !holdStarted && recorder == null) startRecording()
-            } else {
-                toast(getString(R.string.msg_need_mic))
-            }
+            if (!granted) toast(getString(R.string.msg_need_mic))
+            // 只有"按住说话"发起的请求才续上这次录音；切语音模式时提前问的就别凭空开录
+            if (MicGatePolicy.shouldAutoStartRecording(
+                    granted = granted, fromHold = micAskFromHold, voiceMode = voiceMode,
+                    holdStarted = holdStarted, recording = recorder != null,
+                )
+            ) startRecording()
             micAskFromHold = false
         }
     private var micAskFromHold = false
