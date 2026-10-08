@@ -40,6 +40,12 @@ object Prefs {
 
     fun setAccWasEnabled(ctx: Context, v: Boolean) = sp(ctx).edit().putBoolean("accWasEnabled", v).apply()
 
+    /** 麦克风历史上授权过：覆盖安装后国产 ROM 常把运行时权限重置回"询问"
+     *  （无障碍却不受影响），靠这个标记检测"从有到无"，先弹人话解释再走系统弹窗 */
+    fun micWasGranted(ctx: Context): Boolean = sp(ctx).getBoolean("micWasGranted", false)
+
+    fun setMicWasGranted(ctx: Context, v: Boolean) = sp(ctx).edit().putBoolean("micWasGranted", v).apply()
+
     /** 上次作为观看端收到的远端视频尺寸：新会话开场先按缓存套等比布局，
      *  消除首帧尺寸事件到达前 match_parent 被合成层铺满拉伸的裁切闪跳 */
     fun lastVideoSize(ctx: Context): Pair<Int, Int>? {

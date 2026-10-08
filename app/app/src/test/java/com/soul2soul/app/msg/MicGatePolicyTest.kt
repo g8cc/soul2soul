@@ -1,5 +1,6 @@
 package com.soul2soul.app.msg
 
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -48,5 +49,35 @@ class MicGatePolicyTest {
     @Test
     fun `上一段还在录不开第二段`() {
         assertFalse(shouldStart(recording = true))
+    }
+
+    // ---------- 缺权限处置（v0.2.34 后补的"弹窗礼仪"） ----------
+
+
+    @Test
+    fun `已授权什么都不做`() {
+        assertEquals(MicGatePolicy.MicGateAction.NONE, MicGatePolicy.onMicMissing(granted = true, everGranted = false))
+        assertEquals(MicGatePolicy.MicGateAction.NONE, MicGatePolicy.onMicMissing(granted = true, everGranted = true))
+    }
+
+    @Test
+    fun `从没授权过首次直接问系统不啰嗦`() {
+        assertEquals(MicGatePolicy.MicGateAction.REQUEST, MicGatePolicy.onMicMissing(granted = false, everGranted = false))
+    }
+
+    @Test
+    fun `曾授权又消失_先人话解释再问_防权限灵异失效误会`() {
+        // MIUI/HyperOS 覆盖安装会把运行时权限重置回"询问"，无障碍却保留——用户最怕这一刻
+        assertEquals(MicGatePolicy.MicGateAction.EXPLAIN, MicGatePolicy.onMicMissing(granted = false, everGranted = true))
+    }
+
+    @Test
+    fun `系统拒绝后还肯再问_一句提示即可`() {
+        assertEquals(MicGatePolicy.MicGateAction.NONE, MicGatePolicy.onDenied(rationale = true))
+    }
+
+    @Test
+    fun `系统不肯再问_永久拒绝_给去设置直达`() {
+        assertEquals(MicGatePolicy.MicGateAction.GUIDE, MicGatePolicy.onDenied(rationale = false))
     }
 }

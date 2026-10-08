@@ -143,6 +143,12 @@
     <string name="msg_hold_short_press">按住下面的按钮说话</string>
     <string name="msg_rec_warning">快到底啦，松开就发送</string>
     <string name="msg_need_mic">要先允许麦克风权限，才能录语音哦</string>
+    <string name="mic_revoked_title">手机把麦克风权限重置了</string>
+    <string name="mic_revoked_msg">你们之前允许过麦克风，但 App 更新后，部分手机系统会把这类权限悄悄改回「每次询问」（不是你们点错了，无障碍权限也不受影响）。点「重新授权」，弹窗里选「始终允许」，以后就不容易被重置了。</string>
+    <string name="mic_revoked_go">重新授权</string>
+    <string name="mic_blocked_title">需要麦克风权限</string>
+    <string name="mic_blocked_msg">系统已经不再弹授权的窗口了（可能被设成了「拒绝」）。点「去设置」，在「权限」里把「麦克风」改为「始终允许」，再回来按住说话就行。</string>
+    <string name="mic_settings_go">去设置</string>
     <string name="msg_rec_failed">录音没成功，再试一次？</string>
     <string name="msg_rec_too_short">话太短啦，按住多说几个字</string>
     <string name="msg_send_failed">语音没发出去，检查一下网络再试试</string>

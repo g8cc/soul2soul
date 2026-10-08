@@ -620,6 +620,7 @@ class MainActivity : AppCompatActivity() {
         val overlayOk = Settings.canDrawOverlays(this)
         val accOk = isAppAccessibilityEnabled()
         if (accOk) Prefs.setAccWasEnabled(this, true)
+        if (micOk) Prefs.setMicWasGranted(this, true)
         bindPermRow(permNotification, R.id.permStateNotif, notifOk)
         bindPermRow(permMic, R.id.permStateMic, micOk)
         bindPermRow(permOverlay, R.id.permStateOverlay, overlayOk)

@@ -76,13 +76,21 @@ class MessageActivity : AppCompatActivity() {
 
     private val micPermission =
         registerForActivityResult(androidx.activity.result.contract.ActivityResultContracts.RequestPermission()) { granted ->
-            if (!granted) toast(getString(R.string.msg_need_mic))
-            // 只有"按住说话"发起的请求才续上这次录音；切语音模式时提前问的就别凭空开录
-            if (MicGatePolicy.shouldAutoStartRecording(
-                    granted = granted, fromHold = micAskFromHold, voiceMode = voiceMode,
-                    holdStarted = holdStarted, recording = recorder != null,
-                )
-            ) startRecording()
+            if (granted) {
+                com.soul2soul.app.util.Prefs.setMicWasGranted(this, true)
+                // 只有"按住说话"发起的请求才续上这次录音；切语音模式时提前问的就别凭空开录
+                if (MicGatePolicy.shouldAutoStartRecording(
+                        granted = true, fromHold = micAskFromHold, voiceMode = voiceMode,
+                        holdStarted = holdStarted, recording = recorder != null,
+                    )
+                ) startRecording()
+            } else when (MicGatePolicy.onDenied(
+                shouldShowRequestPermissionRationale(Manifest.permission.RECORD_AUDIO),
+            )) {
+                // 系统再也不肯弹框（永久拒绝/MIUI 静默拦截）：光 toast 是死路，给"去设置"直达
+                MicGatePolicy.MicGateAction.GUIDE -> showMicBlockedDialog()
+                else -> toast(getString(R.string.msg_need_mic))
+            }
             micAskFromHold = false
         }
     private var micAskFromHold = false
@@ -215,8 +223,7 @@ class MessageActivity : AppCompatActivity() {
                 if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) !=
                     android.content.pm.PackageManager.PERMISSION_GRANTED
                 ) {
-                    micAskFromHold = true
-                    micPermission.launch(Manifest.permission.RECORD_AUDIO)
+                    ensureMicPermission(fromHold = true)
                     return true
                 }
                 holdStarted = true
@@ -269,14 +276,67 @@ class MessageActivity : AppCompatActivity() {
             imm.hideSoftInputFromWindow(etInput.windowToken, 0)
         } else {
             setEmojiPanel(false) // 语音输入和表情面板互斥（面板插的是文字）
-            // 微信式时机：切进语音就把权限缺失的弹窗问出来。绑在"按住说话"上会让
+            // 微信式时机：切进语音就把权限缺失处理前置。绑在"按住说话"上会让
             // 弹窗晚拍到下一次点击（MIUI 尤慢），用户会以为"点键盘才弹权限"（v0.2.33 实锤）
-            if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) !=
-                android.content.pm.PackageManager.PERMISSION_GRANTED
-            ) {
+            ensureMicPermission(fromHold = false)
+        }
+    }
+
+    /**
+     * 麦克风权限统一入口（弹窗礼仪对齐主流 App）：
+     * 已授权→记一笔"曾授权"；首次缺失→直接系统弹窗；
+     * 曾授权又消失（多半是覆盖安装后被国产 ROM 重置）→先人话解释再问，
+     * 别让用户以为权限"灵异失效"（v0.2.34 真机踩坑）。
+     */
+    private fun ensureMicPermission(fromHold: Boolean) {
+        val granted = checkSelfPermission(Manifest.permission.RECORD_AUDIO) ==
+            android.content.pm.PackageManager.PERMISSION_GRANTED
+        if (granted) {
+            com.soul2soul.app.util.Prefs.setMicWasGranted(this, true)
+            return
+        }
+        micAskFromHold = fromHold
+        if (MicGatePolicy.onMicMissing(
+                granted = false,
+                everGranted = com.soul2soul.app.util.Prefs.micWasGranted(this),
+            ) == MicGatePolicy.MicGateAction.EXPLAIN
+        ) showMicRevokedDialog()
+        else micPermission.launch(Manifest.permission.RECORD_AUDIO)
+    }
+
+    private fun showMicRevokedDialog() {
+        if (isFinishing || isDestroyed) return
+        androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle(R.string.mic_revoked_title)
+            .setMessage(R.string.mic_revoked_msg)
+            .setPositiveButton(R.string.mic_revoked_go) { _, _ ->
                 micPermission.launch(Manifest.permission.RECORD_AUDIO)
             }
-        }
+            .setNeutralButton(R.string.mic_settings_go) { _, _ -> openAppPermissionSettings() }
+            .setNegativeButton(R.string.msg_got_it, null)
+            .show()
+    }
+
+    private fun showMicBlockedDialog() {
+        if (isFinishing || isDestroyed) return
+        androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle(R.string.mic_blocked_title)
+            .setMessage(R.string.mic_blocked_msg)
+            .setPositiveButton(R.string.mic_settings_go) { _, _ -> openAppPermissionSettings() }
+            .setNegativeButton(R.string.msg_got_it, null)
+            .show()
+    }
+
+    private fun openAppPermissionSettings() {
+        val opened = runCatching {
+            startActivity(
+                android.content.Intent(
+                    android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                    android.net.Uri.parse("package:$packageName"),
+                )
+            )
+        }.isSuccess
+        if (!opened) toast(getString(R.string.msg_need_mic))
     }
 
     private fun toggleEmojiPanel() = setEmojiPanel(!emojiOpen)
