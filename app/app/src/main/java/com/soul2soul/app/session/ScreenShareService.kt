@@ -21,6 +21,7 @@ import com.soul2soul.app.webrtc.IceServerParser
 import com.soul2soul.app.webrtc.WebRtcClient
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.cancel
@@ -40,6 +41,8 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
     @Volatile private var live = false
     @Volatile private var stopping = false
     private val pendingSignals = mutableListOf<JSONObject>()
+    private var signalJob: Job? = null
+    private var screenReceiverRegistered = false
     private var audioRoute: AudioRouteController? = null
     private var lastCtlErrorAt = 0L
 
@@ -108,6 +111,12 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
         }
         if (webRtc != null) return START_NOT_STICKY
 
+        // stopSelf() normally destroys the service, but a rapid redial can arrive before
+        // onDestroy(). Reset all per-call state before accepting the new projection.
+        stopping = false
+        pendingSignals.clear()
+        watchdog.removeCallbacks(screenOffStop)
+
         val projection: Intent? = intent?.let { it.getProjectionExtra(EXTRA_PROJECTION) }
         if (projection == null) {
             MainActivity.cancelOutgoing()
@@ -137,17 +146,21 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
         // AudioDeviceModule 构造时会读取系统音频参数，必须先固定通信模式和扬声器路由。
         audioRoute = AudioRouteController(this).also { it.start() }
 
-        androidx.core.content.ContextCompat.registerReceiver(
-            this,
-            screenReceiver,
-            android.content.IntentFilter(android.content.Intent.ACTION_SCREEN_OFF).apply {
-                addAction(android.content.Intent.ACTION_SCREEN_ON)
-            },
-            androidx.core.content.ContextCompat.RECEIVER_NOT_EXPORTED,
-        )
+        if (!screenReceiverRegistered) {
+            androidx.core.content.ContextCompat.registerReceiver(
+                this,
+                screenReceiver,
+                android.content.IntentFilter(android.content.Intent.ACTION_SCREEN_OFF).apply {
+                    addAction(android.content.Intent.ACTION_SCREEN_ON)
+                },
+                androidx.core.content.ContextCompat.RECEIVER_NOT_EXPORTED,
+            )
+            screenReceiverRegistered = true
+        }
 
         // 必须先订阅再创建 offer，否则极快返回的 answer/ICE 可能在 collector 建立前被 SharedFlow 丢弃。
-        scope.launch(start = CoroutineStart.UNDISPATCHED) {
+        signalJob?.cancel()
+        signalJob = scope.launch(start = CoroutineStart.UNDISPATCHED) {
             SignalBus.events.collect { json ->
                 when (json.optString("type")) {
                     "sdp", "ice" -> {
@@ -190,7 +203,12 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
         watchdog.removeCallbacks(screenOffStop)
         watchdog.removeCallbacksAndMessages(null) // 排队中的手势注入一并作废（服务已亡不再代表会话授权）
         consent.resetForNewSession()
-        runCatching { unregisterReceiver(screenReceiver) }
+        signalJob?.cancel()
+        signalJob = null
+        if (screenReceiverRegistered) {
+            runCatching { unregisterReceiver(screenReceiver) }
+            screenReceiverRegistered = false
+        }
         scope.cancel()
         live = false
         liveState = false
@@ -357,10 +375,18 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
     private fun stopSession(sendBye: Boolean) {
         if (stopping) return
         stopping = true
+        signalJob?.cancel()
+        signalJob = null
+        // Drop queued data-channel/UI work from this call before a rapid redial can reuse the service.
+        watchdog.removeCallbacksAndMessages(null)
         live = false
         liveState = false
         Presence.sessionBusy = false
         watchdog.removeCallbacks(screenOffStop)
+        if (screenReceiverRegistered) {
+            runCatching { unregisterReceiver(screenReceiver) }
+            screenReceiverRegistered = false
+        }
         micMuted = false
         consent.resetForNewSession() // 会话结束立即收回操控授权
         // 静音是发送轨属性，随 AudioSource 销毁而复位，无需再全局恢复系统麦克风

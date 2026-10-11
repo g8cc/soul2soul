@@ -794,6 +794,7 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
         stopRinging()
         com.soul2soul.app.util.WifiKeeper.release()
         acceptTimeout?.let { mainHandler.removeCallbacks(it) }
+        mainHandler.removeCallbacks(hideControls)
         mainHandler.removeCallbacks(elapsedTicker)
         mainHandler.removeCallbacks(restoreCtlBanner)
         androidx.core.app.NotificationManagerCompat.from(this).cancel(Notif.ID_CALL)
