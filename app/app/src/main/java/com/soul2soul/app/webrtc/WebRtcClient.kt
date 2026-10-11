@@ -135,6 +135,8 @@ class WebRtcClient(
     private var audioTrack: AudioTrack? = null
     private var dataChannel: DataChannel? = null
     private var ctlChannel: DataChannel? = null
+    private val qualityLock = Any()
+    private var pendingQualityEdge: Int? = null
     private var surfaceHelper: SurfaceTextureHelper? = null
     private var closed = false
     private val rttHandler = android.os.Handler(android.os.Looper.getMainLooper())
@@ -288,20 +290,34 @@ class WebRtcClient(
     }
 
     private fun applyCaptureLongEdge(edge: Int) {
-        val capturer = capturer ?: return
         val normalized = VideoQualityPolicy.normalizeEdge(edge)
+        val capturer = capturer ?: return
         val (w, h) = captureSize(normalized)
         if (captureLongEdge == normalized && captureWidth == w && captureHeight == h) {
             videoSender?.let { applyBitrate(it) }
             return
         }
-        captureLongEdge = normalized
+        val oldEdge = captureLongEdge
+        val oldWidth = captureWidth
+        val oldHeight = captureHeight
         captureWidth = w
         captureHeight = h
-        runCatching {
+        val switched = runCatching {
             capturer.stopCapture()
             capturer.startCapture(w, h, CAPTURE_FPS)
-        }.onFailure { Log.w(TAG, "resolution switch failed", it) }
+        }.isSuccess
+        if (switched) {
+            captureLongEdge = normalized
+        } else {
+            Log.w(TAG, "resolution switch failed; restoring ${oldWidth}x${oldHeight}")
+            captureLongEdge = oldEdge
+            captureWidth = oldWidth
+            captureHeight = oldHeight
+            if (oldWidth > 0 && oldHeight > 0) {
+                runCatching { capturer.startCapture(oldWidth, oldHeight, CAPTURE_FPS) }
+                    .onFailure { Log.w(TAG, "resolution rollback failed", it) }
+            }
+        }
         videoSender?.let { applyBitrate(it) }
     }
 
@@ -448,19 +464,39 @@ class WebRtcClient(
 
     /** 远程操控手势出口（观看端 → 共享端）；ctl 通道未建时退回 anno 通道保兼容 */
     fun sendControl(json: JSONObject) {
-        val dc = ctlChannel ?: dataChannel ?: run {
-            Log.w(TAG, "sendControl: no channel"); return
+        sendControlNow(json)
+    }
+
+    /** 画质请求允许在 DataChannel 尚未 OPEN 时排队，通道打开后只发送最新档位。 */
+    fun sendQuality(edge: Int) {
+        synchronized(qualityLock) {
+            pendingQualityEdge = VideoQualityPolicy.normalizeEdge(edge)
+            flushPendingQualityLocked()
         }
-        val state = runCatching { dc.state() }.getOrNull()
-        if (state != DataChannel.State.OPEN) {
-            Log.w(TAG, "control dropped: channel state=$state k=${json.opt("k")}")
-            return
+    }
+
+    private fun flushPendingQuality() {
+        synchronized(qualityLock) { flushPendingQualityLocked() }
+    }
+
+    private fun flushPendingQualityLocked() {
+        val edge = pendingQualityEdge ?: return
+        val sent = sendControlNow(JSONObject().put("k", "res").put("edge", edge))
+        if (sent) pendingQualityEdge = null
+    }
+
+    private fun sendControlNow(json: JSONObject): Boolean {
+        val dc = listOfNotNull(ctlChannel, dataChannel).firstOrNull { channel ->
+            runCatching { channel.state() == DataChannel.State.OPEN }.getOrDefault(false)
+        } ?: run {
+            Log.w(TAG, "sendControl: no channel"); return false
         }
         val bytes = json.toString().toByteArray(Charsets.UTF_8)
         val ok = runCatching { dc.send(DataChannel.Buffer(ByteBuffer.wrap(bytes), false)) }
             .onFailure { Log.w(TAG, "control send failed k=${json.opt("k")}", it) }
             .getOrDefault(false)
         if (!ok) Log.w(TAG, "control send rejected k=${json.opt("k")}")
+        return ok
     }
 
     // ---------- PeerConnection.Observer ----------
@@ -685,6 +721,8 @@ class WebRtcClient(
             dataChannel = dc
         }
         dc.registerObserver(this)
+        // 对端可能在注册 observer 前就已进入 OPEN；不能只依赖后续状态回调。
+        flushPendingQuality()
     }
 
     override fun onTrack(transceiver: RtpTransceiver) {
@@ -745,9 +783,14 @@ class WebRtcClient(
 
     // ---------- DataChannel.Observer ----------
 
-    override fun onBufferedAmountChange(previousAmount: Long) {}
+    override fun onBufferedAmountChange(previousAmount: Long) {
+        // send() 可能因发送缓冲区暂满返回 false；缓冲回落时重试最新画质请求。
+        flushPendingQuality()
+    }
 
-    override fun onStateChange() {}
+    override fun onStateChange() {
+        flushPendingQuality()
+    }
 
     override fun onMessage(buffer: DataChannel.Buffer) {
         if (buffer.binary) return
@@ -765,6 +808,7 @@ class WebRtcClient(
     fun close() {
         if (closed) return
         closed = true
+        synchronized(qualityLock) { pendingQualityEdge = null }
         iceHandler.removeCallbacksAndMessages(null)
         stopRttPolling()
         synchronized(pendingRemoteIce) {

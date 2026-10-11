@@ -215,11 +215,10 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
             hdOn = !hdOn
             (v as android.widget.TextView).setText(if (hdOn) R.string.hd_on else R.string.hd_off)
             // 画质切换走可靠 ctl 通道，避免标注通道丢包导致按钮已切换但对端仍模糊。
-            client?.sendControl(JSONObject().put("k", "res").put(
-                "edge",
+            client?.sendQuality(
                 if (hdOn) com.soul2soul.app.webrtc.VideoQualityPolicy.HD_EDGE
                 else com.soul2soul.app.webrtc.VideoQualityPolicy.DEFAULT_EDGE,
-            ))
+            )
         }
         findViewById<View>(R.id.btnColor0).setOnClickListener {
             overlay.setColor(0); refreshColorButtons()
