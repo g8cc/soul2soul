@@ -154,6 +154,9 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
         boxLive = findViewById(R.id.boxLive)
 
         renderer.init(App.instance.eglBase.eglBaseContext, null)
+        // 让 SurfaceView 在合成层完成缩放，减少高分辨率视频在 UI 线程上的额外重采样。
+        // 仍保留等比布局计算，避免 MIUI 合成层裁掉全面屏底部内容。
+        renderer.setEnableHardwareScaler(true)
         // 缩放模式必须与 DrawingOverlayView.videoRect() 的 letterbox 假设一致（SPEC §5）
         renderer.setScalingType(org.webrtc.RendererCommon.ScalingType.SCALE_ASPECT_FIT)
         // 首帧尺寸事件约 1~2 秒后才到，之前 View 保持 match_parent 会被合成层铺满拉伸裁底；
@@ -211,7 +214,12 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
         findViewById<View>(R.id.btnHd).setOnClickListener { v ->
             hdOn = !hdOn
             (v as android.widget.TextView).setText(if (hdOn) R.string.hd_on else R.string.hd_off)
-            client?.sendAnnotation(JSONObject().put("k", "res").put("edge", if (hdOn) 1920 else 1280))
+            // 画质切换走可靠 ctl 通道，避免标注通道丢包导致按钮已切换但对端仍模糊。
+            client?.sendControl(JSONObject().put("k", "res").put(
+                "edge",
+                if (hdOn) com.soul2soul.app.webrtc.VideoQualityPolicy.HD_EDGE
+                else com.soul2soul.app.webrtc.VideoQualityPolicy.DEFAULT_EDGE,
+            ))
         }
         findViewById<View>(R.id.btnColor0).setOnClickListener {
             overlay.setColor(0); refreshColorButtons()

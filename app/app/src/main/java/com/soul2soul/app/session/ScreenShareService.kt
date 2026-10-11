@@ -246,7 +246,9 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
         watchdog.post {
             if (stopping) return@post
             when (json.optString("k")) {
-                "res" -> webRtc?.setCaptureLongEdgeOnMain(json.optInt("edge", 1280))
+                "res" -> webRtc?.setCaptureLongEdgeOnMain(
+                    json.optInt("edge", com.soul2soul.app.webrtc.VideoQualityPolicy.DEFAULT_EDGE)
+                )
                 "g" -> handleGesture(json)
                 // 观看端「喊TA画」：远程开/关本机自画模式，省掉摇一摇。
                 "doodle" -> runCatching {

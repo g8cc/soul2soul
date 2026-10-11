@@ -17,6 +17,7 @@ import org.webrtc.MediaStream
 import org.webrtc.PeerConnection
 import org.webrtc.PeerConnectionFactory
 import org.webrtc.RtpReceiver
+import org.webrtc.RtpParameters
 import org.webrtc.RtpTransceiver
 import org.webrtc.SdpObserver
 import org.webrtc.SessionDescription
@@ -160,9 +161,9 @@ class WebRtcClient(
         if (!closed) notifyEnded("ice_DISCONNECTED_TIMEOUT")
     }
 
-    /** 当前采集长边上限（观看端可通过 DataChannel 切 1280/1920） */
+    /** 当前采集长边上限（观看端可通过 DataChannel 切 960/1280/1600/1920） */
     @Volatile
-    var captureLongEdge = 1280
+    var captureLongEdge = VideoQualityPolicy.DEFAULT_EDGE
         private set
 
     /** 当前传给 ScreenCapturerAndroid 的尺寸（用于真机尺寸诊断）。 */
@@ -174,9 +175,9 @@ class WebRtcClient(
     var captureHeight: Int = 0
         private set
 
-    /** 用户意图档位（观看端 HD 开关设定）：弱网自动降档后，RTT 好转回升到这里 */
+    /** 用户意图档位（观看端高清/流畅设定）：弱网自动降档后，网络好转回升到这里 */
     @Volatile
-    private var preferredLongEdge = 1280
+    private var preferredLongEdge = VideoQualityPolicy.DEFAULT_EDGE
 
     /** 静音本端上行音轨（只影响本会话，不像 AudioManager.isMicrophoneMute 那样全局关麦） */
     fun muteLocalAudio(muted: Boolean) {
@@ -282,14 +283,19 @@ class WebRtcClient(
 
     /** 观看端切清晰度（用户意图）：记录档位并立即重启采集 + 调整码率上限 */
     fun setCaptureLongEdge(edge: Int) {
-        preferredLongEdge = edge.coerceIn(720, 1920)
+        preferredLongEdge = VideoQualityPolicy.normalizeEdge(edge)
         applyCaptureLongEdge(preferredLongEdge)
     }
 
     private fun applyCaptureLongEdge(edge: Int) {
-        captureLongEdge = edge
         val capturer = capturer ?: return
-        val (w, h) = captureSize()
+        val normalized = VideoQualityPolicy.normalizeEdge(edge)
+        val (w, h) = captureSize(normalized)
+        if (captureLongEdge == normalized && captureWidth == w && captureHeight == h) {
+            videoSender?.let { applyBitrate(it) }
+            return
+        }
+        captureLongEdge = normalized
         captureWidth = w
         captureHeight = h
         runCatching {
@@ -303,9 +309,9 @@ class WebRtcClient(
      * 计算屏幕采集尺寸：长边不超过档位、短边按原始比例缩放，并偶数对齐。
      * ScreenCapturerAndroid/编码器对奇数尺寸支持不一致，因此最后至少保留 2px。
      */
-    private fun captureSize(): Pair<Int, Int> {
+    private fun captureSize(edge: Int = captureLongEdge): Pair<Int, Int> {
         val (sw, sh) = com.soul2soul.app.util.ScreenSize.real(context)
-        val scale = minOf(1f, captureLongEdge.toFloat() / maxOf(sw, sh).toFloat())
+        val scale = minOf(1f, edge.toFloat() / maxOf(sw, sh).toFloat())
         val w = ((sw * scale).toInt() / 2 * 2).coerceAtLeast(2)
         val h = ((sh * scale).toInt() / 2 * 2).coerceAtLeast(2)
         return w to h
@@ -315,14 +321,11 @@ class WebRtcClient(
         runCatching {
             val params = sender.parameters
             if (params.encodings.isNotEmpty()) {
-                // 码率阶梯：分辨率越高上限越高；降档时同步压码率（弱网更流畅）
-                params.encodings[0].maxBitrateBps = when (captureLongEdge) {
-                    1920 -> 4_000_000
-                    960 -> 1_500_000
-                    else -> 2_500_000
-                }
-                // 带宽不足时的降级策略：视频源 isScreencast=true 时 libwebrtc
-                // 默认即"保分辨率降帧率"（屏幕共享标准行为），无需显式设置
+                // 屏幕文字比帧率更敏感：优先保分辨率，网络紧张时由 WebRTC 降帧。
+                params.degradationPreference = RtpParameters.DegradationPreference.MAINTAIN_RESOLUTION
+                params.encodings[0].maxBitrateBps =
+                    VideoQualityPolicy.requiredBitrateBps(captureLongEdge).toInt()
+                params.encodings[0].maxFramerate = CAPTURE_FPS
                 sender.parameters = params
             }
         }.onFailure { Log.w(TAG, "bitrate set failed", it) }
@@ -541,6 +544,11 @@ class WebRtcClient(
                 pc.getStats { report ->
                     if (closed) return@getStats
                     var best = -1L
+                    var availableOutgoingBps = -1L
+                    var remoteVideoLost = -1L
+                    var remoteVideoReceived = -1L
+                    var outboundVideoSent = -1L
+                    var outboundVideoFps = -1.0
                     for ((_, stats) in report.statsMap) {
                         if (stats.type == "candidate-pair" &&
                             stats.members["state"] == "succeeded"
@@ -550,6 +558,25 @@ class WebRtcClient(
                                 val ms = (rtt * 1000).toLong()
                                 if (best < 0 || ms < best) best = ms
                             }
+                            val available =
+                                (stats.members["availableOutgoingBitrate"] as? Number)?.toLong() ?: -1L
+                            if (available > availableOutgoingBps) availableOutgoingBps = available
+                        }
+                        if (isSharer && stats.type == "remote-inbound-rtp" &&
+                            (stats.members["kind"] == "video" || stats.members["mediaType"] == "video")
+                        ) {
+                            remoteVideoLost =
+                                (stats.members["packetsLost"] as? Number)?.toLong()?.coerceAtLeast(0L) ?: -1L
+                            remoteVideoReceived =
+                                (stats.members["packetsReceived"] as? Number)?.toLong()?.coerceAtLeast(0L) ?: -1L
+                        }
+                        if (isSharer && stats.type == "outbound-rtp" &&
+                            (stats.members["kind"] == "video" || stats.members["mediaType"] == "video")
+                        ) {
+                            outboundVideoSent =
+                                (stats.members["packetsSent"] as? Number)?.toLong()?.coerceAtLeast(0L) ?: -1L
+                            outboundVideoFps =
+                                (stats.members["framesPerSecond"] as? Number)?.toDouble() ?: -1.0
                         }
                     }
                     if (best >= 0) listener.onRtt(best)
@@ -598,17 +625,43 @@ class WebRtcClient(
                         }
                     }
 
-                    // 共享端按 RTT 自动调画质（弱网闪断的缓解）：
-                    // 持续高 RTT → 降到 960 保流畅；持续好转 → 回升到用户意图档位
-                    if (isSharer && best > 0) {
-                        if (best > 350) highRttStreak += 1 else highRttStreak = 0
-                        if (best < 150) lowRttStreak += 1 else lowRttStreak = 0
-                        if (highRttStreak >= 3 && captureLongEdge > 960) {
-                            Log.d(TAG, "high rtt ${best}ms, degrade to 960")
-                            rttHandler.post { if (!closed) applyCaptureLongEdge(960) }
-                        } else if (lowRttStreak >= 10 && captureLongEdge < preferredLongEdge) {
-                            Log.d(TAG, "rtt recovered, restore $preferredLongEdge")
-                            rttHandler.post { if (!closed) applyCaptureLongEdge(preferredLongEdge) }
+                    // 共享端按 RTT + 远端丢包 + 可用上行带宽自动调画质。
+                    // 持续高延迟/丢包时逐档降级，恢复稳定后回到用户选择档位。
+                    if (isSharer && best >= 0) {
+                        // 部分 libwebrtc 版本的 remote-inbound-rtp 没有 packetsReceived，
+                        // 用本端 outbound packetsSent 做保守回退，避免丢包自适应在旧机型失效。
+                        val received = if (remoteVideoReceived >= 0) remoteVideoReceived
+                        else if (remoteVideoLost >= 0 && outboundVideoSent >= 0) {
+                            (outboundVideoSent - remoteVideoLost).coerceAtLeast(0L)
+                        } else -1L
+                        val lossPercent = if (remoteVideoLost >= 0 && received >= 0 &&
+                            remoteVideoLost + received > 0
+                        ) {
+                            remoteVideoLost * 100.0 / (remoteVideoLost + received)
+                        } else {
+                            -1.0
+                        }
+                        val decision = VideoQualityPolicy.step(
+                            preferredLongEdge,
+                            captureLongEdge,
+                            VideoQualityPolicy.Metrics(
+                                best,
+                                lossPercent,
+                                availableOutgoingBps,
+                                outboundVideoFps,
+                            ),
+                            highRttStreak,
+                            lowRttStreak,
+                        )
+                        highRttStreak = decision.highStreak
+                        lowRttStreak = decision.lowStreak
+                        decision.targetEdge?.let { target ->
+                            Log.d(TAG, "adaptive video quality rtt=${best}ms " +
+                                "loss=${"%.1f".format(lossPercent)}% available=${availableOutgoingBps} " +
+                                "edge=${captureLongEdge}->${target}")
+                            rttHandler.post { if (!closed) applyCaptureLongEdge(target) }
+                            // 切档后重新积累连续样本，避免同一份坏指标在下一次轮询立即连降两档。
+                            highRttStreak = 0
                             lowRttStreak = 0
                         }
                     }
