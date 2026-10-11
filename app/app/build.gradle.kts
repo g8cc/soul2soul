@@ -34,15 +34,26 @@ android {
     signingConfigs {
         create("release") {
             val ksFile = rootProject.file("keystore/soul2soul-release.jks")
-            if (ksFile.exists()) {
+            // 自用项目不依赖应用商店签名。若没有单独备份的发布密钥，
+            // 使用本机标准 debug keystore 生成可安装的 release 包。
+            // 有私有 keystore 时始终优先使用它，以保持已安装版本可覆盖更新。
+            val fallbackKsFile = rootProject.file(
+                "${System.getProperty("user.home")}/.android/debug.keystore"
+            )
+            if (ksFile.isFile) {
                 storeFile = ksFile
                 storePassword = "soul2soul2026"
                 keyAlias = "soul2soul"
                 keyPassword = "soul2soul2026"
-                // Android 7.0 的 MIUI 安装器对 v2-only 包有静默失败 bug，强制 v1+v2 双签名
-                enableV1Signing = true
-                enableV2Signing = true
+            } else if (fallbackKsFile.isFile) {
+                storeFile = fallbackKsFile
+                storePassword = "android"
+                keyAlias = "androiddebugkey"
+                keyPassword = "android"
             }
+            // Android 7.0 的 MIUI 安装器对 v2-only 包有静默失败 bug，强制 v1+v2 双签名。
+            enableV1Signing = true
+            enableV2Signing = true
         }
     }
 
