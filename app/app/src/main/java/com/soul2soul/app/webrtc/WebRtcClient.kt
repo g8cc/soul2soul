@@ -133,8 +133,8 @@ class WebRtcClient(
     private var videoSource: VideoSource? = null
     private var audioSource: AudioSource? = null
     private var audioTrack: AudioTrack? = null
-    private var dataChannel: DataChannel? = null
-    private var ctlChannel: DataChannel? = null
+    @Volatile private var dataChannel: DataChannel? = null
+    @Volatile private var ctlChannel: DataChannel? = null
     private val qualityLock = Any()
     private var pendingQualityEdge: Int? = null
     private var surfaceHelper: SurfaceTextureHelper? = null
@@ -143,6 +143,9 @@ class WebRtcClient(
     private var highRttStreak = 0
     private var lowRttStreak = 0
     private var statsPollCount = 0
+    private var previousRemoteVideoLost = -1L
+    private var previousRemoteVideoReceived = -1L
+    private var previousOutboundVideoSent = -1L
     private val iceHandler = android.os.Handler(android.os.Looper.getMainLooper())
     private var iceRestartCount = 0
     @Volatile private var established = false
@@ -574,6 +577,9 @@ class WebRtcClient(
 
     /** 每 2 秒取 RTT 做实时显示/自适应，详细音视频统计每 10 秒记录一次。 */
     private fun startRttPolling() {
+        previousRemoteVideoLost = -1L
+        previousRemoteVideoReceived = -1L
+        previousOutboundVideoSent = -1L
         rttHandler.post(object : Runnable {
             override fun run() {
                 val pc = pc ?: return
@@ -581,22 +587,42 @@ class WebRtcClient(
                     if (closed) return@getStats
                     var best = -1L
                     var availableOutgoingBps = -1L
+                    var selectedPairId: String? = null
+                    var selectedRtt = -1L
+                    var selectedAvailable = -1L
+                    var fallbackRtt = -1L
+                    var fallbackAvailable = -1L
                     var remoteVideoLost = -1L
                     var remoteVideoReceived = -1L
                     var outboundVideoSent = -1L
                     var outboundVideoFps = -1.0
+                    // Prefer the pair selected by transport. Older stats reports
+                    // may not expose transport.selectedCandidatePairId; in that
+                    // case use a nominated pair, then fall back to the best RTT.
                     for ((_, stats) in report.statsMap) {
+                        if (stats.type == "transport") {
+                            selectedPairId = stats.members["selectedCandidatePairId"]?.toString()
+                            if (selectedPairId != null) break
+                        }
+                    }
+                    for ((id, stats) in report.statsMap) {
                         if (stats.type == "candidate-pair" &&
                             stats.members["state"] == "succeeded"
                         ) {
                             val rtt = (stats.members["currentRoundTripTime"] as? Number)?.toDouble()
-                            if (rtt != null && rtt >= 0) {
-                                val ms = (rtt * 1000).toLong()
-                                if (best < 0 || ms < best) best = ms
-                            }
+                            val ms = if (rtt != null && rtt >= 0) (rtt * 1000).toLong() else -1L
                             val available =
                                 (stats.members["availableOutgoingBitrate"] as? Number)?.toLong() ?: -1L
-                            if (available > availableOutgoingBps) availableOutgoingBps = available
+                            val selected = id == selectedPairId ||
+                                (selectedPairId == null && stats.members["nominated"] == true)
+                            if (selected) {
+                                if (ms >= 0 && (selectedRtt < 0 || ms < selectedRtt)) selectedRtt = ms
+                                if (available >= 0) selectedAvailable = available
+                            }
+                            if (rtt != null && rtt >= 0) {
+                                if (fallbackRtt < 0 || ms < fallbackRtt) fallbackRtt = ms
+                            }
+                            if (available > fallbackAvailable) fallbackAvailable = available
                         }
                         if (isSharer && stats.type == "remote-inbound-rtp" &&
                             (stats.members["kind"] == "video" || stats.members["mediaType"] == "video")
@@ -615,6 +641,9 @@ class WebRtcClient(
                                 (stats.members["framesPerSecond"] as? Number)?.toDouble() ?: -1.0
                         }
                     }
+                    best = if (selectedRtt >= 0) selectedRtt else fallbackRtt
+                    availableOutgoingBps =
+                        if (selectedAvailable >= 0) selectedAvailable else fallbackAvailable
                     if (best >= 0) listener.onRtt(best)
 
                     // 统计仍每 2 秒用于自适应；详细媒体诊断每 10 秒记录一次。
@@ -664,19 +693,19 @@ class WebRtcClient(
                     // 共享端按 RTT + 远端丢包 + 可用上行带宽自动调画质。
                     // 持续高延迟/丢包时逐档降级，恢复稳定后回到用户选择档位。
                     if (isSharer && best >= 0) {
-                        // 部分 libwebrtc 版本的 remote-inbound-rtp 没有 packetsReceived，
-                        // 用本端 outbound packetsSent 做保守回退，避免丢包自适应在旧机型失效。
-                        val received = if (remoteVideoReceived >= 0) remoteVideoReceived
-                        else if (remoteVideoLost >= 0 && outboundVideoSent >= 0) {
-                            (outboundVideoSent - remoteVideoLost).coerceAtLeast(0L)
-                        } else -1L
-                        val lossPercent = if (remoteVideoLost >= 0 && received >= 0 &&
-                            remoteVideoLost + received > 0
-                        ) {
-                            remoteVideoLost * 100.0 / (remoteVideoLost + received)
-                        } else {
-                            -1.0
-                        }
+                        // 丢包计数是累计值，使用相邻轮询的增量；没有
+                        // packetsReceived 时由 outbound packetsSent 增量兜底。
+                        val lossPercent = VideoQualityPolicy.intervalLossPercent(
+                            previousRemoteVideoLost,
+                            previousRemoteVideoReceived,
+                            remoteVideoLost,
+                            remoteVideoReceived,
+                            previousOutboundVideoSent,
+                            outboundVideoSent,
+                        )
+                        if (remoteVideoLost >= 0) previousRemoteVideoLost = remoteVideoLost
+                        if (remoteVideoReceived >= 0) previousRemoteVideoReceived = remoteVideoReceived
+                        if (outboundVideoSent >= 0) previousOutboundVideoSent = outboundVideoSent
                         val decision = VideoQualityPolicy.step(
                             preferredLongEdge,
                             captureLongEdge,

@@ -23,6 +23,39 @@ internal object VideoQualityPolicy {
 
     data class Decision(val targetEdge: Int?, val highStreak: Int, val lowStreak: Int)
 
+    /**
+     * Calculate loss for the interval between two cumulative WebRTC samples.
+     *
+     * WebRTC packet counters are cumulative for the lifetime of an RTP stream.
+     * Using the raw counters makes one early burst of loss poison adaptation for
+     * the rest of a call, so quality decisions must use deltas instead. Older
+     * libwebrtc builds may omit remote-inbound packetsReceived; in that case the
+     * outbound sent delta is used as the denominator when it is available.
+     */
+    fun intervalLossPercent(
+        previousLost: Long,
+        previousReceived: Long,
+        currentLost: Long,
+        currentReceived: Long,
+        previousSent: Long = -1L,
+        currentSent: Long = -1L,
+    ): Double {
+        if (previousLost < 0 || currentLost < 0 || currentLost < previousLost) return -1.0
+        val lostDelta = currentLost - previousLost
+        val receivedDelta = when {
+            previousReceived >= 0 && currentReceived >= previousReceived ->
+                currentReceived - previousReceived
+            previousReceived >= 0 || currentReceived >= 0 -> -1L
+            previousSent >= 0 && currentSent >= previousSent ->
+                (currentSent - previousSent - lostDelta).takeIf { it >= 0L } ?: -1L
+            else -> -1L
+        }
+        if (receivedDelta < 0) return -1.0
+        val total = lostDelta + receivedDelta
+        if (total <= 0) return -1.0
+        return (lostDelta * 100.0 / total).coerceIn(0.0, 100.0)
+    }
+
     fun step(
         preferredEdge: Int,
         currentEdge: Int,

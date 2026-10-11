@@ -99,4 +99,36 @@ class VideoQualityPolicyTest {
         assertEquals(VideoQualityPolicy.HD_EDGE, VideoQualityPolicy.normalizeEdge(2000))
         assertEquals(4_500_000L, VideoQualityPolicy.requiredBitrateBps(1920))
     }
+
+    @Test
+    fun `丢包率按相邻采样窗口计算而不是累计整场`() {
+        assertEquals(
+            2.0,
+            VideoQualityPolicy.intervalLossPercent(10, 100, 12, 198),
+            0.001,
+        )
+    }
+
+    @Test
+    fun `缺少远端received时用发送增量估算丢包`() {
+        assertEquals(
+            5.0,
+            VideoQualityPolicy.intervalLossPercent(10, -1, 15, -1, 100, 200),
+            0.001,
+        )
+    }
+
+    @Test
+    fun `首个采样和计数器回绕不参与自适应`() {
+        assertEquals(
+            -1.0,
+            VideoQualityPolicy.intervalLossPercent(-1, -1, 3, 97),
+            0.001,
+        )
+        assertEquals(
+            -1.0,
+            VideoQualityPolicy.intervalLossPercent(10, 100, 2, 120),
+            0.001,
+        )
+    }
 }
