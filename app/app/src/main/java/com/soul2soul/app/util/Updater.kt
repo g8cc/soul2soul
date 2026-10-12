@@ -14,14 +14,19 @@ import java.io.File
 /**
  * 自动更新：检查服务器版本清单 → 下载 APK → 交给系统安装。
  * 版本清单: https://soul.lumi666.cloud/apk/version.json
- * {"versionCode":4,"versionName":"0.2.4","url":"https://soul.lumi666.cloud/apk/soul2soul-latest.apk"}
+ * {"versionCode":4,"versionName":"0.2.4","url":"https://soul.lumi666.cloud/apk/soul2soul-latest.apk","sha256":"..."}
  */
 object Updater {
 
     private const val TAG = "Updater"
     private const val VERSION_URL = "https://soul.lumi666.cloud/apk/version.json"
 
-    data class Info(val versionCode: Int, val versionName: String, val url: String)
+    data class Info(
+        val versionCode: Int,
+        val versionName: String,
+        val url: String,
+        val sha256: String = "",
+    )
 
     private val http by lazy {
         OkHttpClient.Builder().also { TlsTrust.apply(it, com.soul2soul.app.R.raw.isrgrootx1) }.build()
@@ -31,7 +36,7 @@ object Updater {
     fun check(): Info? = runCatching {
         http.newCall(Request.Builder().url(VERSION_URL).build()).execute().use { resp ->
             if (!resp.isSuccessful) return null
-            VersionManifest.parse(resp.body!!.string())
+            VersionManifest.parse(resp.body!!.string())?.takeIf { isTrustedDownloadUrl(it.url) }
         }
     }.onFailure { Log.w(TAG, "check failed", it) }.getOrNull()
 
@@ -49,29 +54,78 @@ object Updater {
         BuildConfig.VERSION_CODE // 同包直读，理论上不可能发生
     }
 
-    /** 下载 APK 到应用外部缓存目录（onProgress: 0-100） */
-    fun download(url: String, dest: File, onProgress: (Int) -> Unit): File? = runCatching {
+    /** Only accept the production APK host; the URL comes from a remotely served manifest. */
+    fun isTrustedDownloadUrl(url: String): Boolean = runCatching {
+        val parsed = java.net.URI(url)
+        parsed.scheme.equals("https", ignoreCase = true) &&
+            parsed.host.equals("soul.lumi666.cloud", ignoreCase = true) &&
+            (parsed.port == -1 || parsed.port == 443) &&
+            parsed.path.startsWith("/apk/") &&
+            parsed.path.endsWith(".apk", ignoreCase = true) &&
+            parsed.userInfo == null && parsed.query == null && parsed.fragment == null
+    }.getOrDefault(false)
+
+    /** Download APK to a temporary sibling, verify it, then atomically replace the destination. */
+    fun download(
+        url: String,
+        dest: File,
+        onProgress: (Int) -> Unit,
+        expectedSha256: String? = null,
+    ): File? = runCatching {
+        check(isTrustedDownloadUrl(url)) { "untrusted download url" }
+        val expected = expectedSha256?.trim()?.lowercase()?.takeIf { it.isNotEmpty() }
+        check(expected == null || VersionManifest.isSha256(expected)) { "invalid expected sha256" }
         dest.parentFile?.mkdirs()
-        http.newCall(Request.Builder().url(url).build()).execute().use { resp ->
+        val part = File(dest.parentFile, "${dest.name}.part")
+        if (part.exists() && !part.delete()) error("cannot replace partial download")
+        // Do not follow redirects: an HTTPS manifest URL must not redirect an unhashed legacy
+        // update to an arbitrary host. A published SHA-256 remains the content-level check.
+        val downloadClient = http.newBuilder().followRedirects(false).followSslRedirects(false).build()
+        downloadClient.newCall(Request.Builder().url(url).build()).execute().use { resp ->
             check(resp.isSuccessful) { "download http ${resp.code}" }
+            check(isTrustedDownloadUrl(resp.request.url.toString())) { "untrusted response url" }
             val body = resp.body ?: error("empty body")
             val total = body.contentLength()
-            dest.outputStream().use { out ->
+            val digest = java.security.MessageDigest.getInstance("SHA-256")
+            part.outputStream().use { out ->
                 body.byteStream().use { input ->
                     val buf = ByteArray(64 * 1024)
                     var read: Int
                     var done = 0L
                     while (input.read(buf).also { read = it } != -1) {
                         out.write(buf, 0, read)
+                        digest.update(buf, 0, read)
                         done += read
                         if (total > 0) onProgress((done * 100 / total).toInt())
                     }
                     out.flush()
                 }
             }
+            onProgress(100)
+            check(part.length() > 0L) { "empty download" }
+            val actual = digest.digest().joinToString("") {
+                (it.toInt() and 0xff).toString(16).padStart(2, '0')
+            }
+            check(expected == null || expected == actual) { "sha256 mismatch" }
+            try {
+                java.nio.file.Files.move(
+                    part.toPath(), dest.toPath(),
+                    java.nio.file.StandardCopyOption.ATOMIC_MOVE,
+                    java.nio.file.StandardCopyOption.REPLACE_EXISTING,
+                )
+            } catch (_: java.nio.file.AtomicMoveNotSupportedException) {
+                java.nio.file.Files.move(
+                    part.toPath(), dest.toPath(),
+                    java.nio.file.StandardCopyOption.REPLACE_EXISTING,
+                )
+            }
             dest
         }
-    }.onFailure { Log.w(TAG, "download failed", it) }.getOrNull()
+    }.onFailure {
+        Log.w(TAG, "download failed", it)
+        val part = File(dest.parentFile, "${dest.name}.part")
+        if (part.exists()) part.delete()
+    }.getOrNull()
 
     /** 后台线程执行检查（协程包装） */
     suspend fun checkAsync(): Info? = withContext(Dispatchers.IO) { check() }
