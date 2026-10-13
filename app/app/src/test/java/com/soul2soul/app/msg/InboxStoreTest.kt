@@ -1,6 +1,7 @@
 package com.soul2soul.app.msg
 
 import org.json.JSONObject
+import org.json.JSONArray
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -47,6 +48,22 @@ class InboxStoreTest {
         InboxStore.add(Msg.fromJson(item("d1", "a"), mine = false)!!)
         InboxStore.add(Msg.fromJson(item("d1", "a"), mine = false)!!)
         assertEquals(1, InboxStore.received().size)
+    }
+
+    @Test
+    fun `混合留言箱跳过非对象且保留后续有效条目`() {
+        val entries = JSONArray().put(JSONObject.NULL).put("bad").put(7).put(item("ok", "a"))
+        val parsed = (0 until entries.length()).mapNotNull {
+            Msg.fromJson(entries.optJSONObject(it), mine = false)
+        }
+        assertEquals(listOf("ok"), parsed.map { it.id })
+    }
+
+    @Test
+    fun `批量重复 id 与单条入库一致保留首条`() {
+        val first = Msg.fromJson(item("same", "a"), mine = false)!!
+        InboxStore.addAll(listOf(first, first.copy(text = "changed")))
+        assertEquals(listOf(first), InboxStore.conversation())
     }
 
     @Test

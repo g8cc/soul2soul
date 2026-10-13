@@ -19,7 +19,8 @@ data class Msg(
 ) {
     companion object {
         /** 服务端条目/回执 → Msg；缺 id 的畸形条目返回 null（宁可少显示，不可崩） */
-        fun fromJson(o: JSONObject, mine: Boolean): Msg? {
+        fun fromJson(o: JSONObject?, mine: Boolean): Msg? {
+            if (o == null) return null
             val id = o.optString("id")
             if (id.isEmpty()) return null
             return Msg(
@@ -53,10 +54,13 @@ object InboxStore {
     }
 
     fun addAll(msgs: List<Msg>) {
-        val fresh = msgs.filter { !items.containsKey(it.id) }
-        if (fresh.isEmpty()) return
-        for (m in fresh) items[m.id] = m
-        notifyChanged()
+        var changed = false
+        for (msg in msgs) {
+            if (items.containsKey(msg.id)) continue
+            items[msg.id] = msg
+            changed = true
+        }
+        if (changed) notifyChanged()
     }
 
     /** 已读删除：只动未读（自己发出去的不该被 ack 清掉） */

@@ -100,6 +100,10 @@ class SignalingClient : WebSocketListener() {
         }
     }
 
+    override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
+        webSocket.close(code, reason)
+    }
+
     override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
         if (ws !== webSocket) return
         ws = null
