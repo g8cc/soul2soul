@@ -72,6 +72,22 @@ class OverlayGestureEngineTest {
     }
 
     @Test
+    fun secondaryPointerCannotFinishOrCancelPrimaryGesture() {
+        val e = engine()
+        e.onDown(7, 5f, 5f)
+        e.onDown(2, 900f, 900f)
+        e.onMove(7, 60f, 60f)
+
+        assertTrue(e.onUp(2).isEmpty())
+        assertTrue(e.onCancel(2).isEmpty())
+        assertTrue(e.onMove(7, 80f, 80f).isNotEmpty())
+
+        val end = e.onUp(7)
+        assertEquals(1, end.size)
+        assertTrue(end.single() is Action.StrokeEnd)
+    }
+
+    @Test
     fun strokeEnd_carriesResendAtPlus300ms() {
         val e = engine()
         e.onDown(0, 0f, 0f)

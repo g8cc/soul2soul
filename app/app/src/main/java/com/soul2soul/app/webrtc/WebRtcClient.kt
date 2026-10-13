@@ -155,6 +155,7 @@ class WebRtcClient(
     @Volatile private var recoveryCount = 0
     @Volatile private var connectStartedAtMs = 0L
     @Volatile private var renegoInFlight = false
+    @Volatile private var restartRequested = false
     private val endedNotified = java.util.concurrent.atomic.AtomicBoolean(false)
     @Volatile private var remoteDescriptionSet = false
     private val pendingRemoteIce = mutableListOf<IceCandidate>()
@@ -558,6 +559,8 @@ class WebRtcClient(
                 iceHandler.removeCallbacks(connectTimeoutRunner)
                 iceHandler.removeCallbacks(disconnectTimeoutRunner)
                 iceHandler.removeCallbacks(iceRestartRunner)
+                restartRequested = false
+                renegoInFlight = false
                 if (!wasConnected) {
                     connectedSinceMs = now
                     iceHandler.removeCallbacks(iceStableRunner)
@@ -626,7 +629,7 @@ class WebRtcClient(
         if (latestIceState == PeerConnection.IceConnectionState.CONNECTED.name ||
             latestIceState == PeerConnection.IceConnectionState.COMPLETED.name
         ) return
-        if (renegoInFlight) {
+        if (renegoInFlight || restartRequested) {
             // Don't silently lose the one recovery request if another SDP operation is still settling.
             iceHandler.postDelayed(iceRestartRunner, ICE_RESTART_RETRY_MS)
             return
@@ -638,8 +641,15 @@ class WebRtcClient(
             return
         }
         Log.i(TAG, "ICE_RESTART attempt=$attempt state=$latestIceState")
+        restartRequested = true
         runCatching { pc.restartIce() }
-            .onFailure { Log.w(TAG, "restartIce unsupported", it) }
+            .onFailure {
+                restartRequested = false
+                iceRestartBudget.releaseAttempt(attempt)
+                Log.w(TAG, "restartIce failed; retrying without consuming recovery budget", it)
+                iceHandler.removeCallbacks(iceRestartRunner)
+                iceHandler.postDelayed(iceRestartRunner, ICE_RESTART_RETRY_MS)
+            }
     }
 
     /** 每 2 秒取 RTT 做实时显示/自适应，详细音视频统计每 10 秒记录一次。 */
@@ -888,7 +898,21 @@ class WebRtcClient(
         }
     }
 
-    override fun onSignalingChange(state: PeerConnection.SignalingState) {}
+    override fun onSignalingChange(state: PeerConnection.SignalingState) {
+        if (state != PeerConnection.SignalingState.STABLE || !renegoInFlight) return
+        renegoInFlight = false
+        restartRequested = false
+        Log.d(TAG, "ICE_RESTART_NEGOTIATION_STABLE ice=$latestIceState")
+        // Keep the request coalesced until the offer/answer exchange is actually complete.
+        // If ICE is still down after settling, allow connectivity checks to run before retrying.
+        if (!closed && !endedNotified.get() &&
+            latestIceState != PeerConnection.IceConnectionState.CONNECTED.name &&
+            latestIceState != PeerConnection.IceConnectionState.COMPLETED.name
+        ) {
+            iceHandler.removeCallbacks(iceRestartRunner)
+            iceHandler.postDelayed(iceRestartRunner, ICE_RESTART_RETRY_MS)
+        }
+    }
     override fun onIceConnectionReceivingChange(receiving: Boolean) {}
     override fun onIceGatheringChange(state: PeerConnection.IceGatheringState) {}
     override fun onIceCandidatesRemoved(candidates: Array<out IceCandidate>) {}
@@ -904,12 +928,12 @@ class WebRtcClient(
             override fun onCreateSuccess(desc: SessionDescription) {
                 pc.setLocalDescription(object : SdpAdapter("setLocalRenego", ::onSdpFailure) {
                     override fun onSetSuccess() {
-                        renegoInFlight = false
                         sendSdp(desc)
                     }
 
                     override fun onSetFailure(error: String?) {
                         renegoInFlight = false
+                        restartRequested = false
                         Log.w(TAG, "renego setLocal failed: $error")
                         onSdpFailure("setLocalRenego_SET")
                     }
@@ -997,6 +1021,7 @@ class WebRtcClient(
 
     private fun onSdpFailure(stage: String) {
         renegoInFlight = false
+        restartRequested = false
         notifyEnded("sdp_$stage")
     }
 

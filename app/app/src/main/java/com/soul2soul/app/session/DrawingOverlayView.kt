@@ -26,6 +26,9 @@ class DrawingOverlayView @JvmOverloads constructor(
     attrs: AttributeSet? = null,
 ) : View(context, attrs) {
 
+    /** Pointer IDs are stable across MotionEvent index reordering; always follow the first finger. */
+    private var activePointerId = INVALID_POINTER_ID
+
     interface StrokeSink {
         fun onStroke(json: JSONObject)
     }
@@ -86,20 +89,63 @@ class DrawingOverlayView @JvmOverloads constructor(
         engine.setVideoRect(r.left, r.top, r.right, r.bottom)
         val acts = when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
+                // A new stream should not inherit an unfinished pointer after a vendor-specific
+                // missing CANCEL. Close the previous stroke without treating it as a tap.
+                if (activePointerId != INVALID_POINTER_ID) {
+                    removeCallbacks(ctlLongPress)
+                    dispatchActions(engine.onCancel(activePointerId))
+                }
+                activePointerId = event.getPointerId(0)
                 if (controlMode) {
                     removeCallbacks(ctlLongPress)
                     postDelayed(ctlLongPress, OverlayGestureEngine.CTL_LONG_PRESS_MS)
                 }
-                engine.onDown(event.getPointerId(0), event.x, event.y)
+                engine.onDown(activePointerId, event.getX(0), event.getY(0))
             }
             MotionEvent.ACTION_MOVE -> {
-                // 只认首指：引擎按 pointerId 过滤，第二根手指的移动不污染轨迹
-                val i = event.actionIndex
-                engine.onMove(event.getPointerId(i), event.getX(i), event.getY(i))
+                // ACTION_MOVE 的 actionIndex 固定不是“首指”；pointer index can change after
+                // another finger leaves, so resolve the original pointer ID on every move.
+                val pointerId = activePointerId
+                val i = if (pointerId == INVALID_POINTER_ID) -1 else event.findPointerIndex(pointerId)
+                if (i < 0) {
+                    removeCallbacks(ctlLongPress)
+                    activePointerId = INVALID_POINTER_ID
+                    engine.onCancel(pointerId)
+                } else {
+                    engine.onMove(pointerId, event.getX(i), event.getY(i))
+                }
             }
-            MotionEvent.ACTION_UP -> engine.onUp(0)
-            MotionEvent.ACTION_CANCEL -> engine.onCancel(0)
-            else -> return true // POINTER_DOWN/POINTER_UP 与原实现一样不参与判定
+            MotionEvent.ACTION_POINTER_UP -> {
+                val liftedPointerId = event.getPointerId(event.actionIndex)
+                if (liftedPointerId == activePointerId) {
+                    removeCallbacks(ctlLongPress)
+                    activePointerId = INVALID_POINTER_ID
+                    engine.onUp(liftedPointerId)
+                } else {
+                    emptyList()
+                }
+            }
+            MotionEvent.ACTION_POINTER_DOWN -> {
+                // Secondary fingers never take ownership of a stroke/control gesture.
+                emptyList()
+            }
+            MotionEvent.ACTION_UP -> {
+                val liftedPointerId = event.getPointerId(event.actionIndex)
+                removeCallbacks(ctlLongPress)
+                if (liftedPointerId == activePointerId) {
+                    activePointerId = INVALID_POINTER_ID
+                    engine.onUp(liftedPointerId)
+                } else {
+                    emptyList()
+                }
+            }
+            MotionEvent.ACTION_CANCEL -> {
+                removeCallbacks(ctlLongPress)
+                val pointerId = activePointerId
+                activePointerId = INVALID_POINTER_ID
+                if (pointerId != INVALID_POINTER_ID) engine.onCancel(pointerId) else emptyList()
+            }
+            else -> return true
         }
         dispatchActions(acts)
         invalidate()
@@ -202,5 +248,9 @@ class DrawingOverlayView @JvmOverloads constructor(
     private val pointerPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.FILL
         color = Color.WHITE
+    }
+
+    private companion object {
+        const val INVALID_POINTER_ID = -1
     }
 }

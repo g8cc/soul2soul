@@ -156,16 +156,16 @@ class OverlayGestureEngine(
     }
 
     fun onUp(id: Int): List<Action> {
-        // 与原 View 行为一致：抬手收尾认"最后一根手指离开"，不区分 id；
-        // 尾指先抬（POINTER_UP）在老代码里本就被忽略，此处沿用
-        if (primaryId == INVALID) return emptyList()
+        // Only the original pointer may finish the gesture. A secondary finger lifting must
+        // not commit stale points from the primary finger after pointer-index reordering.
+        if (primaryId == INVALID || id != primaryId) return emptyList()
         primaryId = INVALID
         if (controlMode) return ctlUp()
         return endDoodle(withTap = true)
     }
 
     fun onCancel(id: Int): List<Action> {
-        if (primaryId == INVALID) return emptyList()
+        if (primaryId == INVALID || id != primaryId) return emptyList()
         primaryId = INVALID
         if (controlMode) {
             gestureActive = false

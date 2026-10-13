@@ -12,6 +12,14 @@ internal class IceRestartBudget(private val maxAttempts: Int = MAX_ATTEMPTS) {
         return attempts
     }
 
+    /** A synchronous restartIce failure did not start a recovery attempt; return its slot. */
+    @Synchronized
+    fun releaseAttempt(attempt: Int): Boolean {
+        if (attempt != attempts || attempts == 0) return false
+        attempts -= 1
+        return true
+    }
+
     /** Returns true only when a consumed budget was reset after a stable connection window. */
     @Synchronized
     fun resetIfStable(connectedDurationMs: Long): Boolean {
