@@ -147,8 +147,13 @@ class WebRtcClient(
     private var previousRemoteVideoReceived = -1L
     private var previousOutboundVideoSent = -1L
     private val iceHandler = android.os.Handler(android.os.Looper.getMainLooper())
-    private var iceRestartCount = 0
+    private val iceRestartBudget = IceRestartBudget()
     @Volatile private var established = false
+    @Volatile private var latestIceState = PeerConnection.IceConnectionState.NEW.name
+    @Volatile private var connectedSinceMs = 0L
+    @Volatile private var outageStartedAtMs = 0L
+    @Volatile private var recoveryCount = 0
+    @Volatile private var connectStartedAtMs = 0L
     @Volatile private var renegoInFlight = false
     private val endedNotified = java.util.concurrent.atomic.AtomicBoolean(false)
     @Volatile private var remoteDescriptionSet = false
@@ -158,12 +163,30 @@ class WebRtcClient(
     private var remoteVideoSizeSink: VideoSink? = null
     private var lastRemoteVideoWidth = 0
     private var lastRemoteVideoHeight = 0
+    private var previousAudioQualityCounters: RtpQualityWindow.Counters? = null
+    private var previousVideoQualityCounters: RtpQualityWindow.Counters? = null
 
     private val connectTimeoutRunner = Runnable {
         if (!closed && !established) notifyEnded("connect_TIMEOUT")
     }
     private val disconnectTimeoutRunner = Runnable {
-        if (!closed) notifyEnded("ice_DISCONNECTED_TIMEOUT")
+        if (!closed) {
+            Log.w(
+                TAG,
+                "ICE_RECOVERY_TIMEOUT state=$latestIceState outageMs=" +
+                    "${outageDurationMs()} restarts=${iceRestartBudget.usedAttempts}",
+            )
+            notifyEnded("ice_DISCONNECTED_TIMEOUT")
+        }
+    }
+    private val iceStableRunner = Runnable {
+        if (closed) return@Runnable
+        val connectedSince = connectedSinceMs
+        if (connectedSince <= 0L) return@Runnable
+        val connectedFor = android.os.SystemClock.elapsedRealtime() - connectedSince
+        if (iceRestartBudget.resetIfStable(connectedFor)) {
+            Log.i(TAG, "ICE_RESTART_BUDGET_RESET stableMs=$connectedFor")
+        }
     }
 
     /** 当前采集长边上限（观看端可通过 DataChannel 切 960/1280/1600/1920） */
@@ -520,17 +543,38 @@ class WebRtcClient(
     }
 
     override fun onIceConnectionChange(state: PeerConnection.IceConnectionState) {
-        Log.d(TAG, "ice state: $state")
+        val previousState = latestIceState
+        latestIceState = state.name
+        Log.d(TAG, "ice state: $previousState->$state")
         if (endedNotified.get()) return
         when (state) {
             PeerConnection.IceConnectionState.CONNECTED,
             PeerConnection.IceConnectionState.COMPLETED -> {
+                val now = android.os.SystemClock.elapsedRealtime()
                 val firstConnection = !established
+                val wasConnected = previousState == PeerConnection.IceConnectionState.CONNECTED.name ||
+                    previousState == PeerConnection.IceConnectionState.COMPLETED.name
                 established = true
                 iceHandler.removeCallbacks(connectTimeoutRunner)
                 iceHandler.removeCallbacks(disconnectTimeoutRunner)
                 iceHandler.removeCallbacks(iceRestartRunner)
+                if (!wasConnected) {
+                    connectedSinceMs = now
+                    iceHandler.removeCallbacks(iceStableRunner)
+                    iceHandler.postDelayed(iceStableRunner, IceRestartBudget.STABLE_RESET_MS)
+                }
+                if (outageStartedAtMs > 0L) {
+                    recoveryCount += 1
+                    Log.i(
+                        TAG,
+                        "ICE_RECOVERED count=$recoveryCount outageMs=${now - outageStartedAtMs} " +
+                            "restarts=${iceRestartBudget.usedAttempts}",
+                    )
+                    outageStartedAtMs = 0L
+                }
                 if (firstConnection) {
+                    val setupMs = if (connectStartedAtMs > 0L) now - connectStartedAtMs else -1L
+                    Log.i(TAG, "ICE_ESTABLISHED setupMs=$setupMs")
                     listener.onLive()
                     startRttPolling()
                 }
@@ -542,11 +586,23 @@ class WebRtcClient(
                     iceHandler.removeCallbacks(iceRestartRunner)
                     iceHandler.postDelayed(iceRestartRunner, ICE_RESTART_AFTER_MS)
                 }
+                iceHandler.removeCallbacks(iceStableRunner)
+                connectedSinceMs = 0L
+                if (outageStartedAtMs == 0L) {
+                    outageStartedAtMs = android.os.SystemClock.elapsedRealtime()
+                    Log.w(TAG, "ICE_OUTAGE_STARTED state=$state")
+                }
                 iceHandler.removeCallbacks(disconnectTimeoutRunner)
                 iceHandler.postDelayed(disconnectTimeoutRunner, DISCONNECT_TIMEOUT_MS)
             }
             PeerConnection.IceConnectionState.FAILED -> {
                 iceHandler.removeCallbacks(iceRestartRunner)
+                iceHandler.removeCallbacks(iceStableRunner)
+                connectedSinceMs = 0L
+                if (outageStartedAtMs == 0L) {
+                    outageStartedAtMs = android.os.SystemClock.elapsedRealtime()
+                    Log.w(TAG, "ICE_OUTAGE_STARTED state=$state")
+                }
                 val recovery = IceRecoveryPolicy.onFailed(established, isSharer)
                 if (recovery.armRecoveryTimeout) {
                     iceHandler.removeCallbacks(disconnectTimeoutRunner)
@@ -556,21 +612,32 @@ class WebRtcClient(
             }
             PeerConnection.IceConnectionState.CLOSED -> if (!closed) {
                 iceHandler.removeCallbacks(iceRestartRunner)
+                iceHandler.removeCallbacks(iceStableRunner)
                 notifyEnded("ice_CLOSED")
             }
             else -> Unit
         }
     }
 
-    private val iceRestartRunner = Runnable {
-        if (closed || renegoInFlight) return@Runnable
-        val pc = pc ?: return@Runnable
-        if (iceRestartCount >= MAX_ICE_RESTARTS) {
-            Log.w(TAG, "ice restart 上限，放弃恢复")
-            return@Runnable
+    private val iceRestartRunner = Runnable { runIceRestart() }
+
+    private fun runIceRestart() {
+        if (closed || endedNotified.get()) return
+        if (latestIceState == PeerConnection.IceConnectionState.CONNECTED.name ||
+            latestIceState == PeerConnection.IceConnectionState.COMPLETED.name
+        ) return
+        if (renegoInFlight) {
+            // Don't silently lose the one recovery request if another SDP operation is still settling.
+            iceHandler.postDelayed(iceRestartRunner, ICE_RESTART_RETRY_MS)
+            return
         }
-        iceRestartCount += 1
-        Log.d(TAG, "ice restart #$iceRestartCount")
+        val pc = pc ?: return
+        val attempt = iceRestartBudget.reserveAttempt()
+        if (attempt == null) {
+            Log.w(TAG, "ICE_RESTART_BUDGET_EXHAUSTED outageMs=${outageDurationMs()}")
+            return
+        }
+        Log.i(TAG, "ICE_RESTART attempt=$attempt state=$latestIceState")
         runCatching { pc.restartIce() }
             .onFailure { Log.w(TAG, "restartIce unsupported", it) }
     }
@@ -588,6 +655,7 @@ class WebRtcClient(
                     var best = -1L
                     var availableOutgoingBps = -1L
                     var selectedPairId: String? = null
+                    var selectedPath = "unknown"
                     var selectedRtt = -1L
                     var selectedAvailable = -1L
                     var fallbackRtt = -1L
@@ -596,6 +664,9 @@ class WebRtcClient(
                     var remoteVideoReceived = -1L
                     var outboundVideoSent = -1L
                     var outboundVideoFps = -1.0
+                    var inboundVideoFps = -1.0
+                    var inboundAudioQuality: RtpQualityWindow.Counters? = null
+                    var inboundVideoQuality: RtpQualityWindow.Counters? = null
                     // Prefer the pair selected by transport. Older stats reports
                     // may not expose transport.selectedCandidatePairId; in that
                     // case use a nominated pair, then fall back to the best RTT.
@@ -618,27 +689,55 @@ class WebRtcClient(
                             if (selected) {
                                 if (ms >= 0 && (selectedRtt < 0 || ms < selectedRtt)) selectedRtt = ms
                                 if (available >= 0) selectedAvailable = available
+                                val localId = stats.members["localCandidateId"]?.toString()
+                                val remoteId = stats.members["remoteCandidateId"]?.toString()
+                                val localType = localId?.let { report.statsMap[it]?.members?.get("candidateType") }
+                                    ?.toString() ?: "?"
+                                val remoteType = remoteId?.let { report.statsMap[it]?.members?.get("candidateType") }
+                                    ?.toString() ?: "?"
+                                selectedPath = "$localType->$remoteType"
                             }
                             if (rtt != null && rtt >= 0) {
                                 if (fallbackRtt < 0 || ms < fallbackRtt) fallbackRtt = ms
                             }
                             if (available > fallbackAvailable) fallbackAvailable = available
                         }
-                        if (isSharer && stats.type == "remote-inbound-rtp" &&
-                            (stats.members["kind"] == "video" || stats.members["mediaType"] == "video")
-                        ) {
+                        val mediaKind = stats.members["kind"]?.toString()
+                            ?: stats.members["mediaType"]?.toString()
+                        if (isSharer && stats.type == "remote-inbound-rtp" && mediaKind == "video") {
                             remoteVideoLost =
                                 (stats.members["packetsLost"] as? Number)?.toLong()?.coerceAtLeast(0L) ?: -1L
                             remoteVideoReceived =
                                 (stats.members["packetsReceived"] as? Number)?.toLong()?.coerceAtLeast(0L) ?: -1L
+                            inboundVideoQuality = RtpQualityWindow.Counters(
+                                packetsLost = (stats.members["packetsLost"] as? Number)?.toLong() ?: -1L,
+                                packetsReceived = (stats.members["packetsReceived"] as? Number)?.toLong() ?: -1L,
+                                jitterSeconds = (stats.members["jitter"] as? Number)?.toDouble() ?: -1.0,
+                            )
                         }
-                        if (isSharer && stats.type == "outbound-rtp" &&
-                            (stats.members["kind"] == "video" || stats.members["mediaType"] == "video")
-                        ) {
+                        if (isSharer && stats.type == "outbound-rtp" && mediaKind == "video") {
                             outboundVideoSent =
                                 (stats.members["packetsSent"] as? Number)?.toLong()?.coerceAtLeast(0L) ?: -1L
                             outboundVideoFps =
                                 (stats.members["framesPerSecond"] as? Number)?.toDouble() ?: -1.0
+                        }
+                        if (!isSharer && stats.type == "inbound-rtp" && mediaKind == "video") {
+                            inboundVideoFps =
+                                (stats.members["framesPerSecond"] as? Number)?.toDouble() ?: -1.0
+                            inboundVideoQuality = RtpQualityWindow.Counters(
+                                packetsLost = (stats.members["packetsLost"] as? Number)?.toLong() ?: -1L,
+                                packetsReceived = (stats.members["packetsReceived"] as? Number)?.toLong() ?: -1L,
+                                jitterSeconds = (stats.members["jitter"] as? Number)?.toDouble() ?: -1.0,
+                            )
+                        }
+                        if (stats.type == "inbound-rtp" && mediaKind == "audio") {
+                            inboundAudioQuality = RtpQualityWindow.Counters(
+                                packetsLost = (stats.members["packetsLost"] as? Number)?.toLong() ?: -1L,
+                                packetsReceived = (stats.members["packetsReceived"] as? Number)?.toLong() ?: -1L,
+                                jitterSeconds = (stats.members["jitter"] as? Number)?.toDouble() ?: -1.0,
+                                concealedSamples =
+                                    (stats.members["concealedSamples"] as? Number)?.toLong() ?: -1L,
+                            )
                         }
                     }
                     best = if (selectedRtt >= 0) selectedRtt else fallbackRtt
@@ -649,45 +748,47 @@ class WebRtcClient(
                     // 统计仍每 2 秒用于自适应；详细媒体诊断每 10 秒记录一次。
                     statsPollCount += 1
                     if (statsPollCount % DIAGNOSTIC_EVERY_POLLS == 0) {
-                        // 编解码实现与帧率诊断：确认软硬编解码（性能调优的依据）
+                        // Keep codec diagnostics, but report network quality as interval deltas:
+                        // cumulative counters hide whether the current 10s window was actually bad.
                         for ((_, stats) in report.statsMap) {
-                        when (stats.type) {
-                            "outbound-rtp" -> if (stats.members["kind"] == "video") {
-                                val impl = stats.members["encoderImplementation"]?.toString() ?: "?"
-                                val fps = (stats.members["framesPerSecond"] as? Number)?.toDouble() ?: 0.0
-                                val sent = (stats.members["bytesSent"] as? Number)?.toLong() ?: 0L
-                                Log.d(TAG, "ENC impl=$impl fps=${"%.1f".format(fps)} bytes=$sent")
-                            }
-                            "inbound-rtp" -> if (stats.members["kind"] == "video") {
-                                val impl = stats.members["decoderImplementation"]?.toString() ?: "?"
-                                val fps = (stats.members["framesPerSecond"] as? Number)?.toDouble() ?: 0.0
-                                val lost = (stats.members["packetsLost"] as? Number)?.toLong() ?: 0L
-                                val recv = (stats.members["packetsReceived"] as? Number)?.toLong() ?: 1L
-                                val jitter = (stats.members["jitter"] as? Number)?.toDouble() ?: 0.0
-                                Log.d(TAG, "DEC impl=$impl fps=${"%.1f".format(fps)} loss=$lost recv=$recv jitter=${"%.1f".format(jitter * 1000)}ms")
-                            } else if (stats.members["kind"] == "audio") {
-                                val lost = (stats.members["packetsLost"] as? Number)?.toLong() ?: 0L
-                                val jitter = (stats.members["jitter"] as? Number)?.toDouble() ?: 0.0
-                                val concealed = (stats.members["concealedSamples"] as? Number)?.toLong() ?: 0L
-                                Log.d(TAG, "audio loss=$lost jitter=${"%.1f".format(jitter * 1000)}ms concealed=$concealed")
+                            val mediaKind = stats.members["kind"]?.toString()
+                                ?: stats.members["mediaType"]?.toString()
+                            when {
+                                stats.type == "outbound-rtp" && mediaKind == "video" -> {
+                                    val impl = stats.members["encoderImplementation"]?.toString() ?: "?"
+                                    val fps = (stats.members["framesPerSecond"] as? Number)?.toDouble() ?: 0.0
+                                    val sent = (stats.members["bytesSent"] as? Number)?.toLong() ?: 0L
+                                    Log.d(TAG, "ENC impl=$impl fps=${formatMetric(fps)} bytes=$sent")
+                                }
+                                !isSharer && stats.type == "inbound-rtp" && mediaKind == "video" -> {
+                                    val impl = stats.members["decoderImplementation"]?.toString() ?: "?"
+                                    Log.d(TAG, "DEC impl=$impl fps=${formatMetric(inboundVideoFps)}")
+                                }
                             }
                         }
-                    }
-
-                        // 视频流质量诊断（观看端）：丢包/抖动/帧率
-                        if (!isSharer) {
-                            for ((_, stats) in report.statsMap) {
-                            if (stats.type == "inbound-rtp" &&
-                                stats.members["kind"] == "video"
-                            ) {
-                                val lost = (stats.members["packetsLost"] as? Number)?.toLong() ?: 0L
-                                val recv = (stats.members["packetsReceived"] as? Number)?.toLong() ?: 1L
-                                val jitter = (stats.members["jitter"] as? Number)?.toDouble() ?: 0.0
-                                val fps = (stats.members["framesPerSecond"] as? Number)?.toDouble()
-                                Log.d(TAG, "video loss=${lost} recv=${recv} jitter=${"%.3f".format(jitter)}s fps=${"%.1f".format(fps ?: 0.0)}")
-                            }
-                            }
-                        }
+                        val audioWindow = RtpQualityWindow.between(
+                            previousAudioQualityCounters,
+                            inboundAudioQuality,
+                        )
+                        val videoWindow = RtpQualityWindow.between(
+                            previousVideoQualityCounters,
+                            inboundVideoQuality,
+                        )
+                        previousAudioQualityCounters = inboundAudioQuality
+                        previousVideoQualityCounters = inboundVideoQuality
+                        val videoFps = if (isSharer) outboundVideoFps else inboundVideoFps
+                        Log.i(
+                            TAG,
+                            "S2S_QOS role=${if (isSharer) "sharer" else "viewer"} " +
+                                "ice=$latestIceState rttMs=$best path=$selectedPath " +
+                                "availableBps=$availableOutgoingBps edge=$captureLongEdge " +
+                                "videoLossPct=${formatMetric(videoWindow.packetLossPercent)} " +
+                                "videoJitterMs=${formatMetric(videoWindow.jitterMs)} " +
+                                "videoFps=${formatMetric(videoFps)} " +
+                                "audioLossPct=${formatMetric(audioWindow.packetLossPercent)} " +
+                                "audioJitterMs=${formatMetric(audioWindow.jitterMs)} " +
+                                "audioConcealedMs=${formatMetric(audioWindow.concealedMs)}",
+                        )
                     }
 
                     // 共享端按 RTT + 远端丢包 + 可用上行带宽自动调画质。
@@ -739,6 +840,13 @@ class WebRtcClient(
     private fun stopRttPolling() {
         rttHandler.removeCallbacksAndMessages(null)
     }
+
+    private fun formatMetric(value: Double): String =
+        if (value.isFinite() && value >= 0.0) {
+            String.format(java.util.Locale.US, "%.1f", value)
+        } else {
+            "na"
+        }
 
     override fun onDataChannel(dc: DataChannel) {
         // 观看端：channel 均由共享端创建，按 label 分流
@@ -876,8 +984,15 @@ class WebRtcClient(
     }
 
     private fun startConnectTimeout() {
+        connectStartedAtMs = android.os.SystemClock.elapsedRealtime()
         iceHandler.removeCallbacks(connectTimeoutRunner)
         iceHandler.postDelayed(connectTimeoutRunner, CONNECT_TIMEOUT_MS)
+    }
+
+    private fun outageDurationMs(): Long = if (outageStartedAtMs > 0L) {
+        (android.os.SystemClock.elapsedRealtime() - outageStartedAtMs).coerceAtLeast(0L)
+    } else {
+        0L
     }
 
     private fun onSdpFailure(stage: String) {
@@ -890,7 +1005,12 @@ class WebRtcClient(
         iceHandler.removeCallbacks(connectTimeoutRunner)
         iceHandler.removeCallbacks(disconnectTimeoutRunner)
         iceHandler.removeCallbacks(iceRestartRunner)
-        Log.w(TAG, "session ended: $reason")
+        iceHandler.removeCallbacks(iceStableRunner)
+        Log.w(
+            TAG,
+            "session ended: $reason established=$established recoveries=$recoveryCount " +
+                "restartAttempts=${iceRestartBudget.usedAttempts} outageMs=${outageDurationMs()}",
+        )
         listener.onEnded(reason)
     }
 
@@ -946,6 +1066,6 @@ class WebRtcClient(
         private const val CONNECT_TIMEOUT_MS = 30_000L
         private const val DISCONNECT_TIMEOUT_MS = 15_000L
         private const val ICE_RESTART_AFTER_MS = 6000L
-        private const val MAX_ICE_RESTARTS = 3
+        private const val ICE_RESTART_RETRY_MS = 1000L
     }
 }
