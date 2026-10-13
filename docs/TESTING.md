@@ -110,7 +110,7 @@ bash scripts/test.sh --coverage
 - 服务器可跑（T4 自带起服逻辑时遵循 S2S_DATA_FILE）；
 - 不满足时 test.sh 报 SKIP 而非 FAIL——SKIP ≠ 通过，发版前人工确认。
 
-弱网恢复与语音质量采样步骤、日志字段说明和建议矩阵见 [NETWORK-QUALITY.md](NETWORK-QUALITY.md)。没有两台真机结果时，只能报告单测/协议测试通过，不能声称弱网恢复或语音听感已验证。
+弱网恢复与语音质量采样步骤、日志字段说明和建议矩阵见 [NETWORK-QUALITY.md](NETWORK-QUALITY.md)；当前未完成的真机事项及维护记录见 [VALIDATION-TODO.md](VALIDATION-TODO.md)。没有两台真机结果时，只能报告单测/协议测试通过，不能声称弱网恢复或语音听感已验证。
 
 ## 7. 回归来源约定
 
