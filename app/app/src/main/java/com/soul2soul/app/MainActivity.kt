@@ -476,12 +476,14 @@ class MainActivity : AppCompatActivity() {
             val file = com.soul2soul.app.util.Updater.download(
                 info.url,
                 java.io.File(getExternalFilesDir("apk"), "update-${info.versionCode}.apk"),
-            ) { p ->
-                runOnUiThread {
-                    bar.progress = p
-                    pct.text = "$p%"
-                }
-            }
+                onProgress = { p ->
+                    runOnUiThread {
+                        bar.progress = p
+                        pct.text = "$p%"
+                    }
+                },
+                expectedSha256 = info.sha256.takeIf { it.isNotEmpty() },
+            )
             runOnUiThread {
                 dialog.dismiss()
                 if (file != null) {

@@ -4,7 +4,7 @@ import org.json.JSONObject
 
 /**
  * 版本清单解析 + 更新判定的纯逻辑（无 Android 依赖，可单测）。
- * 解析规则与 Updater.check 原有行为逐字一致：任何异常/非 JSON 一律视为"无信息"。
+ * 任何异常或非 JSON 均视为"无信息"；可选 sha256 字段用于新版本更新包校验。
  */
 object VersionManifest {
 
@@ -15,8 +15,18 @@ object VersionManifest {
             versionCode = json.optInt("versionCode", 0),
             versionName = json.optString("versionName", ""),
             url = json.optString("url", ""),
+            sha256 = json.optString("sha256", "").trim().lowercase().also { hash ->
+                if (hash.isNotEmpty() && !isSha256(hash)) {
+                    error("invalid sha256")
+                }
+            },
         )
     }.getOrNull()
+
+    private val sha256Pattern = Regex("[0-9a-f]{64}")
+
+    /** Optional manifest hash: empty keeps compatibility with manifests published before hashing. */
+    fun isSha256(value: String): Boolean = sha256Pattern.matches(value.lowercase())
 
     /**
      * 是否有新版本。判定必须用运行时真实 local（Updater.localVersionCode），

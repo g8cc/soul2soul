@@ -72,6 +72,16 @@ class GestureIntentTest {
         assertNull(a)
     }
 
+    @Test
+    fun back_outwardEdgeSwipes_areNotBack() {
+        assertNull(
+            GestureIntent.edgeGlobalAction(listOf(pt(0.02f, 0.5f), pt(0f, 0.5f)), 200L)
+        )
+        assertNull(
+            GestureIntent.edgeGlobalAction(listOf(pt(0.98f, 0.5f), pt(1f, 0.5f)), 200L)
+        )
+    }
+
     // ---------- HOME / RECENTS：底部边缘垂直上滑 ----------
 
     @Test

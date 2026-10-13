@@ -30,8 +30,8 @@ object GestureIntent {
         val dx = l.x - f.x
         val dy = l.y - f.y
         return when {
-            (f.x <= 0.04f || f.x >= 0.96f) && abs(dy) < 0.06f &&
-                abs(dx) >= 0.12f ->
+            (f.x <= 0.04f && dx >= 0.12f || f.x >= 0.96f && dx <= -0.12f) &&
+                abs(dy) < 0.06f ->
                 GlobalAction.BACK
             f.y >= 0.96f && abs(dx) < 0.08f && dy <= -0.25f ->
                 if (durMs < 400L) GlobalAction.HOME else GlobalAction.RECENTS

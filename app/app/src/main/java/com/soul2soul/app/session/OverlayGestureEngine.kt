@@ -155,17 +155,20 @@ class OverlayGestureEngine(
         return acts
     }
 
-    fun onUp(id: Int): List<Action> {
-        // 与原 View 行为一致：抬手收尾认"最后一根手指离开"，不区分 id；
-        // 尾指先抬（POINTER_UP）在老代码里本就被忽略，此处沿用
-        if (primaryId == INVALID) return emptyList()
+    fun onUp(id: Int, x: Float? = null, y: Float? = null): List<Action> {
+        // Only the original pointer may finish the gesture. A secondary finger lifting must
+        // not commit stale points from the primary finger after pointer-index reordering.
+        if (primaryId == INVALID || id != primaryId) return emptyList()
+        // ACTION_UP may contain a newer coordinate than the last ACTION_MOVE. Include that
+        // endpoint so fast/long gestures do not finish short or miss an edge-navigation intent.
+        val finalMove = if (x != null && y != null) onMove(id, x, y) else emptyList()
         primaryId = INVALID
-        if (controlMode) return ctlUp()
-        return endDoodle(withTap = true)
+        val finish = if (controlMode) ctlUp(x, y) else endDoodle(withTap = true)
+        return finalMove + finish
     }
 
     fun onCancel(id: Int): List<Action> {
-        if (primaryId == INVALID) return emptyList()
+        if (primaryId == INVALID || id != primaryId) return emptyList()
         primaryId = INVALID
         if (controlMode) {
             gestureActive = false
@@ -224,18 +227,33 @@ class OverlayGestureEngine(
         val now = clock()
         val last = gesturePts.lastOrNull()
         val moved = last != null && hypot(x - last.first, y - last.second) > GESTURE_MIN_PX
-        if ((moved || now - gestureLastAt > GESTURE_MIN_MS) && gesturePts.size < GESTURE_MAX_PTS) {
-            gesturePts.add(x to y)
-            gestureTimes.add(now)
-            gestureLastAt = now
+        if (moved || now - gestureLastAt > GESTURE_MIN_MS) {
+            appendGesturePoint(x, y, now)
         }
         return acts
     }
 
-    private fun ctlUp(): List<Action> {
+    private fun appendGesturePoint(x: Float, y: Float, at: Long) {
+        if (gesturePts.size < GESTURE_MAX_PTS) {
+            gesturePts.add(x to y)
+            gestureTimes.add(at)
+        } else {
+            // Keep the message bounded, but never lose the latest position once sampling is
+            // saturated. In particular, retain the actual up point for long edge swipes.
+            gesturePts[gesturePts.lastIndex] = x to y
+            gestureTimes[gestureTimes.lastIndex] = at
+        }
+        gestureLastAt = at
+    }
+
+    private fun ctlUp(x: Float?, y: Float?): List<Action> {
         val acts = mutableListOf<Action>()
         longPressArmed = false
         if (!longPressFired && gesturePts.isNotEmpty()) {
+            if (x != null && y != null) {
+                val last = gesturePts.last()
+                if (last.first != x || last.second != y) appendGesturePoint(x, y, clock())
+            }
             val pts = gesturePts.map { (px, py) -> normalizeTruncated(px, py) }
             acts.add(Action.Gesture(pts, clock() - gestureDownAt))
             tailPts = ArrayList(gesturePts)

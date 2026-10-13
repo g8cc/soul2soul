@@ -72,6 +72,22 @@ class OverlayGestureEngineTest {
     }
 
     @Test
+    fun secondaryPointerCannotFinishOrCancelPrimaryGesture() {
+        val e = engine()
+        e.onDown(7, 5f, 5f)
+        e.onDown(2, 900f, 900f)
+        e.onMove(7, 60f, 60f)
+
+        assertTrue(e.onUp(2).isEmpty())
+        assertTrue(e.onCancel(2).isEmpty())
+        assertTrue(e.onMove(7, 80f, 80f).isNotEmpty())
+
+        val end = e.onUp(7)
+        assertEquals(1, end.size)
+        assertTrue(end.single() is Action.StrokeEnd)
+    }
+
+    @Test
     fun strokeEnd_carriesResendAtPlus300ms() {
         val e = engine()
         e.onDown(0, 0f, 0f)
@@ -185,14 +201,23 @@ class OverlayGestureEngineTest {
     }
 
     @Test
-    fun ctl_max64Points_65thDropped() {
+    fun ctl_max64Points_keepsLatestEndpointWhenSamplingIsSaturated() {
         val e = ctlEngine()
         for (i in 0 until 70) {
             now += 100 // 每步时间都超 60ms：必采样，直到撞 64 上限
             e.onMove(0, 100f + i, 100f)
         }
-        val g = e.onUp(0).filterIsInstance<Action.Gesture>().single()
+        val g = e.onUp(0, 250f, 100f).filterIsInstance<Action.Gesture>().single()
         assertEquals(OverlayGestureEngine.GESTURE_MAX_PTS, g.pts.size)
+        assertEquals(0.25, g.pts.last().first, 1e-9)
+    }
+
+    @Test
+    fun ctl_upCoordinateIsIncludedEvenWithoutFinalMoveEvent() {
+        val e = ctlEngine()
+        val g = e.onUp(0, 800f, 100f).filterIsInstance<Action.Gesture>().single()
+        assertEquals(2, g.pts.size)
+        assertEquals(0.8, g.pts.last().first, 1e-9)
     }
 
     // ---------- 长按唤菜单 ----------

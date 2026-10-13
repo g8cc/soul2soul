@@ -110,6 +110,8 @@ bash scripts/test.sh --coverage
 - 服务器可跑（T4 自带起服逻辑时遵循 S2S_DATA_FILE）；
 - 不满足时 test.sh 报 SKIP 而非 FAIL——SKIP ≠ 通过，发版前人工确认。
 
+弱网恢复与语音质量采样步骤、日志字段说明和建议矩阵见 [NETWORK-QUALITY.md](NETWORK-QUALITY.md)；当前未完成的真机事项及维护记录见 [VALIDATION-TODO.md](VALIDATION-TODO.md)。没有两台真机结果时，只能报告单测/协议测试通过，不能声称弱网恢复或语音听感已验证。
+
 ## 7. 回归来源约定
 
 每条「真机踩坑修复」版本都应有对应锁定用例（附录 A 有映射）：
@@ -132,9 +134,11 @@ bash scripts/test.sh --coverage
 | SignalEnvelope (4) | hello 无 token 省略字段；type 信封 | §2 协议 |
 | StrokeMapping (11) | video=0 回退；0.05 容差边界；往返一致；整屏尺寸还原；非有限坐标拒绝 | FR-5 / §5 |
 | IceServerParser (7) | 多 urls；urls 缺失跳过；凭证携带 | §2.3 |
+| IceRestartBudget (3) | 单次最多 3 次；稳定 30 秒后清额度；未使用时不误报重置 | ICE 恢复额度回归 |
+| RtpQualityWindow (3) | 累计计数换算窗口丢包/隐藏音频时长；首样本/计数重置/缺失统计不伪报 0 | 弱网与语音质量诊断 |
 | PairCodeBook (9) | +4999/+5000ms；旧码作废；第 5/6 次尝试；TTL ±1ms；sweep；self_pair | §2 防爆破（repo 常量） |
 | MessageBook (10) | 限速 999/1000ms；发件人隔离；text 500/501；voice 校验（bad id/时长）；list 时序+拷贝+过期；ack 只删自己；容量溢出丢最旧；forgetDevice 双向；sweep TTL±1ms；self/空收件人 | 离线留言（未发版） |
 | turn (5) | 固定 HMAC 向量（openssl 交叉验证）；udp+tcp；username 过期秒 | §2.3 |
 | InboxStore (6) | fromJson 语音字段保留/缺 id→null/kind 缺省；按 id 去重；received 排 mine+时序；conversation 合并时序；remove 只删收到的；回调次数+重复 addAll 不触发 | 离线留言（未发版） |
 
-> 括号内为用例数（2026-10 时点，合计 Kotlin 93 / node 24 / 黑盒 48）。
+> 括号内为用例数（原基线 Kotlin 93；新增 ICE/媒体窗口 6 项后为 Kotlin 99 / node 24 / 黑盒 48）。

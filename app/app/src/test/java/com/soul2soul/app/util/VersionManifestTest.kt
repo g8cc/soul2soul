@@ -12,11 +12,12 @@ class VersionManifestTest {
     @Test
     fun parse_fullManifest() {
         val info = VersionManifest.parse(
-            """{"versionCode":23,"versionName":"0.2.23","url":"https://x/apk/a.apk"}"""
+            """{"versionCode":23,"versionName":"0.2.23","url":"https://x/apk/a.apk","sha256":"ABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCD"}"""
         )
         assertEquals(23, info?.versionCode)
         assertEquals("0.2.23", info?.versionName)
         assertEquals("https://x/apk/a.apk", info?.url)
+        assertEquals("abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd", info?.sha256)
     }
 
     @Test
@@ -24,6 +25,7 @@ class VersionManifestTest {
         val info = VersionManifest.parse("""{"versionName":"0.2.23"}""")
         assertEquals(0, info?.versionCode)
         assertEquals("", info?.url)
+        assertEquals("", info?.sha256)
     }
 
     @Test
@@ -38,6 +40,23 @@ class VersionManifestTest {
         // optInt 对非数值字段给默认值而不是抛异常
         val info = VersionManifest.parse("""{"versionCode":"abc"}""")
         assertEquals(0, info?.versionCode)
+    }
+
+    @Test
+    fun parse_invalidSha256_returnsNull() {
+        assertNull(VersionManifest.parse("""{"versionCode":24,"sha256":"not-a-hash"}"""))
+    }
+
+    @Test
+    fun trustedDownloadUrl_onlyAllowsProductionHttpsHost() {
+        assertTrue(Updater.isTrustedDownloadUrl("https://soul.lumi666.cloud/apk/a.apk"))
+        assertFalse(Updater.isTrustedDownloadUrl("http://soul.lumi666.cloud/apk/a.apk"))
+        assertFalse(Updater.isTrustedDownloadUrl("https://example.com/apk/a.apk"))
+        assertFalse(Updater.isTrustedDownloadUrl("https://soul.lumi666.cloud@evil.example/apk/a.apk"))
+        assertFalse(Updater.isTrustedDownloadUrl("https://soul.lumi666.cloud/apk/a.apk?redirect=1"))
+        assertFalse(Updater.isTrustedDownloadUrl("https://soul.lumi666.cloud:444/apk/a.apk"))
+        assertFalse(Updater.isTrustedDownloadUrl("https://soul.lumi666.cloud/other/a.apk"))
+        assertFalse(Updater.isTrustedDownloadUrl("https://soul.lumi666.cloud/apk/version.json"))
     }
 
     @Test

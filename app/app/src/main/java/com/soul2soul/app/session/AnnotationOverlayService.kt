@@ -62,7 +62,9 @@ class AnnotationOverlayService : Service() {
         android.util.Log.i("Overlay", "shake init: acc=" + (acc?.name ?: "NONE"))
         if (acc != null) {
             runCatching {
-                sensorManager?.registerListener(shakeListener, acc, android.hardware.SensorManager.SENSOR_DELAY_GAME)
+                // 摇一摇只需识别 600ms 内的三次换向，不需要游戏级采样；
+                // UI 级采样足够稳定，并减少共享期间的传感器唤醒与耗电。
+                sensorManager?.registerListener(shakeListener, acc, android.hardware.SensorManager.SENSOR_DELAY_UI)
             }.onFailure { android.util.Log.w("Overlay", "shake register failed", it) }
         }
     }

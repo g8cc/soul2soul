@@ -1,7 +1,7 @@
 # Soul2Soul 技术方案
 
 > 异地恋人实时陪伴 App：一方共享屏幕，另一方实时观看，并用画笔标注 + 语音通话"陪玩"。
-> 已确认的边界：只标注/语音，不做远程控制；不上架商店，仅两人侧载使用；双方均在国内；
+> 已确认的边界：标注/语音是核心，远程协助是默认关闭的可选能力；不上架商店，仅两人侧载使用；双方均在国内；
 > 自建 WebRTC（自有云服务器）；原生 Kotlin；目标机型小米 + 华为（新款）。
 
 ---
@@ -78,7 +78,7 @@ TURN 凭证为 HMAC-SHA1(静态密钥) 时限凭证（过期时间 = now+1h）�
 
 ### 5.1 屏幕采集链路（共享端）
 - `MediaProjectionManager.createScreenCaptureIntent()` 拿授权 → **必须先启动 `foregroundServiceType="mediaProjection|microphone"` 的前台服务并 `startForeground()`**，再创建 VirtualDisplay（Android 14+ 硬性顺序）。
-- 采集分辨率：长边压到 1280、偶数对齐、30fps；libwebrtc `ScreenCapturerAndroid` 自动处理屏幕旋转/尺寸变化。
+- 采集分辨率：默认长边 1600，支持 960/1280/1600/1920 档位，均偶数对齐、最高 30fps；弱网按 RTT/丢包/带宽/FPS 逐档降级，libwebrtc `ScreenCapturerAndroid` 自动处理屏幕旋转/尺寸变化。
 - 系统会在通知栏显示"正在录制屏幕"，这是系统行为，无法隐藏。
 - Netflix/银行类 App（FLAG_SECURE）会黑屏，系统保护，不处理。
 - 锁屏后 VirtualDisplay 停止出帧：v0 做成"无帧 30 秒自动结束会话"（防止挂死）。
