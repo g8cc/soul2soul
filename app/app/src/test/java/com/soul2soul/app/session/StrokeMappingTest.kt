@@ -23,6 +23,9 @@ class StrokeMappingTest {
         assertEquals(0f, r[1], 0.01f)
         assertEquals(781.25f, r[2], 0.01f)
         assertEquals(1000f, r[3], 0.01f)
+        assertTrue(StrokeMapping.containsPoint(r, 218.75f, 500f))
+        assertTrue(!StrokeMapping.containsPoint(r, 100f, 500f))
+        assertTrue(!StrokeMapping.containsPoint(r, 900f, 500f))
     }
 
     @Test
@@ -59,7 +62,7 @@ class StrokeMappingTest {
     }
 
     @Test
-    fun `letterbox 外的点击被钳制到边缘`() {
+    fun `letterbox 外的后续移动仍钳制到内容边缘`() {
         // 横屏视频在竖屏容器中，点击顶部黑边区域
         val (xn, yn) = StrokeMapping.normalize(450f, 100f, 1920, 1080, 900f, 1600f)
         assertTrue(yn >= 0f)

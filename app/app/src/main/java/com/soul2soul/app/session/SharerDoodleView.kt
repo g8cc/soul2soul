@@ -17,6 +17,8 @@ import java.util.UUID
  */
 class SharerDoodleView(context: Context) : View(context) {
 
+    private var activePointerId = INVALID_POINTER_ID
+
     val engine = OverlayGestureEngine(
         touchSlopPx = ViewConfiguration.get(context).scaledTouchSlop.toFloat(),
         clock = { SystemClock.uptimeMillis() },
@@ -46,13 +48,43 @@ class SharerDoodleView(context: Context) : View(context) {
     override fun onTouchEvent(event: MotionEvent): Boolean {
         if (event.actionMasked == MotionEvent.ACTION_DOWN) onActivity?.invoke()
         val acts = when (event.actionMasked) {
-            MotionEvent.ACTION_DOWN -> engine.onDown(event.getPointerId(0), event.x, event.y)
-            MotionEvent.ACTION_MOVE -> {
-                val i = event.actionIndex
-                engine.onMove(event.getPointerId(i), event.getX(i), event.getY(i))
+            MotionEvent.ACTION_DOWN -> {
+                // A vendor may omit CANCEL between streams. Close the old stroke before
+                // accepting a new primary pointer instead of joining two fingers together.
+                if (activePointerId != INVALID_POINTER_ID) engine.onCancel(activePointerId)
+                activePointerId = event.getPointerId(0)
+                engine.onDown(activePointerId, event.getX(0), event.getY(0))
             }
-            MotionEvent.ACTION_UP -> engine.onUp(0)
-            MotionEvent.ACTION_CANCEL -> engine.onCancel(0)
+            MotionEvent.ACTION_MOVE -> {
+                val id = activePointerId
+                val i = if (id == INVALID_POINTER_ID) -1 else event.findPointerIndex(id)
+                if (i < 0) {
+                    activePointerId = INVALID_POINTER_ID
+                    engine.onCancel(id)
+                } else {
+                    engine.onMove(id, event.getX(i), event.getY(i))
+                }
+            }
+            MotionEvent.ACTION_POINTER_DOWN -> emptyList()
+            MotionEvent.ACTION_POINTER_UP -> {
+                val id = event.getPointerId(event.actionIndex)
+                if (id == activePointerId) {
+                    activePointerId = INVALID_POINTER_ID
+                    engine.onUp(id, event.getX(event.actionIndex), event.getY(event.actionIndex))
+                } else emptyList()
+            }
+            MotionEvent.ACTION_UP -> {
+                val id = event.getPointerId(event.actionIndex)
+                if (id == activePointerId) {
+                    activePointerId = INVALID_POINTER_ID
+                    engine.onUp(id, event.getX(event.actionIndex), event.getY(event.actionIndex))
+                } else emptyList()
+            }
+            MotionEvent.ACTION_CANCEL -> {
+                val id = activePointerId
+                activePointerId = INVALID_POINTER_ID
+                if (id == INVALID_POINTER_ID) emptyList() else engine.onCancel(id)
+            }
             else -> return true
         }
         // 自画模式无发送语义，也不产生 Tap 动作（tapDrawsDot 已改记为点）
@@ -82,5 +114,9 @@ class SharerDoodleView(context: Context) : View(context) {
         strokeCap = Paint.Cap.ROUND
         strokeJoin = Paint.Join.ROUND
         strokeWidth = 6f * resources.displayMetrics.density
+    }
+
+    private companion object {
+        const val INVALID_POINTER_ID = -1
     }
 }

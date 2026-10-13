@@ -95,6 +95,16 @@ class DrawingOverlayView @JvmOverloads constructor(
                     removeCallbacks(ctlLongPress)
                     dispatchActions(engine.onCancel(activePointerId))
                 }
+                // The overlay fills the window while the video may be letterboxed. A down in
+                // the black bars must not be clamped into a remote edge tap/swipe.
+                if (!StrokeMapping.containsPoint(
+                        floatArrayOf(r.left, r.top, r.right, r.bottom),
+                        event.getX(0), event.getY(0),
+                    )
+                ) {
+                    activePointerId = INVALID_POINTER_ID
+                    return true
+                }
                 activePointerId = event.getPointerId(0)
                 if (controlMode) {
                     removeCallbacks(ctlLongPress)
@@ -120,7 +130,7 @@ class DrawingOverlayView @JvmOverloads constructor(
                 if (liftedPointerId == activePointerId) {
                     removeCallbacks(ctlLongPress)
                     activePointerId = INVALID_POINTER_ID
-                    engine.onUp(liftedPointerId)
+                    engine.onUp(liftedPointerId, event.getX(event.actionIndex), event.getY(event.actionIndex))
                 } else {
                     emptyList()
                 }
@@ -134,7 +144,7 @@ class DrawingOverlayView @JvmOverloads constructor(
                 removeCallbacks(ctlLongPress)
                 if (liftedPointerId == activePointerId) {
                     activePointerId = INVALID_POINTER_ID
-                    engine.onUp(liftedPointerId)
+                    engine.onUp(liftedPointerId, event.getX(event.actionIndex), event.getY(event.actionIndex))
                 } else {
                     emptyList()
                 }

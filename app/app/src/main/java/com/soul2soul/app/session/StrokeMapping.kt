@@ -25,6 +25,10 @@ object StrokeMapping {
         }
     }
 
+    /** Whether a touch begins on displayed video rather than in a letterbox bar. */
+    fun containsPoint(rect: FloatArray, x: Float, y: Float): Boolean =
+        rect.size >= 4 && x >= rect[0] && x <= rect[2] && y >= rect[1] && y <= rect[3]
+
     /** 视图内触点 → 归一化坐标（相对视频帧矩形），越界钳制到 [0,1] */
     fun normalize(
         touchX: Float,
