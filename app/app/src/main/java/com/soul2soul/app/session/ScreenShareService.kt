@@ -282,7 +282,12 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
             val list = ArrayList<PointF>(pts.length())
             for (i in 0 until pts.length()) {
                 val p = pts.optJSONArray(i) ?: continue
-                list.add(PointF(p.optDouble(0).toFloat(), p.optDouble(1).toFloat()))
+                // optDouble 缺省返 0.0：坏点会被当成左上角真实坐标注入（点击左上角），
+                // 必须用 NaN 哨兵跳过（v0.2.37 审计）
+                val x = p.optDouble(0, Double.NaN)
+                val y = p.optDouble(1, Double.NaN)
+                if (x.isNaN() || y.isNaN()) continue
+                list.add(PointF(x.toFloat(), y.toFloat()))
             }
             val result = RemoteControlService.dispatchNormalized(
                 list,
