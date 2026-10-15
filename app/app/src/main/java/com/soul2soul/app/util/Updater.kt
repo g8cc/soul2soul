@@ -107,17 +107,11 @@ object Updater {
                 (it.toInt() and 0xff).toString(16).padStart(2, '0')
             }
             check(expected == null || expected == actual) { "sha256 mismatch" }
-            try {
-                java.nio.file.Files.move(
-                    part.toPath(), dest.toPath(),
-                    java.nio.file.StandardCopyOption.ATOMIC_MOVE,
-                    java.nio.file.StandardCopyOption.REPLACE_EXISTING,
-                )
-            } catch (_: java.nio.file.AtomicMoveNotSupportedException) {
-                java.nio.file.Files.move(
-                    part.toPath(), dest.toPath(),
-                    java.nio.file.StandardCopyOption.REPLACE_EXISTING,
-                )
+            // 不能用 java.nio.file.Files（API 26+，minSdk 23 的安卓7设备会
+            // NoClassDefFoundError，且被 runCatching 吞掉→更新永远静默失败）
+            if (!part.renameTo(dest)) {
+                part.copyTo(dest, overwrite = true)
+                part.delete()
             }
             dest
         }

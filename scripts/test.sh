@@ -82,6 +82,13 @@ PY
     echo "静态检查: INPUT_SERVICE 被 cast 成 InputMethodManager（应为 INPUT_METHOD_SERVICE）"
     fail=1
   fi
+  # v0.2.37 审计锁定：java.nio.file.* 是 API 26+，minSdk 23 无 desugaring，
+  # 安卓7设备运行到就 NoClassDefFoundError（Updater 更新通道整条断掉的元凶）
+  if grep -rn --include='*.kt' "java\.nio\.file" "$ROOT/app/app/src/main/java" 2>/dev/null \
+     | grep -v "^\S*:\s*//" | grep -v "//.*java\.nio\.file" | grep -q "java\.nio\.file"; then
+    echo "静态检查: 主源码禁用 java.nio.file（API 26+，minSdk 23 会崩；用 File API 代替）"
+    fail=1
+  fi
   [ "$fail" -eq 0 ]
 }
 
