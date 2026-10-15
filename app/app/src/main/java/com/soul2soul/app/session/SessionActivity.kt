@@ -259,11 +259,21 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
         findViewById<View>(R.id.btnRemoteBack).setOnClickListener {
             sendRemoteBack()
         }
-        listOf(
-            R.id.emoji0 to "❤️", R.id.emoji1 to "😂", R.id.emoji2 to "👍",
-            R.id.emoji3 to "😮", R.id.emoji4 to "🥺", R.id.emoji5 to "🔥",
-        ).forEach { (id, e) ->
-            findViewById<View>(id).setOnClickListener { sendEmoji(e) }
+        // 飘表情条按资源列表生成，加表情只改 strings.xml 的 call_emojis
+        val emojiRow = findViewById<android.widget.LinearLayout>(R.id.emojiRow)
+        for (e in resources.getStringArray(R.array.call_emojis)) {
+            val tv = android.widget.TextView(this).apply {
+                text = e
+                textSize = 28f
+                setPadding(
+                    (10 * resources.displayMetrics.density).toInt(),
+                    (10 * resources.displayMetrics.density).toInt(),
+                    (10 * resources.displayMetrics.density).toInt(),
+                    (10 * resources.displayMetrics.density).toInt(),
+                )
+            }
+            tv.setOnClickListener { sendEmoji(e) }
+            emojiRow.addView(tv)
         }
         listOf(
             R.id.fxBomb to "bomb", R.id.fxGift to "gift", R.id.fxRocket to "rocket",
@@ -361,8 +371,6 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
     }
 
     // ---------- 表情互动 ----------
-
-    private val emojiChars = listOf("❤️", "😂", "👍", "😮", "🥺", "🔥")
 
     private fun sendEmoji(e: String) {
         val x = 0.15 + Math.random() * 0.7

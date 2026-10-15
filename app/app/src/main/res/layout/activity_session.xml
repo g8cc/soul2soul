@@ -158,66 +158,24 @@
         android:orientation="vertical"
         android:visibility="gone">
 
-        <LinearLayout
+        <HorizontalScrollView
             android:id="@+id/emojiPanel"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:layout_gravity="center_horizontal"
             android:layout_marginBottom="8dp"
             android:background="@drawable/bg_bubble"
-            android:gravity="center_vertical"
-            android:orientation="horizontal"
-            android:paddingHorizontal="8dp"
+            android:scrollbars="none"
             android:visibility="gone">
 
-            <TextView
-                android:id="@+id/emoji0"
+            <LinearLayout
+                android:id="@+id/emojiRow"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:padding="10dp"
-                android:text="❤️"
-                android:textSize="28sp" />
-
-            <TextView
-                android:id="@+id/emoji1"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:padding="10dp"
-                android:text="😂"
-                android:textSize="28sp" />
-
-            <TextView
-                android:id="@+id/emoji2"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:padding="10dp"
-                android:text="👍"
-                android:textSize="28sp" />
-
-            <TextView
-                android:id="@+id/emoji3"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:padding="10dp"
-                android:text="😮"
-                android:textSize="28sp" />
-
-            <TextView
-                android:id="@+id/emoji4"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:padding="10dp"
-                android:text="🥺"
-                android:textSize="28sp" />
-
-            <TextView
-                android:id="@+id/emoji5"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:padding="10dp"
-                android:text="🔥"
-                android:textSize="28sp" />
-        </LinearLayout>
+                android:gravity="center_vertical"
+                android:orientation="horizontal"
+                android:paddingHorizontal="8dp" />
+        </HorizontalScrollView>
 
         <!-- 第二行：满屏特效（微信群礼物式玩法） -->
         <LinearLayout
