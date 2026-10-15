@@ -48,6 +48,7 @@ class MainActivity : AppCompatActivity() {
 
         @Volatile var outgoingPending = false
         @Volatile var acceptedReceived = false
+        @Volatile private var accPromptedOnce = false
         var projectionData: Intent? = null
 
         fun cancelOutgoing() {
@@ -690,18 +691,18 @@ class MainActivity : AppCompatActivity() {
     }
 
     /** 更新安装后 ROM 常把无障碍悄悄弄坏：真被关 → 递一键重开；开关在但服务被冻 → 教"关→开一次"。
-     *  每次冷启动最多弹一个，v0.2.36 之前不分这两种，MIUI 用户每次打开都被误报"被重置" */
-    private var accPrompted = false
+     *  每次进程启动最多弹一个（v0.2.37 审计：per-instance 会让返回再进又弹一次），
+     *  v0.2.36 之前不分这两种，MIUI 用户每次打开都被误报"被重置" */
     private fun maybePromptAccReset() {
         when (com.soul2soul.app.util.AccGatePolicy.prompt(
             everEnabled = Prefs.accWasEnabled(this),
             registered = isAccessibilityRegistered(),
             bound = isAppAccessibilityEnabled(),
-            prompted = accPrompted,
+            prompted = accPromptedOnce,
         )) {
             com.soul2soul.app.util.AccGatePolicy.AccPrompt.NONE -> return
             com.soul2soul.app.util.AccGatePolicy.AccPrompt.RESET -> {
-                accPrompted = true
+                accPromptedOnce = true
                 AlertDialog.Builder(this)
                     .setTitle(R.string.acc_reset_title)
                     .setMessage(R.string.acc_reset_msg)
@@ -712,7 +713,7 @@ class MainActivity : AppCompatActivity() {
                     .show()
             }
             com.soul2soul.app.util.AccGatePolicy.AccPrompt.FROZEN -> {
-                accPrompted = true
+                accPromptedOnce = true
                 AlertDialog.Builder(this)
                     .setTitle(R.string.acc_frozen_title)
                     .setMessage(R.string.acc_frozen_msg)
