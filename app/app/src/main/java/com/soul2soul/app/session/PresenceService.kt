@@ -58,9 +58,14 @@ class PresenceService : Service() {
         }
     }
 
-    /** 留言箱任何变化都同步通知栏常驻条数（服务常驻，UI 不在也一样跟） */
+    /** 留言箱任何变化：同步通知栏常驻条数 + 聊天记录落盘（服务常驻，UI 不在也一样跟） */
     private val inboxListener: () -> Unit = {
         com.soul2soul.app.msg.UnreadNotifier.sync(this)
+        val snap = com.soul2soul.app.msg.InboxStore.snapshot()
+        val file = java.io.File(filesDir, com.soul2soul.app.msg.ChatPersistence.FILE_NAME)
+        scope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            com.soul2soul.app.msg.ChatPersistence.save(file, snap)
+        }
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -71,6 +76,12 @@ class PresenceService : Service() {
         startForeground(Notif.ID_PRESENCE, buildPresenceNotification())
         // 只在"本次会话期间新来的留言"才挂条数通知：不在服务启动时补挂历史未读
         // （用户要求：通知栏不要常驻，有留言了才显示条数）
+        // 聊天记录先于监听恢复：进程重启后聊天窗口还是完整的（微信式）
+        com.soul2soul.app.msg.InboxStore.restore(
+            com.soul2soul.app.msg.ChatPersistence.load(
+                java.io.File(filesDir, com.soul2soul.app.msg.ChatPersistence.FILE_NAME),
+            ),
+        )
         com.soul2soul.app.msg.InboxStore.addListener(inboxListener)
 
         if (!started) {

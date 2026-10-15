@@ -303,6 +303,10 @@ class MainActivity : AppCompatActivity() {
                 Prefs.setPairToken(this, null)
                 Presence.client.setPairToken(null)
                 com.soul2soul.app.msg.InboxStore.clear() // 留言箱随配对关系统一清空
+                // 服务可能没在跑（监听不落盘），这里补删本地聊天记录文件
+                runCatching {
+                    java.io.File(filesDir, com.soul2soul.app.msg.ChatPersistence.FILE_NAME).delete()
+                }
                 peerOnline = false
                 toast(R.string.unpaired_done)
                 updateUi()

@@ -126,13 +126,13 @@ class MessageActivity : AppCompatActivity() {
         btnSend.setOnClickListener { sendText() }
         btnMic.setOnClickListener { setVoiceMode(!voiceMode) }
         btnEmoji.setOnClickListener { toggleEmojiPanel() }
-        val emojiIds = listOf(
-            R.id.emoji0, R.id.emoji1, R.id.emoji2, R.id.emoji3, R.id.emoji4,
-            R.id.emoji5, R.id.emoji6, R.id.emoji7, R.id.emoji8, R.id.emoji9,
-        )
-        for (id in emojiIds) {
-            val tv = findViewById<TextView>(id)
-            tv.setOnClickListener { insertEmoji(tv.text.toString()) }
+        // 表情条按资源列表生成，加表情只改 strings.xml 的 msg_emojis
+        val emojiRow = findViewById<android.widget.LinearLayout>(R.id.emojiRow)
+        for (e in resources.getStringArray(R.array.msg_emojis)) {
+            val tv = TextView(this, null, 0, R.style.MsgEmoji)
+            tv.text = e
+            tv.setOnClickListener { insertEmoji(e) }
+            emojiRow.addView(tv)
         }
         btnHoldTalk.setOnTouchListener { _, ev -> onHoldTouch(ev) }
         syncFromStore()
@@ -166,7 +166,7 @@ class MessageActivity : AppCompatActivity() {
 
     private fun ackIds(ids: List<String>) {
         if (ids.isEmpty()) return
-        InboxStore.remove(ids)
+        InboxStore.markRead(ids) // 本地留档继续展示（微信式），服务端才做阅后即删
         Presence.client.send("msg.read") { put("ids", JSONArray(ids)) }
     }
 
