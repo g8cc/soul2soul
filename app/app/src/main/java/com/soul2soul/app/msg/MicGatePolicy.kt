@@ -9,13 +9,18 @@ internal object MicGatePolicy {
     /** 缺权限时的处置：NONE=不用管；REQUEST=直接问系统；EXPLAIN=先人话解释再问系统；GUIDE=只能去设置 */
     enum class MicGateAction { NONE, REQUEST, EXPLAIN, GUIDE }
 
+    /**
+     * 授权返回后是否续上这次录音。fingerDown=手指是否还按着：
+     * 弹窗期间用户早已松手，此时再开录就是"没按却自己在录"的幻录（v0.2.37 审计）。
+     */
     fun shouldAutoStartRecording(
         granted: Boolean,
         fromHold: Boolean,
         voiceMode: Boolean,
         holdStarted: Boolean,
         recording: Boolean,
-    ): Boolean = granted && fromHold && voiceMode && !holdStarted && !recording
+        fingerDown: Boolean,
+    ): Boolean = granted && fromHold && voiceMode && !holdStarted && !recording && fingerDown
 
     /**
      * 进语音/按住说话时缺权限的处置决策（对齐主流 App 的弹窗礼仪）：

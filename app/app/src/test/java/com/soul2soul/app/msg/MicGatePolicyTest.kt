@@ -18,11 +18,21 @@ class MicGatePolicyTest {
         voiceMode: Boolean = true,
         holdStarted: Boolean = false,
         recording: Boolean = false,
-    ) = MicGatePolicy.shouldAutoStartRecording(granted, fromHold, voiceMode, holdStarted, recording)
+        fingerDown: Boolean = true,
+    ) = MicGatePolicy.shouldAutoStartRecording(
+        granted, fromHold, voiceMode, holdStarted, recording, fingerDown,
+    )
 
     @Test
-    fun `按住说话授权通过后续上这次录音`() {
+    fun `按住说话授权通过且手指还按着才续录`() {
         assertTrue(shouldStart())
+    }
+
+    @Test
+    fun `弹窗期间已松手_授权回来绝不开幻录`() {
+        // DOWN 时缺权限直接 return，holdStarted 永远是 false，
+        // 若不看手指状态就会在用户没按着的时候凭空开录（v0.2.37 审计）
+        assertFalse(shouldStart(fingerDown = false))
     }
 
     @Test

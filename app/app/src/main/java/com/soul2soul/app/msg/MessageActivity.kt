@@ -64,6 +64,7 @@ class MessageActivity : AppCompatActivity() {
     private var voiceBusy = false
     private var voiceMode = false
     private var holdStarted = false
+    private var micFingerDown = false // 授权弹窗回来时手指是否还按着（防幻录）
     private var cancelState = false
     private var touchDownY = 0f
     private var playingId: String? = null
@@ -78,12 +79,16 @@ class MessageActivity : AppCompatActivity() {
         registerForActivityResult(androidx.activity.result.contract.ActivityResultContracts.RequestPermission()) { granted ->
             if (granted) {
                 com.soul2soul.app.util.Prefs.setMicWasGranted(this, true)
-                // 只有"按住说话"发起的请求才续上这次录音；切语音模式时提前问的就别凭空开录
+                // 只有"按住说话"发起且手指还按着才续录；弹窗回来早已松手，再开录就是幻录
                 if (MicGatePolicy.shouldAutoStartRecording(
                         granted = true, fromHold = micAskFromHold, voiceMode = voiceMode,
                         holdStarted = holdStarted, recording = recorder != null,
+                        fingerDown = micFingerDown,
                     )
                 ) startRecording()
+                else if (micAskFromHold && !micFingerDown) {
+                    toast(getString(R.string.mic_granted_rehold))
+                }
             } else when (MicGatePolicy.onDenied(
                 shouldShowRequestPermissionRationale(Manifest.permission.RECORD_AUDIO),
             )) {
@@ -220,6 +225,7 @@ class MessageActivity : AppCompatActivity() {
                 }
                 touchDownY = ev.rawY
                 cancelState = false
+                micFingerDown = true
                 if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) !=
                     android.content.pm.PackageManager.PERMISSION_GRANTED
                 ) {
@@ -244,6 +250,7 @@ class MessageActivity : AppCompatActivity() {
                 }
                 holdStarted = false
                 cancelState = false
+                micFingerDown = false
                 uiTick.removeCallbacks(holdStart)
             }
         }
