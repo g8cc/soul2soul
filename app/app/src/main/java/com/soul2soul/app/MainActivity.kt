@@ -318,8 +318,11 @@ class MainActivity : AppCompatActivity() {
                 updateUi()
             }
             "local.sessionLive" -> {
-                // ICE 真正连通后取消媒体建立兜底；会话状态仍由共享服务持有。
+                // ICE 真连通 = 呼叫这个"动作"已完结：必须 cancelOutgoing，
+                // 否则 outgoingPending 挂着，主页整个共享期间都显示"呼叫中…"（v0.2.38 真机踩坑）。
+                // 会话本身的存续由共享服务/boxSharing 负责，与呼叫状态无关。
                 callTimeout.removeCallbacksAndMessages(null)
+                cancelOutgoing()
                 updateUi()
             }
         }
