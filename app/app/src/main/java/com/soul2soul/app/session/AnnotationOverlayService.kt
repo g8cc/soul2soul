@@ -229,8 +229,8 @@ class AnnotationOverlayService : Service() {
             showBall()
             return
         }
-        hideBall()
         if (!Settings.canDrawOverlays(this)) return
+        hideBall()
         val dv = SharerDoodleView(this)
         dv.onActivity = { showBar() }
         // 工具栏必须和自画层同窗口：Android 7/MIUI 上两个同类型悬浮窗
@@ -261,6 +261,7 @@ class AnnotationOverlayService : Service() {
         // 自画层吃掉全部触摸：这是"模式"，画到桌面图标上不该触发图标
         runCatching { wm.addView(root, layerLp) }.onFailure {
             android.util.Log.e("Overlay", "doodle layer addView failed", it)
+            showBall() // 球已拆、层没建：不把入口还回去，用户就只能转屏幕方向才找回
             return
         }
         doodle = dv
@@ -364,6 +365,7 @@ class AnnotationOverlayService : Service() {
     private var ballDragHappened = false
     private var ballDownRawX = 0f
     private var ballDownRawY = 0f
+    private var ballLongFired = false // 长按已触发则抬手不再重复（双击=开又关）
     private var ballBaseX = 0
     private var ballBaseY = 0
 
@@ -388,11 +390,16 @@ class AnnotationOverlayService : Service() {
             object : android.view.GestureDetector.SimpleOnGestureListener() {
                 override fun onDown(e: android.view.MotionEvent): Boolean { wakeBall(); return true }
                 override fun onSingleTapUp(e: android.view.MotionEvent): Boolean {
-                    if (!ballDragHappened) ballActivate()
+                    // 长按已开过画笔就别再关一次：GestureDetector 的 onLongPress 不会
+                    // 抑制随后的 onSingleTapUp，不挡就是"点一下=开又关"（v0.2.37 审计）
+                    if (!ballDragHappened && !ballLongFired) ballActivate()
                     return true
                 }
                 override fun onLongPress(e: android.view.MotionEvent) {
-                    if (!ballDragHappened) ballActivate()
+                    if (!ballDragHappened) {
+                        ballLongFired = true
+                        ballActivate()
+                    }
                 }
             })
         val iv = android.widget.ImageView(this).apply {
@@ -408,6 +415,7 @@ class AnnotationOverlayService : Service() {
                         ballDownRawX = ev.rawX; ballDownRawY = ev.rawY
                         ballBaseX = lp.x; ballBaseY = lp.y
                         ballDragging = false; ballDragHappened = false
+                        ballLongFired = false
                     }
                     android.view.MotionEvent.ACTION_MOVE -> {
                         val dx = ev.rawX - ballDownRawX
