@@ -638,6 +638,14 @@ class MainActivity : AppCompatActivity() {
         ).any { it.resolveInfo.serviceInfo.packageName == packageName }
     }
 
+    /** 开关注册串里还有没有我们：MIUI 升级安装后常见"串在、服务被解绑"，据此区分真撤销与被冻 */
+    private fun isAccessibilityRegistered(): Boolean {
+        val list = Settings.Secure.getString(
+            contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
+        ) ?: return false
+        return list.split(':').any { it.startsWith("$packageName/") }
+    }
+
     private fun bindPermRow(row: View, stateId: Int, ok: Boolean) {
         row.findViewById<TextView>(stateId).setText(
             if (ok) R.string.perm_ok else R.string.perm_todo
@@ -681,19 +689,40 @@ class MainActivity : AppCompatActivity() {
         maybePromptAccReset()
     }
 
-    /** 更新安装后 ROM 常把无障碍授权悄悄关掉：以前开过、现在没了 → 主动递上一键重开 */
-    private var accResetPrompted = false
+    /** 更新安装后 ROM 常把无障碍悄悄弄坏：真被关 → 递一键重开；开关在但服务被冻 → 教"关→开一次"。
+     *  每次冷启动最多弹一个，v0.2.36 之前不分这两种，MIUI 用户每次打开都被误报"被重置" */
+    private var accPrompted = false
     private fun maybePromptAccReset() {
-        if (accResetPrompted || !Prefs.accWasEnabled(this) || isAppAccessibilityEnabled()) return
-        accResetPrompted = true
-        AlertDialog.Builder(this)
-            .setTitle(R.string.acc_reset_title)
-            .setMessage(R.string.acc_reset_msg)
-            .setPositiveButton(R.string.acc_reset_go) { _, _ ->
-                com.soul2soul.app.util.AccessibilityLauncher.open(this)
+        when (com.soul2soul.app.util.AccGatePolicy.prompt(
+            everEnabled = Prefs.accWasEnabled(this),
+            registered = isAccessibilityRegistered(),
+            bound = isAppAccessibilityEnabled(),
+            prompted = accPrompted,
+        )) {
+            com.soul2soul.app.util.AccGatePolicy.AccPrompt.NONE -> return
+            com.soul2soul.app.util.AccGatePolicy.AccPrompt.RESET -> {
+                accPrompted = true
+                AlertDialog.Builder(this)
+                    .setTitle(R.string.acc_reset_title)
+                    .setMessage(R.string.acc_reset_msg)
+                    .setPositiveButton(R.string.acc_reset_go) { _, _ ->
+                        com.soul2soul.app.util.AccessibilityLauncher.open(this)
+                    }
+                    .setNegativeButton(R.string.acc_reset_later, null)
+                    .show()
             }
-            .setNegativeButton(R.string.acc_reset_later, null)
-            .show()
+            com.soul2soul.app.util.AccGatePolicy.AccPrompt.FROZEN -> {
+                accPrompted = true
+                AlertDialog.Builder(this)
+                    .setTitle(R.string.acc_frozen_title)
+                    .setMessage(R.string.acc_frozen_msg)
+                    .setPositiveButton(R.string.acc_reset_go) { _, _ ->
+                        com.soul2soul.app.util.AccessibilityLauncher.open(this)
+                    }
+                    .setNegativeButton(R.string.acc_reset_later, null)
+                    .show()
+            }
+        }
     }
 
     private fun toast(resId: Int) {
