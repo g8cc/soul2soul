@@ -109,4 +109,18 @@ class AuditRound2WiringTest {
         val block = lines.drop(i).take(4)
         assertTrue(block.any { it.contains("if (emojiOpen) setEmojiPanel(false)") })
     }
+
+    @Test
+    fun `opening emoji panel must drop input focus before hiding IME`() {
+        // Mi5/Android7 真机实锤（v0.2.49）：键盘开着时点 😊，只调 hideSoftInputFromWindow
+        // 会被系统弹回（EditText 仍有焦点），面板开在键盘背后——用户看到"点了没反应"
+        val lines = source("app/src/main/java/com/soul2soul/app/msg/MessageActivity.kt")
+        val i = lines.indexOfFirst { it.contains("private fun setEmojiPanel") }
+        assertTrue("找不到 setEmojiPanel", i >= 0)
+        val body = lines.drop(i).take(16)
+        val hide = body.indexOfFirst { it.contains("hideSoftInputFromWindow") }
+        assertTrue("开面板必须收键盘", hide >= 0)
+        val clear = body.indexOfFirst { it.contains("etInput.clearFocus()") }
+        assertTrue("收键盘前必须先 clearFocus，否则 MIUI/Android7 键盘弹回盖住面板", clear in 0 until hide)
+    }
 }

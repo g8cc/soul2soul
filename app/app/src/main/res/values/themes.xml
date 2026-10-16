@@ -17,7 +17,7 @@
         <item name="android:background">?android:attr/selectableItemBackgroundBorderless</item>
     </style>
 
-    <!-- 表情面板分组 tab：选中态由代码换 bg_chip_active/primary 文字色 -->
+    <!-- 表情面板分组 tab：选中态由代码换 bg_emoji_tab_on/primary 文字色 -->
     <style name="MsgEmojiTab">
         <item name="android:layout_width">wrap_content</item>
         <item name="android:layout_height">wrap_content</item>
@@ -25,6 +25,6 @@
         <item name="android:paddingHorizontal">14dp</item>
         <item name="android:paddingVertical">6dp</item>
         <item name="android:textSize">14sp</item>
-        <item name="android:background">@drawable/bg_chip</item>
+        <item name="android:background">@android:color/transparent</item>
     </style>
 </resources>

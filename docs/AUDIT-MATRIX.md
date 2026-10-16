@@ -72,7 +72,8 @@
 | 回听×页面重建 | PASS loadingId 失配即弃回调 | — | — | ⬜ mine 语音本地缓存丢失后点击（低危：只提示不崩） |
 | 撤回 | PASS 5min 窗口+墓碑提示行+双端 msg.recalled（#40；协议 t2/t3 锁） | N-A | N-A | 窗口外服务端拒=PASS（t2） |
 | Android7 emoji 覆盖 | PASS 字体 cmap 实测裁剪清单（v0.2.43） | 同左 | N-A | N-A |
-| 表情面板分组 | PASS 面板关时 tab 状态保留（emojiTab 单一内存态） | PASS v0.2.48：四组 tab（笑脸/手势/爱心/符号），全表 Android7 cmap 验证+FE0F 强制，EmojiPanelCatalogTest 锁定；回滚删组或塞 🥰 即变红 | N-A | N-A |
+| 表情面板分组 | PASS 面板关时 tab 状态保留（emojiTab 单一内存态） | PASS v0.2.48：四组 tab（笑脸/手势/爱心/符号），全表 Android7 cmap 验证+FE0F 强制，EmojiPanelCatalogTest 锁定；回滚删组或塞 🥰 即变红。v0.2.49 模拟器全链验证：切组/连插/草稿保留 | N-A | N-A |
+| 键盘开着×点😊 | PASS 常规 | PASS v0.2.49：setEmojiPanel 先 clearFocus 再 hideSoftInput（HIDE_NOT_ALWAYS），AuditRound2WiringTest 锁定顺序；模拟器实测面板开+键盘收+草稿在。⬜ MIUI 键盘回弹路径待真机复验（Mi5 注入权限被 MIUI 收回，需手动开「USB调试(安全设置)」） | N-A | N-A |
 
 ---
 维护规则（AUDIT.md §5）：每关一条真机 bug，本表加一行/填一格并登记 gate；新有状态功能上线前必须先有 §表头，格子可以 ⬜，表不能没有。

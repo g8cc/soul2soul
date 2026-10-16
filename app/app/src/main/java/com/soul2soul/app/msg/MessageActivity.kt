@@ -380,9 +380,15 @@ class MessageActivity : AppCompatActivity() {
         emojiOpen = open
         emojiPanel.visibility = if (open) View.VISIBLE else View.GONE
         if (!open) return
+        // 键盘必须真收掉，否则面板可能开在键盘背后：EditText 仍持有焦点时
+        // hideSoftInput 有被系统弹回的已知路径（MIUI），clearFocus 断掉回弹条件
+        etInput.clearFocus()
         val imm = getSystemService(android.content.Context.INPUT_METHOD_SERVICE)
             as android.view.inputmethod.InputMethodManager
-        imm.hideSoftInputFromWindow(etInput.windowToken, 0)
+        imm.hideSoftInputFromWindow(
+            etInput.windowToken,
+            android.view.inputmethod.InputMethodManager.HIDE_NOT_ALWAYS,
+        )
     }
 
     /** 点表情插到光标处（可连续点多个），超长部分和文字一样被 500 字过滤挡下 */
@@ -640,7 +646,7 @@ class MessageActivity : AppCompatActivity() {
         if (!::emojiTabs.isInitialized) return
         emojiTabs.forEachIndexed { i, tab ->
             tab.setBackgroundResource(
-                if (i == emojiTab) R.drawable.bg_chip_active else R.drawable.bg_chip
+                if (i == emojiTab) R.drawable.bg_emoji_tab_on else android.R.color.transparent
             )
             tab.setTextColor(
                 if (i == emojiTab)

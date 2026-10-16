@@ -125,6 +125,7 @@ bash scripts/test.sh --coverage
 - 审计第二轮 GAP 批次（v0.2.45）→ AuditRound2WiringTest ×7：操控横幅谎报/ctl_denied 死模式、锁屏横幅丢包卡死、来电取消通知残留、找回通知永生、文字静默丢信、表情面板返回退页
 - 折叠通知按钮消失（v0.2.46）→ t0 守卫：addAction(0, 禁纯文字动作按钮
 - 表情面板分组（v0.2.48）→ EmojiPanelCatalogTest：四组目录存在、Android7 字体缺字（🥰🥺🫶🫂🧡）禁入、文字默认码点（❤☀❄✌❣☝）必须带 FE0F——删组或塞缺字即变红
+- 键盘开着点😊（v0.2.49）→ AuditRound2WiringTest：setEmojiPanel 内 clearFocus 必须先于 hideSoftInputFromWindow（MIUI 键盘回弹会把面板盖到键盘背后）
 
 Service 窗口接线这类 JVM 跑不了的代码，锁定用例的形态是**源码扫描测试/t0 grep 守卫**（把修复
 回滚用例必须变红才算锁定）。审计流程本身的规范（状态机矩阵、5 维度清单、gate 登记制）见
