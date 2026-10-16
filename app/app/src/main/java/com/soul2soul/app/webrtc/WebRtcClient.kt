@@ -135,6 +135,7 @@ class WebRtcClient(
     private var audioTrack: AudioTrack? = null
     @Volatile private var dataChannel: DataChannel? = null
     @Volatile private var ctlChannel: DataChannel? = null
+    @Volatile private var ctlgChannel: DataChannel? = null
     private val qualityLock = Any()
     private var pendingQualityEdge: Int? = null
     private var surfaceHelper: SurfaceTextureHelper? = null
@@ -269,11 +270,18 @@ class WebRtcClient(
             pc.addTrack(track, listOf(STREAM))
         }
 
-        // 远程操控手势：整笔一条消息，可靠有序（丢半截手势比延迟更致命）
-        // 注意创建顺序：0.2.8 观看端 onDataChannel 是后到者覆盖；ctl 先建、anno 后建，
+        // 授权/拒绝/错误等控制信令：可靠有序（"允许""收回"乱序 = 隐私事故，必须留 ctl）
+        // 注意创建顺序：0.2.8 观看端 onDataChannel 是后到者覆盖；ctl、ctlg 先建、anno 最后建，
         // 保证旧观看端最终持有 anno（丢包容忍），笔迹不会被可靠通道的队头阻塞拖死
         val ctlInit = DataChannel.Init().apply { ordered = true }
         ctlChannel = pc.createDataChannel("ctl", ctlInit)?.also {
+            it.registerObserver(this)
+        }
+        // ctlg：手势专用快道。unordered + 全可靠——整笔一条消息自包含，
+        // 乱序无所谓（点独立），但绝不能丢（丢一笔=漏点），更不能被 ctl 有序队头阻塞。
+        // 必须建在 anno 之前：旧观看端 onDataChannel 后到者覆盖，anno 最后建才保得住。
+        val ctlgInit = DataChannel.Init().apply { ordered = false }
+        ctlgChannel = pc.createDataChannel("ctlg", ctlgInit)?.also {
             it.registerObserver(this)
         }
         // 共享端是 offerer，负责创建 DataChannel
@@ -512,10 +520,20 @@ class WebRtcClient(
         if (sent) pendingQualityEdge = null
     }
 
+    private fun channelByLabel(label: String): DataChannel? = when (label) {
+        CtlChannelPolicy.CTLG -> ctlgChannel
+        CtlChannelPolicy.CTL -> ctlChannel
+        else -> dataChannel
+    }
+
     private fun sendControlNow(json: JSONObject): Boolean {
-        val dc = listOfNotNull(ctlChannel, dataChannel).firstOrNull { channel ->
-            runCatching { channel.state() == DataChannel.State.OPEN }.getOrDefault(false)
-        } ?: run {
+        // 手势走 ctlg 快道（unordered 全可靠），其余信令保持 ctl 有序；旧对端无 ctlg 自动回退
+        val dc = CtlChannelPolicy.channelOrder(json.optString("k"))
+            .asSequence()
+            .mapNotNull { channelByLabel(it) }
+            .firstOrNull { channel ->
+                runCatching { channel.state() == DataChannel.State.OPEN }.getOrDefault(false)
+            } ?: run {
             Log.w(TAG, "sendControl: no channel"); return false
         }
         val bytes = json.toString().toByteArray(Charsets.UTF_8)
@@ -860,12 +878,19 @@ class WebRtcClient(
 
     override fun onDataChannel(dc: DataChannel) {
         // 观看端：channel 均由共享端创建，按 label 分流
-        if (dc.label() == "ctl") {
-            runCatching { ctlChannel?.unregisterObserver() }
-            ctlChannel = dc
-        } else {
-            runCatching { dataChannel?.unregisterObserver() }
-            dataChannel = dc
+        when (dc.label()) {
+            "ctl" -> {
+                runCatching { ctlChannel?.unregisterObserver() }
+                ctlChannel = dc
+            }
+            "ctlg" -> {
+                runCatching { ctlgChannel?.unregisterObserver() }
+                ctlgChannel = dc
+            }
+            else -> {
+                runCatching { dataChannel?.unregisterObserver() }
+                dataChannel = dc
+            }
         }
         dc.registerObserver(this)
         // 对端可能在注册 observer 前就已进入 OPEN；不能只依赖后续状态回调。
@@ -987,6 +1012,8 @@ class WebRtcClient(
         runCatching { dataChannel?.close() }; dataChannel = null
         runCatching { ctlChannel?.unregisterObserver() }
         runCatching { ctlChannel?.close() }; ctlChannel = null
+        runCatching { ctlgChannel?.unregisterObserver() }
+        runCatching { ctlgChannel?.close() }; ctlgChannel = null
         remoteVideoSizeSink?.let { sink -> runCatching { remoteVideoTrack?.removeSink(sink) } }
         remoteVideoSizeSink = null
         remoteVideoTrack = null

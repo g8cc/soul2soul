@@ -71,17 +71,19 @@
 - `GET /voice/<id>?deviceId=&token=` — 仅**收件人本人**可下载（`MessageBook.hasVoice` 校验该语音确在其未读箱中），返回 `audio/mp4`；非收件人/错误 token 403，文件已删 404。
 - 客户端上传的 token/deviceId 与 WebSocket hello 相同（Prefs 持久化的 pairToken）。
 
-## 3. DataChannel 双通道
+## 3. DataChannel 三通道
 
-共享端（观看端→共享端）创建两条通道（WebRtcClient）：
+共享端（offerer）创建三条通道（WebRtcClient，创建顺序 ctl → ctlg → anno，旧观看端"后到者覆盖"最终仍持有 anno）：
 
 | 通道 | label | 传输 | 用途 |
 |---|---|---|---|
 | anno | `anno` | 不可靠（可丢包） | 笔迹、表情、特效、锁屏状态 |
-| ctl | `ctl` | 可靠 | 临时远程协助手势整笔、被拒通知 |
+| ctl | `ctl` | 可靠有序 | 画质请求、被拒/错误通知等必须保序的信令 |
+| ctlg | `ctlg` | 可靠无序 | 临时远程协助手势整笔（v0.2.40：消 ctl 队头阻塞） |
 
 观看端按 label 分流；通道存在即握手（旧版对端无 ctl 通道 → 不开放临时协助模式）。所有消息为 JSON，路由字段 `k`。
 画质请求优先走可靠 `ctl`；旧版对端没有 `ctl` 时回退到 `anno`，以保持跨版本兼容。
+手势优先走 `ctlg`；旧版共享端没有 `ctlg` 时回退 `ctl`。授权"允许/收回"绝不能上无序通道（乱序=隐私事故）。
 
 ### 3.1 k= 目录
 
@@ -96,7 +98,7 @@
 | `res` | ctl（旧版回退 anno） | `edge`(960/1280/1600/1920) | 切换采集长边（清晰度）；共享端弱网会按 RTT/丢包/带宽/FPS 自动逐档降级 |
 | `emoji` | anno | `e`(字符), `x`(0.15–0.85) | 屏幕飘表情 |
 | `fx` | anno | `t`: `bomb`/`gift`/`rocket` | 满屏互动特效 |
-| `g` | ctl | `pts`: [[xn,yn],…]（4 位小数截断），`dur`(ms) | 临时远程协助手势一笔一消息；共享端经无障碍 dispatchGesture 注入，仅在共享端明确允许本次协助时 |
+| `g` | ctlg（旧版回退 ctl） | `pts`: [[xn,yn],…]（4 位小数截断），`dur`(ms) | 临时远程协助手势一笔一消息；共享端经无障碍 dispatchGesture 注入，仅在共享端明确允许本次协助时 |
 
 共享端 → 观看端：
 
@@ -114,7 +116,7 @@
 呼叫:  B invite → A incoming(from, iceServers)
 接听:  A accept → B accepted(iceServers) → B 启动 ScreenShareService
 协商:  B sdp(offer) → A sdp(answer) → ice×N 双向
-媒体:  anno/ctl DataChannel
+媒体:  anno/ctl/ctlg DataChannel
 结束:  任一侧 bye（或异常断线 → 服务端补 peer.gone；观看端未接听时 bye/cancel 均为“迟到回声”，被 SessionActivity 忽略）
 ```
 
