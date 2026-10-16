@@ -201,6 +201,11 @@ class PresenceService : Service() {
                     )
                 }
             }
+            "call.canceled" ->
+                // 对方在接听前取消：来电通知必须跟着消失，否则挂着一条"来电"，
+                // 点进去是已经被 SignalRouter 判死的空会话页
+                androidx.core.app.NotificationManagerCompat.from(this)
+                    .cancel(Notif.ID_CALL)
             "paired" -> {
                 Prefs.setPaired(this, true)
                 json.optString("token").takeIf { it.isNotEmpty() }?.let {
@@ -290,6 +295,9 @@ class PresenceService : Service() {
             .build()
         try {
             nm.notify(Notif.ID_RECALL, notification)
+            // 找回请求 60s 后服务端就过期了（claimRecall 同判据）：通知必须同步消失，
+            // 否则挂一整天的"死链"，点了只会看到"请求已过期"
+            handler.postDelayed({ nm.cancel(Notif.ID_RECALL) }, RECALL_NOTIFY_TTL_MS)
         } catch (e: SecurityException) {
             Log.w("PresenceService", "no notification permission", e)
         }
@@ -313,5 +321,7 @@ class PresenceService : Service() {
     companion object {
         private const val RECONNECT_BASE_MS = 3000L
         private const val RECONNECT_MAX_MS = 30_000L
+        // 略大于服务端 pendingTtl(60s)+本地 claimRecall 判据：过期瞬间前一刻的点击仍应可用
+        private const val RECALL_NOTIFY_TTL_MS = 65_000L
     }
 }

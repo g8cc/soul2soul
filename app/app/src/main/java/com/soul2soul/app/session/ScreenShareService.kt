@@ -60,19 +60,23 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
                     // 收回发生在观看端操控中途：立刻说清"为什么突然点不动了"，
                     // 否则对方只会以为操控坏了（这正是"退出了还能操控/退出后不能操控"困惑的来源）
                     dispatchConsent(consent.revokeOnScreenOff())
-                    runCatching {
-                        webRtc?.sendAnnotation(org.json.JSONObject().put("k", "screenoff"))
-                    }
+                    sendScreenStatus("screenoff")
                     watchdog.postDelayed(screenOffStop, SCREEN_OFF_TIMEOUT_MS)
                 }
                 android.content.Intent.ACTION_SCREEN_ON -> {
                     watchdog.removeCallbacks(screenOffStop)
-                    runCatching {
-                        webRtc?.sendAnnotation(org.json.JSONObject().put("k", "screenon"))
-                    }
+                    sendScreenStatus("screenon")
                 }
             }
         }
+    }
+
+    /** 锁屏状态通知双通道补发：anno 容忍丢包（弱网下 screenon 丢了，对方的"锁屏了"横幅就再也回不来），
+     *  所以再走一遍可靠有序的 ctl；横幅显隐本身幂等，重复送达无害 */
+    private fun sendScreenStatus(k: String) {
+        val json = org.json.JSONObject().put("k", k)
+        runCatching { webRtc?.sendAnnotation(json) }
+        runCatching { webRtc?.sendControl(json) }
     }
     private val screenOffStop = Runnable {
         if (live) stopSession(sendBye = true)

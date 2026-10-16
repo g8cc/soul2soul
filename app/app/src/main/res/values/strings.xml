@@ -238,6 +238,7 @@
     <string name="msg_rec_failed">录音没成功，再试一次？</string>
     <string name="msg_rec_too_short">话太短啦，按住多说几个字</string>
     <string name="msg_send_failed">语音没发出去，检查一下网络再试试</string>
+    <string name="msg_send_failed_text">没发出去，检查一下网络再试试（内容还给你留着）</string>
     <string name="msg_not_connected">还没连上服务器，稍等一下再发吧</string>
     <string name="msg_voice_play">%1$d″</string>
     <string name="msg_voice_failed">语音没下载下来，检查网络再试试</string>

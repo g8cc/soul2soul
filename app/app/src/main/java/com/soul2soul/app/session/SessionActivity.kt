@@ -226,7 +226,7 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
             fxRow.visibility = if (emojiOpen) View.VISIBLE else View.GONE
             setControlsVisible(true)
         }
-        findViewById<View>(R.id.btnCtl).setOnClickListener { v ->
+        findViewById<View>(R.id.btnCtl).setOnClickListener {
             Log.d(
                 "S2S-Ctl",
                 "btnCtl click: controlMode=${overlay.controlMode} supported=${client?.controlSupported}"
@@ -236,25 +236,7 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
                 android.widget.Toast.makeText(this, R.string.ctl_peer_unsupported, android.widget.Toast.LENGTH_SHORT).show()
                 return@setOnClickListener
             }
-            overlay.controlMode = !overlay.controlMode
-            (v as android.widget.TextView).setText(
-                if (overlay.controlMode) R.string.ctl_on else R.string.ctl_off
-            )
-            v.setBackgroundResource(
-                if (overlay.controlMode) R.drawable.bg_chip_active else R.drawable.bg_chip
-            )
-            mainHandler.removeCallbacks(restoreCtlBanner)
-            findViewById<View>(R.id.tvCtlMode).visibility =
-                if (overlay.controlMode) View.VISIBLE else View.GONE
-            if (overlay.controlMode) findViewById<TextView>(R.id.tvCtlMode).setText(R.string.ctl_banner)
-            if (overlay.controlMode) {
-                // 进操控先收起整套菜单：挡全屏画面。长按画面可重新唤出（含退出操控）
-                setControlsVisible(false)
-            } else {
-                setControlsVisible(true)
-            }
-            findViewById<View>(R.id.btnRemoteBack).visibility =
-                if (overlay.controlMode) View.VISIBLE else View.GONE
+            applyControlMode(!overlay.controlMode)
         }
         findViewById<View>(R.id.btnRemoteBack).setOnClickListener {
             sendRemoteBack()
@@ -665,7 +647,11 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
                     tvState.visibility = View.GONE
                 }
                 SignalRouter.DataAction.RevokedBanner -> {
+                    // 对方收回授权=本地操控已成死模式：必须先同步退出，再报原因。
+                    // 只改横幅不改模式的话，5 秒后横幅谎称"操控中"，手势永远石沉大海
+                    applyControlMode(false)
                     val banner = findViewById<TextView>(R.id.tvCtlMode)
+                    banner.visibility = View.VISIBLE
                     banner.setText(R.string.ctl_revoked_banner)
                     mainHandler.removeCallbacks(restoreCtlBanner)
                     mainHandler.postDelayed(restoreCtlBanner, 5000)
@@ -680,8 +666,29 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
         }
     }
 
+    /** 操控模式进/出的唯一正道：按钮点击、被收回授权都必须走这里。
+     *  六处 UI 状态（模式位/按钮文案/底色/横幅/菜单/返回键）任何一处漏改，
+     *  观看端就会出现"横幅说操控中、手势全被对方丢弃"的假状态 */
+    private fun applyControlMode(on: Boolean) {
+        overlay.controlMode = on
+        val btn = findViewById<android.widget.TextView>(R.id.btnCtl)
+        btn.setText(if (on) R.string.ctl_on else R.string.ctl_off)
+        btn.setBackgroundResource(
+            if (on) R.drawable.bg_chip_active else R.drawable.bg_chip
+        )
+        mainHandler.removeCallbacks(restoreCtlBanner)
+        findViewById<View>(R.id.tvCtlMode).visibility =
+            if (on) View.VISIBLE else View.GONE
+        if (on) findViewById<TextView>(R.id.tvCtlMode).setText(R.string.ctl_banner)
+        // 进操控先收起整套菜单：挡全屏画面。长按画面可重新唤出（含退出操控）
+        setControlsVisible(!on)
+        findViewById<View>(R.id.btnRemoteBack).visibility =
+            if (on) View.VISIBLE else View.GONE
+    }
+
     private val restoreCtlBanner = Runnable {
         if (overlay.controlMode) findViewById<TextView>(R.id.tvCtlMode).setText(R.string.ctl_banner)
+        else findViewById<View>(R.id.tvCtlMode).visibility = View.GONE
     }
 
     private fun sendRemoteBack() {

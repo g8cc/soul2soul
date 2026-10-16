@@ -104,6 +104,18 @@ class MessageActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_messages)
+        // 表情面板是"输入区"不是"新页面"：返回键应先收面板，而不是直接退出留言页
+        // （v0.2.45 审计矩阵 GAP：此前开面板按返回=整页退出，草稿和聊天一起没了）
+        onBackPressedDispatcher.addCallback(this, object : androidx.activity.OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() {
+                if (emojiOpen) setEmojiPanel(false)
+                else {
+                    isEnabled = false
+                    onBackPressedDispatcher.onBackPressed()
+                    isEnabled = true
+                }
+            }
+        })
         rv = findViewById(R.id.rvMessages)
         tvEmpty = findViewById(R.id.tvEmpty)
         etInput = findViewById(R.id.etInput)
@@ -183,9 +195,21 @@ class MessageActivity : AppCompatActivity() {
         if (!Presence.client.isConnected) {
             toast(getString(R.string.msg_not_connected)); return
         }
-        etInput.setText("")
         // id 由客户端生成并随 msg.post 上送：撤回要能对上服务端那条的号
         val id = UUID.randomUUID().toString()
+        // 先发送、成功才清框落库：send() 返回 false（socket 刚掉）时若已清空输入框+写入本地，
+        // 用户看到气泡以为发出去了，对方却永远收不到——语音路径(uploadAndSend)早就是这么判的，
+        // 文字不能双标（v0.2.45 审计矩阵 GAP 锁定）
+        val sent = Presence.client.send("msg.post") {
+            put("id", id)
+            put("kind", "text")
+            put("text", text)
+        }
+        if (!sent) {
+            toast(getString(R.string.msg_send_failed_text))
+            return
+        }
+        etInput.setText("")
         InboxStore.add(Msg(
             id = id,
             from = Prefs.deviceId(this),
@@ -196,11 +220,6 @@ class MessageActivity : AppCompatActivity() {
             ts = System.currentTimeMillis(),
             mine = true,
         ))
-        Presence.client.send("msg.post") {
-            put("id", id)
-            put("kind", "text")
-            put("text", text)
-        }
     }
 
     // ---------- 按住说话（微信式） ----------
