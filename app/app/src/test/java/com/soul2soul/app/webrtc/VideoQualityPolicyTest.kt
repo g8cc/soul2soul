@@ -131,4 +131,27 @@ class VideoQualityPolicyTest {
             0.001,
         )
     }
+
+    @Test
+    fun `进入操控档_非最低档都降到九六零`() {
+        assertEquals(
+            VideoQualityPolicy.DEGRADED_EDGE,
+            VideoQualityPolicy.controlEnterEdge(VideoQualityPolicy.HD_EDGE),
+        )
+        assertEquals(
+            VideoQualityPolicy.DEGRADED_EDGE,
+            VideoQualityPolicy.controlEnterEdge(VideoQualityPolicy.DEFAULT_EDGE),
+        )
+        assertEquals(
+            VideoQualityPolicy.DEGRADED_EDGE,
+            VideoQualityPolicy.controlEnterEdge(VideoQualityPolicy.LEGACY_EDGE),
+        )
+    }
+
+    @Test
+    fun `已在最低档进入操控不必再切`() {
+        assertNull(VideoQualityPolicy.controlEnterEdge(VideoQualityPolicy.DEGRADED_EDGE))
+        // 非法值先归一再判：低于 960 的请求归到最低档 → 无需切换
+        assertNull(VideoQualityPolicy.controlEnterEdge(600))
+    }
 }

@@ -89,6 +89,15 @@ internal object VideoQualityPolicy {
         else -> DEGRADED_EDGE
     }
 
+    /**
+     * 进入临时协助（操控）时临时采用的长边档：操控要的是跟手不是高清，
+     * 降到低档把码率与 CPU 让给帧率。null = 已在最低档，无需切。
+     */
+    fun controlEnterEdge(preferred: Int): Int? {
+        val p = normalizeEdge(preferred)
+        return if (p > DEGRADED_EDGE) DEGRADED_EDGE else null
+    }
+
     fun requiredBitrateBps(edge: Int): Long = when (normalizeEdge(edge)) {
         HD_EDGE -> 4_500_000L
         DEFAULT_EDGE -> 3_500_000L

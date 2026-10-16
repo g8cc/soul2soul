@@ -360,6 +360,8 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
                 is CtlConsentMachine.Effect.RefreshNotification -> updateNotification(statusText())
             }
         }
+        // 授权翻转同步视频策略：操控期间锁低档保帧率，收回后恢复用户档位（幂等）
+        webRtc?.setControlMode(consent.allowed)
     }
 
     override fun onLive() {

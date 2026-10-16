@@ -33,6 +33,25 @@ adb -s <设备序列号> logcat -v time -s WebRtcClient:I WebRtcClient:W
 - `videoLossPct` / `videoJitterMs` / `videoFps`：视频窗口丢包、抖动与帧率。`edge` 是当前采集长边。
 - `na`：缺少有效的前后计数样本，不能当作 0 丢包或 0 杂音。
 
+### 是否 P2P 打洞成功：看 `path`
+
+`path=<本地候选类型>-><远端候选类型>`：
+
+| path | 含义 | 延迟预期 |
+|---|---|---|
+| `host->host` | 同一内网直连 | 最好 |
+| `host->srflx` / `srflx->srflx` | **打洞成功的公网直连** | 正常（≈真实 RTT） |
+| 任一端为 `relay`（如 `srflx->relay`） | **打洞失败，媒体绕行 TURN** | 比直连多一跳+服务器排队 |
+| `unknown` | 系统未提供候选明细 | 用 `rttMs` 参考 |
+
+排查操控/视频卡顿时先看共享端与观看端两侧日志的 `path` 是否一致为直连；出现 `relay` 时优先怀疑 NAT/防火墙类型，而不是编码器。
+
+### 操控模式与编码诊断（v0.2.40+）
+
+- 标记 `S2S-Lag`（共享端）：每笔被注入手势的分段延迟。`wait`=收到消息→调系统注入（网络+排队）；`play`=系统回放时长；`overflow`=系统串行队列溢出；`inflight`=还压在队列里的手势数。wait 大→网络/排队问题；overflow/inflight 大→注入串行瓶颈；都小但主观仍卡→视频往返（下行）地板。
+- 标记 `WebRtcClient` 的 `ENC` 行：`impl=` 含 `Hardware`/`Software`（当前 VP9 走软编是刻意选择，H264 硬编档是后续候选）；`avgEncodeMs`=单帧编码耗时；`limitation=` `none`/`cpu`/`bandwidth`（`cpu` 高=软编吃不消，`bandwidth`=带宽不够）。`DEC` 行是观看端解码器。
+- 「允许TA操控」期间共享端自动降到 960 长边档并把降级偏好改为**保帧率**（`control mode video profile: on=true`），收回授权自动恢复用户原档位；操控期间的远端画质请求只记录意图、退出后生效（日志 `edge=` 可见）。
+
 第一条 `S2S_QOS` 常会出现 `na`，因为累计计数需要前后两个样本才能计算窗口值；重点看后续连续采样。共享端与观看端的日志都要保留，才能区分发送侧、接收侧和所选中继路径。
 
 ## 建议测试矩阵

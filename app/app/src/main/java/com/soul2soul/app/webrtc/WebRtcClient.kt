@@ -209,6 +209,12 @@ class WebRtcClient(
     @Volatile
     private var preferredLongEdge = VideoQualityPolicy.DEFAULT_EDGE
 
+    /** 临时协助授权期间为 true：锁低档+保帧率，收回授权恢复（仅共享端会置位） */
+    @Volatile
+    private var controlMode = false
+    // 只在 rttHandler 线程读写
+    private var edgeBeforeControl = -1
+
     /** 静音本端上行音轨（只影响本会话，不像 AudioManager.isMicrophoneMute 那样全局关麦） */
     fun muteLocalAudio(muted: Boolean) {
         runCatching { audioTrack?.setEnabled(!muted) }
@@ -320,8 +326,42 @@ class WebRtcClient(
 
     /** 观看端切清晰度（用户意图）：记录档位并立即重启采集 + 调整码率上限 */
     fun setCaptureLongEdge(edge: Int) {
-        preferredLongEdge = VideoQualityPolicy.normalizeEdge(edge)
+        val normalized = VideoQualityPolicy.normalizeEdge(edge)
+        if (controlMode) {
+            // 操控授权期间锁在跟手档：远端点画质只记下意图，收回授权退出时再生效，
+            // 否则一声"高清"点击就把刚省出来的码率又吃回去
+            edgeBeforeControl = normalized
+            return
+        }
+        preferredLongEdge = normalized
         applyCaptureLongEdge(preferredLongEdge)
+    }
+
+    /**
+     * 临时协助授权开/关（仅共享端调用；consent 状态变化时同步）。
+     * 开启：降到低档采集 + 降级偏好改保帧率；关闭：恢复用户档位与保分辨率。
+     * 操控要的是跟手不是高清。
+     */
+    fun setControlMode(on: Boolean) {
+        rttHandler.post {
+            if (closed || controlMode == on) return@post
+            controlMode = on
+            if (on) {
+                edgeBeforeControl = preferredLongEdge
+                val target = VideoQualityPolicy.controlEnterEdge(preferredLongEdge)
+                if (target != null) {
+                    preferredLongEdge = target // 操控期间自适应回升目标也钉在低档
+                    applyCaptureLongEdge(target)
+                }
+            } else {
+                val restore = if (edgeBeforeControl > 0) edgeBeforeControl else preferredLongEdge
+                preferredLongEdge = restore
+                applyCaptureLongEdge(restore)
+                edgeBeforeControl = -1
+            }
+            videoSender?.let { applyBitrate(it) } // 立即切换保分辨率/保帧率偏好
+            Log.d(TAG, "control mode video profile: on=$on edge=$captureLongEdge")
+        }
     }
 
     private fun applyCaptureLongEdge(edge: Int) {
@@ -372,8 +412,12 @@ class WebRtcClient(
         runCatching {
             val params = sender.parameters
             if (params.encodings.isNotEmpty()) {
-                // 屏幕文字比帧率更敏感：优先保分辨率，网络紧张时由 WebRTC 降帧。
-                params.degradationPreference = RtpParameters.DegradationPreference.MAINTAIN_RESOLUTION
+                // 平时屏幕文字比帧率更敏感：优先保分辨率，网络紧张时由 WebRTC 降帧；
+                // 操控授权期间反过来保帧率（跟手优先，画质临时让路）
+                params.degradationPreference = if (controlMode)
+                    RtpParameters.DegradationPreference.MAINTAIN_FRAMERATE
+                else
+                    RtpParameters.DegradationPreference.MAINTAIN_RESOLUTION
                 params.encodings[0].maxBitrateBps =
                     VideoQualityPolicy.requiredBitrateBps(captureLongEdge).toInt()
                 params.encodings[0].maxFramerate = CAPTURE_FPS
@@ -786,7 +830,18 @@ class WebRtcClient(
                                     val impl = stats.members["encoderImplementation"]?.toString() ?: "?"
                                     val fps = (stats.members["framesPerSecond"] as? Number)?.toDouble() ?: 0.0
                                     val sent = (stats.members["bytesSent"] as? Number)?.toLong() ?: 0L
-                                    Log.d(TAG, "ENC impl=$impl fps=${formatMetric(fps)} bytes=$sent")
+                                    // avgEncodeMs 高 / limitationReason=cpu → 软编瓶颈；
+                                    // =bandwidth → 带宽瓶颈（操控模式低清档正是在解这个）
+                                    val encodeMs =
+                                        (stats.members["avgEncodeMs"] as? Number)?.toDouble() ?: -1.0
+                                    val limitation =
+                                        stats.members["qualityLimitationReason"]?.toString() ?: "?"
+                                    Log.d(
+                                        TAG,
+                                        "ENC impl=$impl fps=${formatMetric(fps)} " +
+                                            "avgEncodeMs=${formatMetric(encodeMs)} " +
+                                            "limitation=$limitation bytes=$sent",
+                                    )
                                 }
                                 !isSharer && stats.type == "inbound-rtp" && mediaKind == "video" -> {
                                     val impl = stats.members["decoderImplementation"]?.toString() ?: "?"
