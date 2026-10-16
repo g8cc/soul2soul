@@ -15,6 +15,7 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { buildIceServers } from './turn.js';
 import { PairCodeBook } from './pairing.js';
 import { MessageBook } from './messages.js';
+import { RecallBook } from './recall.js';
 
 const PORT = Number(process.env.PORT || 8080);
 const TURN_STATIC_AUTH_SECRET = process.env.TURN_STATIC_AUTH_SECRET || 'change_me';
@@ -22,6 +23,7 @@ const TURN_HOST = process.env.TURN_HOST || 'YOUR_SERVER_PUBLIC_IP';
 const TURN_PORT = process.env.TURN_PORT || '3478';
 const DATA_FILE = process.env.S2S_DATA_FILE || path.join(process.cwd(), 'data', 'pairings.json');
 const MESSAGES_FILE = process.env.S2S_MESSAGES_FILE || path.join(path.dirname(DATA_FILE), 'messages.json');
+const HISTORY_FILE = process.env.S2S_HISTORY_FILE || path.join(path.dirname(DATA_FILE), 'history.json');
 const VOICE_DIR = path.join(path.dirname(MESSAGES_FILE), 'voice');
 const VOICE_MAX_BYTES = 1024 * 1024; // 30s AAC ≈ 300KB，1MB 封顶
 const PAIR_CODE_TTL_MS = Number(process.env.PAIR_CODE_TTL_MS || 10 * 60 * 1000);
@@ -48,6 +50,35 @@ function savePairings() {
   const tmp = DATA_FILE + '.tmp';
   fs.writeFileSync(tmp, JSON.stringify(pairings, null, 2));
   fs.renameSync(tmp, DATA_FILE);
+}
+
+// ---------- 历史配对关系（找回TA / 摇一摇复配的依据）----------
+// history[deviceId] = { peer, ts }；解除配对不删（这正是"找回"的凭据），30 天不活动自动过期。
+const recallBook = new RecallBook();
+try {
+  recallBook.restore(JSON.parse(fs.readFileSync(HISTORY_FILE, 'utf8')));
+  console.log(`[recall] loaded ${recallBook.history.size} history entries`);
+} catch { /* 首次启动无文件 */ }
+function saveHistory() {
+  fs.mkdirSync(path.dirname(HISTORY_FILE), { recursive: true });
+  const tmp = HISTORY_FILE + '.tmp';
+  fs.writeFileSync(tmp, JSON.stringify(recallBook.snapshot(), null, 2));
+  fs.renameSync(tmp, HISTORY_FILE);
+}
+
+/** 建立/重建配对关系并通知双方：pair.enter 与召回绑定共用 */
+function bindPair(a, b) {
+  const token = crypto.randomBytes(16).toString('hex');
+  pairings[a] = { peer: b, token };
+  pairings[b] = { peer: a, token };
+  savePairings();
+  recallBook.recordPair(a, b);
+  saveHistory();
+  const wa = online.get(a), wb = online.get(b);
+  // 配对成功即视为鉴权通过；客户端会把 token 存下来用于之后的 hello
+  if (wa) { wa.authed = true; send(wa, { type: 'paired', token, peerOnline: !!wb }); }
+  if (wb) { wb.authed = true; send(wb, { type: 'paired', token, peerOnline: !!wa }); }
+  console.log(`[pair] bound ${a} <-> ${b}`);
 }
 
 // ---------- 离线留言（文字/语音）持久化 ----------
@@ -92,6 +123,14 @@ setInterval(() => pairBook.sweep(), 60 * 1000).unref();
 setInterval(() => {
   const removed = msgBook.sweep();
   if (removed.length) { deleteVoices(removed); saveMessages(); }
+}, 60 * 1000).unref();
+// 清扫召回挂起（60s 无答复）与过期历史（30 天）：过期通知发起方，历史有删减即落盘
+setInterval(() => {
+  const before = recallBook.history.size;
+  for (const initiator of recallBook.sweep()) {
+    send(online.get(initiator), { type: 'pair.recall_failed', reason: 'expired' });
+  }
+  if (recallBook.history.size !== before) saveHistory();
 }, 60 * 1000).unref();
 
 function pairingOf(deviceId) { return pairings[deviceId] || null; }
@@ -210,6 +249,7 @@ wss.on('connection', (ws) => {
         type: 'registered',
         paired: !!pairing,
         peerOnline: !!peer && online.has(peer),
+        hasHistory: recallBook.hasHistory(ws.deviceId),
       });
       // 上线即推送留言箱（离线消息没有推送通道，打开 App 才送达）
       const pending = msgBook.list(ws.deviceId);
@@ -234,14 +274,63 @@ wss.on('connection', (ws) => {
       case 'pair.enter': {
         const r = pairBook.enter(ws, ws.deviceId, msg.code);
         if (r.out === 'failed') { send(ws, { type: 'pair.failed', reason: r.reason }); break; }
-        const { a, b, token } = r;
-        pairings[a] = { peer: b, token };
-        pairings[b] = { peer: a, token };
-        savePairings();
-        const wa = online.get(a), wb = online.get(b);
-        // 配对成功即视为鉴权通过；客户端会把 token 存下来用于之后的 hello
-        if (wa) { wa.authed = true; send(wa, { type: 'paired', token, peerOnline: !!wb }); }
-        if (wb) { wb.authed = true; send(wb, { type: 'paired', token, peerOnline: !!wa }); }
+        bindPair(r.a, r.b);
+        break;
+      }
+      case 'pair.recall': {
+        // 找回老搭档：只对"有历史关系"的设备生效，且必须对方确认（弹窗或互摇）
+        if (!ws.authed) break;
+        if (pairingOf(ws.deviceId)) break; // 已配对，无需召回
+        const r = recallBook.requestRecall(ws.deviceId);
+        if (r.out === 'failed') { send(ws, { type: 'pair.recall_failed', reason: r.reason }); break; }
+        const peerWs = online.get(r.peer);
+        if (!peerWs) {
+          recallBook.settle(ws.deviceId);
+          send(ws, { type: 'pair.recall_failed', reason: 'peer_offline' });
+          break;
+        }
+        if (pairingOf(r.peer)) {
+          recallBook.settle(ws.deviceId);
+          send(ws, { type: 'pair.recall_failed', reason: 'peer_busy' });
+          break;
+        }
+        send(ws, { type: 'pair.recall_sent' });
+        send(peerWs, { type: 'pair.recall_ask', from: ws.deviceId });
+        break;
+      }
+      case 'pair.recall_ok': {
+        // 被召回方答复。accept=true 也要复查双方状态（弹窗期间可能已发生别的配对）
+        if (!ws.authed) break;
+        const r = recallBook.answer(ws.deviceId, msg.accept === true);
+        if (r.out === 'ignored') break;
+        if (r.out === 'failed') { send(online.get(r.initiator), { type: 'pair.recall_failed', reason: r.reason }); break; }
+        if (r.out === 'declined') {
+          send(online.get(r.initiator), { type: 'pair.recall_failed', reason: 'declined' });
+          break;
+        }
+        const { a, b } = r;
+        if (pairingOf(a) || pairingOf(b)) {
+          if (online.get(a)) send(online.get(a), { type: 'pair.recall_failed', reason: 'peer_busy' });
+          if (online.get(b)) send(online.get(b), { type: 'pair.recall_failed', reason: 'peer_busy' });
+          break;
+        }
+        bindPair(a, b);
+        break;
+      }
+      case 'pair.shake': {
+        // 千里同步：双方都在主页 3s 内摇动即视为双向意愿，直接复配
+        if (!ws.authed) break;
+        if (pairingOf(ws.deviceId)) break;
+        const r = recallBook.shake(ws.deviceId);
+        if (r.out === 'ignored' || r.out === 'waiting') break;
+        if (r.out === 'failed') { send(ws, { type: 'pair.recall_failed', reason: r.reason }); break; }
+        const { a, b } = r;
+        if (pairingOf(a) || pairingOf(b)) {
+          if (online.get(a)) send(online.get(a), { type: 'pair.recall_failed', reason: 'peer_busy' });
+          if (online.get(b)) send(online.get(b), { type: 'pair.recall_failed', reason: 'peer_busy' });
+          break;
+        }
+        bindPair(a, b);
         break;
       }
 
@@ -287,6 +376,9 @@ wss.on('connection', (ws) => {
         delete pairings[ws.deviceId];
         delete pairings[peer];
         savePairings();
+        // 历史关系保留（找回TA 的凭据），只清挂起的召回/摇动
+        recallBook.settle(ws.deviceId);
+        recallBook.settle(peer);
         deleteVoices([...msgBook.forgetDevice(ws.deviceId), ...msgBook.forgetDevice(peer)]);
         saveMessages();
         send(ws, { type: 'unpaired' });
@@ -369,6 +461,10 @@ wss.on('connection', (ws) => {
       online.delete(ws.deviceId);
       pairBook.forgetDevice(ws.deviceId);
       lastInviteAt.delete(ws.deviceId);
+      // 正被召回/撮合的一方掉线：通知等待方别傻等
+      for (const initiator of recallBook.onPeerGone(ws.deviceId)) {
+        send(online.get(initiator), { type: 'pair.recall_failed', reason: 'peer_offline' });
+      }
       const peer = peerDeviceId(ws.deviceId);
       if (peer) send(online.get(peer), { type: 'peer.gone' });
     }

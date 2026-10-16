@@ -46,3 +46,5 @@ echo "-- smoke-test.cjs @ :$PORT"
 SIG_URL="ws://127.0.0.1:$PORT" node smoke-test.cjs
 echo "-- msg-blackbox.cjs @ :$PORT"
 SIG_URL="ws://127.0.0.1:$PORT" HTTP_URL="http://127.0.0.1:$PORT" node msg-blackbox.cjs
+echo "-- recall-blackbox.cjs @ :$PORT"
+SIG_URL="ws://127.0.0.1:$PORT" node recall-blackbox.cjs
