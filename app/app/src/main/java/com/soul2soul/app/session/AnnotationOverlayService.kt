@@ -120,8 +120,7 @@ class AnnotationOverlayService : Service() {
         mainHandler.post {
             // 自画层/工具条按旧屏幕尺寸挂的，旋转后直接退出（笔迹随窗口一起清掉）
             if (doodle != null) {
-                exitDoodle()
-                showBall()
+                finishDoodle()
             } else {
                 // 球按旧屏幕坐标挂着，旋转后回默认位（丢一次拖异位可接受）
                 hideBall()
@@ -225,8 +224,7 @@ class AnnotationOverlayService : Service() {
 
     private fun toggleDoodle() {
         if (doodle != null) {
-            exitDoodle()
-            showBall()
+            finishDoodle()
             return
         }
         if (!Settings.canDrawOverlays(this)) return
@@ -338,7 +336,7 @@ class AnnotationOverlayService : Service() {
                 android.widget.LinearLayout.LayoutParams.WRAP_CONTENT,
                 android.widget.LinearLayout.LayoutParams.WRAP_CONTENT,
             ).apply { marginStart = dp(6f) }
-            setOnClickListener { exitDoodle() }
+            setOnClickListener { finishDoodle() }
         }
         bar.addView(clear)
         bar.addView(done)
@@ -352,6 +350,13 @@ class AnnotationOverlayService : Service() {
         doodleRoot = null
         doodle = null
         doodleBar = null
+    }
+
+    /** 退出自画模式的唯一正道：拆层必须连带把入口球还回去。
+     *  v0.2.42 真机实锤：工具条「完成」只调 exitDoodle()，球从此整场消失 */
+    private fun finishDoodle() {
+        exitDoodle()
+        showBall()
     }
 
     // ---------- 涂鸦入口悬浮球：轻点/长按开画笔，可拖动，闲置淡化 ----------
