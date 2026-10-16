@@ -10,14 +10,24 @@ export class MessageBook {
     maxPerDevice = 20,                  // 每个收件人最多暂存条数（超出丢最旧）
     minIntervalMs = 1000,               // 每个发件人限速 1 条/秒（防刷屏）
     maxTextChars = 500,
+    recallWindowMs = 5 * 60 * 1000,     // 撤回窗口：发出后 5 分钟内（微信同款）
   } = {}) {
     this.now = now;
     this.ttlMs = ttlMs;
     this.maxPerDevice = maxPerDevice;
     this.minIntervalMs = minIntervalMs;
     this.maxTextChars = maxTextChars;
+    this.recallWindowMs = recallWindowMs;
     this.inbox = new Map();   // toDeviceId -> [item]
     this.lastPostAt = new Map(); // fromDeviceId -> 上次成功留言时间戳
+    this.sentIndex = new Map();  // id -> {from, to, ts}；撤回要能定位收件箱+校验窗口
+  }
+
+  /** 客户端可自带 id（撤回需要对得上号）；格式不符或撞号则服务端生成 */
+  pickId(rawId) {
+    const id = typeof rawId === 'string' ? rawId.toLowerCase() : '';
+    if (/^[0-9a-f-]{36}$/.test(id) && !this.sentIndex.has(id)) return id;
+    return crypto.randomUUID();
   }
 
   /**
@@ -37,13 +47,13 @@ export class MessageBook {
       const text = typeof msg.text === 'string' ? msg.text.trim() : '';
       if (!text) return { out: 'rejected', reason: 'empty' };
       if (text.length > this.maxTextChars) return { out: 'rejected', reason: 'too_long' };
-      item = { id: crypto.randomUUID(), from, kind: 'text', text, ts: now, expires: now + this.ttlMs };
+      item = { id: this.pickId(msg.id), from, kind: 'text', text, ts: now, expires: now + this.ttlMs };
     } else if (msg.kind === 'voice') {
       const voiceId = String(msg.voiceId || '');
       if (!/^[0-9a-f-]{36}$/i.test(voiceId)) return { out: 'rejected', reason: 'bad_voice_id' };
       const durMs = Number(msg.durMs) || 0;
       if (durMs <= 0 || durMs > 60_000) return { out: 'rejected', reason: 'bad_duration' };
-      item = { id: crypto.randomUUID(), from, kind: 'voice', voiceId, durMs, ts: now, expires: now + this.ttlMs };
+      item = { id: this.pickId(msg.id), from, kind: 'voice', voiceId, durMs, ts: now, expires: now + this.ttlMs };
     } else {
       return { out: 'rejected', reason: 'bad_kind' };
     }
@@ -55,6 +65,8 @@ export class MessageBook {
     while (list.length > this.maxPerDevice) dropped.push(list.shift());
     this.inbox.set(to, list);
     this.lastPostAt.set(from, now);
+    this.sentIndex.set(item.id, { from, to, ts: now });
+    for (const d of dropped) this.sentIndex.delete(d.id);
     return { out: 'ok', item, dropped };
   }
 
@@ -80,6 +92,27 @@ export class MessageBook {
     return removed;
   }
 
+  /**
+   * 发件人撤回：只能撤自己发出且未超窗口的留言。
+   * 未读的从收件箱摘除（返回 item 供调用方删语音文件）；已被 ack 的返回 item:null，
+   * 调用方仍要双向投递 msg.recalled（对方在线时本地打墓碑）。
+   */
+  recall(deviceId, rawId) {
+    const id = typeof rawId === 'string' ? rawId.toLowerCase() : '';
+    const rec = this.sentIndex.get(id);
+    if (!rec || rec.from !== deviceId) return { out: 'rejected', reason: 'not_found' };
+    const now = this.now();
+    if (now - rec.ts > this.recallWindowMs) return { out: 'rejected', reason: 'too_late' };
+    this.sentIndex.delete(id);
+    const list = this.inbox.get(rec.to) || [];
+    const hit = list.find((m) => m.id === id) || null;
+    if (hit) {
+      const kept = list.filter((m) => m.id !== id);
+      if (kept.length) this.inbox.set(rec.to, kept); else this.inbox.delete(rec.to);
+    }
+    return { out: 'ok', to: rec.to, item: hit ? { ...hit } : null };
+  }
+
   /** 解除配对/设备注销：双向清空（含发出记录限速），返回被删条目供清理语音文件 */
   forgetDevice(deviceId) {
     const removed = [];
@@ -89,6 +122,9 @@ export class MessageBook {
         return true;
       });
       if (kept.length) this.inbox.set(to, kept); else this.inbox.delete(to);
+    }
+    for (const [id, rec] of this.sentIndex) {
+      if (rec.from === deviceId || rec.to === deviceId) this.sentIndex.delete(id);
     }
     this.lastPostAt.delete(deviceId);
     return removed;
@@ -100,6 +136,11 @@ export class MessageBook {
     const list = this.inbox.get(to) || [];
     list.push(item);
     this.inbox.set(to, list);
+    this.sentIndex.set(item.id, {
+      from: item.from,
+      to,
+      ts: Number(item.ts) || this.now(),
+    });
   }
 
   totalCount() {
@@ -126,6 +167,10 @@ export class MessageBook {
         return true;
       });
       if (kept.length) this.inbox.set(to, kept); else this.inbox.delete(to);
+    }
+    // 撤回索引跟着 TTL 一起清，防慢性堆积（已 ack 的只有索引，重启也本就丢）
+    for (const [id, rec] of this.sentIndex) {
+      if (now - rec.ts > this.ttlMs) this.sentIndex.delete(id);
     }
     return removed;
   }

@@ -18,6 +18,7 @@ data class Msg(
     val ts: Long,
     val mine: Boolean = false,
     val read: Boolean = false,
+    val recalled: Boolean = false,
 ) {
     companion object {
         /** 服务端条目/回执 → Msg；缺 id 的畸形条目返回 null（宁可少显示，不可崩） */
@@ -37,12 +38,13 @@ data class Msg(
             )
         }
 
-        /** 本地落盘条目 → Msg（mine/read 存在 JSON 里）；缺 id 返回 null */
+        /** 本地落盘条目 → Msg（mine/read/recalled 存在 JSON 里）；缺 id 返回 null */
         fun fromStoredJson(o: JSONObject?): Msg? {
             val base = fromJson(o, mine = false) ?: return null
             return base.copy(
                 mine = o!!.optBoolean("mine"),
                 read = o.optBoolean("read"),
+                recalled = o.optBoolean("recalled"),
             )
         }
     }
@@ -50,7 +52,7 @@ data class Msg(
     fun toJson(): JSONObject = JSONObject()
         .put("id", id).put("from", from).put("kind", kind).put("text", text)
         .put("voiceId", voiceId).put("durMs", durMs).put("ts", ts)
-        .put("mine", mine).put("read", read)
+        .put("mine", mine).put("read", read).put("recalled", recalled)
 }
 
 /**
@@ -94,15 +96,26 @@ object InboxStore {
         if (changed) notifyChanged()
     }
 
+    /** 撤回打墓碑：内容保留在本地（服务端已删，这里只是会话里折叠成提示行）。
+     *  自己撤回和对方撤回都走这一条：服务端把 msg.recalled 同时回执给双方，客户端不猜。 */
+    fun recall(id: String) {
+        val m = items[id] ?: return
+        if (!m.recalled) {
+            items[id] = m.copy(recalled = true)
+            notifyChanged()
+        }
+    }
+
     fun clear() {
         if (items.isEmpty()) return
         items.clear()
         notifyChanged()
     }
 
-    /** 收到但未读的（主页角标数量以此为准） */
+    /** 收到但未读的（主页角标数量以此为准）；被撤回的不再计未读 */
     fun received(): List<Msg> =
-        items.values.filter { !it.mine && !it.read }.sortedWith(compareBy({ it.ts }, { it.id }))
+        items.values.filter { !it.mine && !it.read && !it.recalled }
+            .sortedWith(compareBy({ it.ts }, { it.id }))
 
     /** 会话页展示的全部（收+发，按时间） */
     fun conversation(): List<Msg> =

@@ -323,6 +323,24 @@ wss.on('connection', (ws) => {
         if (removed.length) { deleteVoices(removed); saveMessages(); }
         break;
       }
+      case 'msg.recall': {
+        // 撤回：只认自己发的、发出后 5 分钟内。未读从信箱摘除+删语音文件；
+        // 双方各收 msg.recalled 打墓碑（收件人已读且离线时只能撤发件人侧——隐私模型不追删本地）
+        if (!ws.authed) break;
+        const id = typeof msg.id === 'string' ? msg.id : '';
+        if (!/^[0-9a-f-]{36}$/i.test(id)) break;
+        const r = msgBook.recall(ws.deviceId, id);
+        if (r.out === 'rejected') {
+          send(ws, { type: 'msg.recall_failed', id, reason: r.reason });
+          break;
+        }
+        if (r.item) deleteVoices([r.item]);
+        saveMessages();
+        send(ws, { type: 'msg.recalled', id });
+        const peerWs = online.get(r.to);
+        if (peerWs) send(peerWs, { type: 'msg.recalled', id });
+        break;
+      }
 
       // ---- 媒体协商与挂断（原样转发）----
       case 'sdp':

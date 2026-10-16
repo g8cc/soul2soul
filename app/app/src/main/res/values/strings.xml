@@ -227,4 +227,11 @@
     <string name="msg_fail_too_long">留言太长啦，最多 500 个字</string>
     <string name="msg_fail_empty">还没写字呢～</string>
     <string name="msg_fail_generic">留言没发出去，稍后再试试</string>
+    <string name="msg_recall_action">撤回</string>
+    <string name="msg_recall_confirm">撤回后这条消息会消失，双方只看到一行提示。要撤回吗？</string>
+    <string name="msg_recall_expired">超过5分钟，撤不了了</string>
+    <string name="msg_recall_not_connected">还没连上服务器，稍等一下再撤吧</string>
+    <string name="msg_recall_failed">这条撤不回来了，可能已超过5分钟</string>
+    <string name="msg_recalled_me">你撤回了一条消息</string>
+    <string name="msg_recalled_peer">对方撤回了一条消息</string>
 </resources>

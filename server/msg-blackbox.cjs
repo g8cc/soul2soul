@@ -123,6 +123,29 @@ const closed = (ws) => new Promise((r) => ws.on('close', r));
   check('收件人在线时留言直达 msg.new', live.text === '在线直达' && live.from === 'msgDevA');
   B2.send({ type: 'msg.read', ids: [live.id] });
 
+  // 5b) 撤回：客户端 id 上送被采用 → 撤回后双方收 msg.recalled；重撤/撤别人的被拒
+  await sleep(1100);
+  const rcId = crypto.randomUUID();
+  A2.send({ type: 'msg.post', kind: 'text', text: '打错字了要撤回', id: rcId });
+  const live2 = await B2.waitFor((m) => m.type === 'msg.new', 3000, 'msg.new(recall-test)');
+  check('撤回：客户端自带 id 被服务端采用', live2.id === rcId);
+  A2.send({ type: 'msg.recall', id: rcId });
+  const echo = await A2.waitFor((m) => m.type === 'msg.recalled', 3000, 'msg.recalled@A');
+  const peerNote = await B2.waitFor((m) => m.type === 'msg.recalled', 3000, 'msg.recalled@B');
+  check('撤回：发件人回执+收件人转发都带同一 id', echo.id === rcId && peerNote.id === rcId);
+  A2.send({ type: 'msg.recall', id: rcId });
+  const failR = await A2.waitFor((m) => m.type === 'msg.recall_failed', 3000, 'recall_failed(repeat)');
+  check('重复撤回被拒 not_found', failR.reason === 'not_found');
+  await sleep(1100);
+  const rcId2 = crypto.randomUUID();
+  A2.send({ type: 'msg.post', kind: 'text', text: '这条不能被TA撤', id: rcId2 });
+  await B2.waitFor((m) => m.type === 'msg.new', 3000, 'msg.new(steal)');
+  B2.send({ type: 'msg.recall', id: rcId2 });
+  const failR2 = await B2.waitFor((m) => m.type === 'msg.recall_failed', 3000, 'recall_failed@B');
+  check('收件人撤别人的消息被拒 not_found', failR2.reason === 'not_found');
+  A2.send({ type: 'msg.recall', id: rcId2 });
+  await A2.waitFor((m) => m.type === 'msg.recalled', 3000, 'msg.recalled@A(steal)');
+
   // 6) B 再上线不应再有旧箱残留
   await sleep(300);
   A2.ws.close(); await closed(A2.ws);

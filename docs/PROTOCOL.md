@@ -26,8 +26,9 @@
 | `sdp` | `sdp:{type, sdp}` | 已鉴权 | 原样转发给对端（日志省略正文）。 |
 | `ice` | `candidate:{...}` | 已鉴权 | 原样转发给对端（日志省略正文）。 |
 | `unpair` | — | 已鉴权 | 解除配对：删除双向关系并**双向清空留言箱**（文字+语音文件），在线端立即收 `unpaired`。 |
-| `msg.post` | `kind:"text"`+`text`(≤500字) 或 `kind:"voice"`+`voiceId`(UUID)+`durMs`(0<d≤60000) | 已鉴权+已配对 | 给对端留言（对方离线也收）。发件限速 1 条/秒；被拒回 `msg.failed`。语音文件先经 HTTP `POST /voice` 上传（见 2.4）。 |
+| `msg.post` | `kind:"text"`+`text`(≤500字) 或 `kind:"voice"`+`voiceId`(UUID)+`durMs`(0<d≤60000)，可选 `id`(UUID) | 已鉴权+已配对 | 给对端留言（对方离线也收）。发件限速 1 条/秒；被拒回 `msg.failed`。语音文件先经 HTTP `POST /voice` 上传（见 2.4）。`id` 为客户端预生成 id：合法且不撞号则服务端采用（撤回靠它对号），否则服务端另生成并以 `msg.sent` 为准。 |
 | `msg.read` | `ids`[] | 已鉴权 | 阅后即删：从**自己**的留言箱删除这些 id（含语音文件），只能删自己的。 |
+| `msg.recall` | `id`(UUID) | 已鉴权 | 撤回自己发出、**5 分钟内**的留言：未读的从对方信箱摘除（语音文件同删），成功双方各收 `msg.recalled`，被拒收 `msg.recall_failed`。 |
 | `app.diag` | 见 2.3 | 已 hello | 服务端只落日志 `[diag.selfcheck]`，不转发。 |
 | `app.version` | 见 2.3 | 已 hello | 服务端只落日志 `[diag.version]`，不转发。 |
 
@@ -55,9 +56,12 @@
 | `msg.sent` | `id` | msg.post 成功回执（容量溢出挤掉的旧留言由服务端自行删除，不再通知） |
 | `msg.failed` | `reason`: `unpaired` / `too_fast` / `empty` / `too_long` / `bad_recipient` / `bad_kind` / `bad_voice_id` / `bad_duration` | msg.post 被拒 |
 | `msg.new` | 留言条目展开（`id,from,kind,text|voiceId+durMs,ts,expires`） | msg.post 时收件人恰好在线则直达 |
+| `msg.recalled` | `id` | msg.recall 成功：发件人回执 + 收件人（恰好在线则）转发，双方把该条折叠成"撤回了一条消息"提示行 |
+| `msg.recall_failed` | `id`, `reason`: `not_found` / `too_late` | msg.recall 被拒 |
 
 留言条目结构：`{id:UUID, from, kind:'text'|'voice', text | voiceId+durMs, ts, expires}`。
 容量与隐私：每收件人最多 20 条（溢出丢最旧，语音文件同删）、TTL 7 天自动销毁、`msg.read` 送达即删（阅后即删）；无厂商推送，**打开 App 才送达**。决策逻辑在 `server/src/messages.js#MessageBook`（纯逻辑，单测覆盖）。
+撤回已知局限：服务端只保留 `id→{from,to,ts}` 发送索引（随信箱条目持久化，已 ack 条目重启后索引丢失），所以 ①旧版客户端（不带 `id` 的 msg.post、msg.sent 被忽略）的消息无法撤回；②服务端重启后，撤回中的"已被读过"路径可能退化为 `not_found`；③收件人已读且当时离线收不到 `msg.recalled` 时，对方本地聊天记录不追删（隐私模型：服务端已无内容，客户端历史不属云端管辖）。
 
 ### 2.3 ICE 凭证与遥测
 

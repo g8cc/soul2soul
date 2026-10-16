@@ -295,6 +295,8 @@ class MainActivity : AppCompatActivity() {
                 toast(res)
             }
             "msg.sent" -> { /* 送达回执：语音/文字上屏由本地乐观添加完成，无需处理 */ }
+            "msg.recalled" -> updateUi() // 墓碑入库由 PresenceService 完成，这里只刷角标
+            "msg.recall_failed" -> toast(R.string.msg_recall_failed)
             "unpaired" -> {
                 // 被对端解除配对（或自己发起后服务端确认）
                 callTimeout.removeCallbacksAndMessages(null)

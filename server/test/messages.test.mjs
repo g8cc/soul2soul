@@ -119,3 +119,83 @@ test('sweep 删除过期条目并返回（TTL 边界：恰好到期不删，过 
   assert.equal(removed[0].voiceId, VID);
   assert.deepEqual(book.list('B'), []);
 });
+
+// ---------- 撤回（v0.2.41）----------
+
+test('撤回 id 由客户端自带：合法值采用；非法/撞号回退服务端生成', () => {
+  const { book, advance } = makeBook();
+  const cid = '11111111-2222-3333-4444-555555555555';
+  const r1 = book.post('A', 'B', { kind: 'text', text: '打错字', id: cid.toUpperCase() });
+  assert.equal(r1.item.id, cid); // 统一小写存
+  advance(1000);
+  const r2 = book.post('A', 'B', { kind: 'text', text: '撞号', id: cid });
+  assert.notEqual(r2.item.id, cid);
+  advance(1000);
+  const bad = 'x'.repeat(36);
+  const r3 = book.post('A', 'B', { kind: 'text', text: '畸形', id: bad });
+  assert.match(r3.item.id, /^[0-9a-f-]{36}$/);
+  assert.notEqual(r3.item.id, bad);
+});
+
+test('撤回未读：从收件箱摘除并返回条目；重复撤回 not_found', () => {
+  const { book } = makeBook();
+  const r = book.post('A', 'B', { kind: 'voice', voiceId: VID, durMs: 2000 });
+  const rec = book.recall('A', r.item.id.toUpperCase());
+  assert.equal(rec.out, 'ok');
+  assert.equal(rec.to, 'B');
+  assert.equal(rec.item.voiceId, VID);
+  assert.deepEqual(book.list('B'), []);
+  assert.deepEqual(book.recall('A', r.item.id), { out: 'rejected', reason: 'not_found' });
+});
+
+test('撤回窗口：恰好 5 分钟放行，过 1ms too_late', () => {
+  const { book, advance } = makeBook();
+  const r = book.post('A', 'B', { kind: 'text', text: 'x' });
+  advance(5 * 60 * 1000);
+  assert.equal(book.recall('A', r.item.id).out, 'ok');
+  advance(1000);
+  const r2 = book.post('A', 'B', { kind: 'text', text: 'y' });
+  advance(5 * 60 * 1000 + 1);
+  assert.deepEqual(book.recall('A', r2.item.id), { out: 'rejected', reason: 'too_late' });
+});
+
+test('只能撤自己发的；已 ack 的撤回 ok 且 item=null（内容已删、仍双向打墓碑）', () => {
+  const { book } = makeBook();
+  const r = book.post('A', 'B', { kind: 'text', text: 'x' });
+  assert.deepEqual(book.recall('B', r.item.id), { out: 'rejected', reason: 'not_found' });
+  book.ack('B', [r.item.id]);
+  const rec = book.recall('A', r.item.id);
+  assert.equal(rec.out, 'ok');
+  assert.equal(rec.item, null);
+  assert.equal(rec.to, 'B');
+});
+
+test('撤回索引随容量挤掉/forgetDevice 清理；restore 重建后可撤', () => {
+  const { book, advance } = makeBook({ maxPerDevice: 1 });
+  const r1 = book.post('A', 'B', { kind: 'text', text: '旧' });
+  advance(1000);
+  const r2 = book.post('A', 'B', { kind: 'text', text: '新' }); // 挤掉 r1
+  assert.deepEqual(book.recall('A', r1.item.id), { out: 'rejected', reason: 'not_found' });
+  assert.equal(book.recall('A', r2.item.id).out, 'ok');
+  advance(1000);
+  const r3 = book.post('C', 'D', { kind: 'text', text: 'z' });
+  book.forgetDevice('C');
+  assert.deepEqual(book.recall('C', r3.item.id), { out: 'rejected', reason: 'not_found' });
+
+  const T0 = 1_700_000_000_000;
+  const { book: b2 } = makeBook();
+  const id = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+  b2.restore('B', { id, from: 'A', kind: 'text', text: '重启前的留言', ts: T0, expires: T0 + 7 * 86400_000 });
+  const rec = b2.recall('A', id);
+  assert.equal(rec.out, 'ok');
+  assert.equal(rec.item.text, '重启前的留言');
+});
+
+test('sweep 连带清理超 TTL 的撤回索引，不慢性堆积', () => {
+  const { book, advance } = makeBook({ ttlMs: 5000 });
+  const r = book.post('A', 'B', { kind: 'text', text: 'x' });
+  book.ack('B', [r.item.id]); // 只剩索引
+  advance(5001);
+  book.sweep();
+  assert.deepEqual(book.recall('A', r.item.id), { out: 'rejected', reason: 'not_found' });
+});

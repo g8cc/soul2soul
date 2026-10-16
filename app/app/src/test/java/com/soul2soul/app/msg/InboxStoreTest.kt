@@ -124,6 +124,41 @@ class InboxStoreTest {
     }
 
     @Test
+    fun `recall 打墓碑：不计未读但会话留提示行，不存在的 id 静默无回调`() {
+        InboxStore.add(Msg.fromJson(item("rc1", "a", ts = 100), mine = false)!!)
+        InboxStore.add(Msg.fromJson(item("rc2", "me", ts = 200), mine = true)!!)
+        var hits = 0
+        val l: () -> Unit = { hits++ }
+        InboxStore.addListener(l)
+        InboxStore.recall("ghost")
+        assertEquals(0, hits)
+        InboxStore.recall("rc1")
+        assertEquals(1, hits)
+        InboxStore.recall("rc1") // 已墓碑再撤不重复回调
+        assertEquals(1, hits)
+        InboxStore.removeListener(l)
+        assertEquals(0, InboxStore.received().size)
+        assertEquals(listOf("rc1", "rc2"), InboxStore.conversation().map { it.id })
+        assertTrue(InboxStore.conversation().first { it.id == "rc1" }.recalled)
+    }
+
+    @Test
+    fun `recalled 状态落盘回读不丢`() {
+        InboxStore.add(Msg.fromJson(item("rs1", "a"), mine = false)!!.copy(recalled = true))
+        InboxStore.add(Msg.fromJson(item("rs2", "me"), mine = true)!!)
+        val f = java.io.File.createTempFile("chat", ".json")
+        try {
+            ChatPersistence.save(f, InboxStore.snapshot())
+            InboxStore.clear()
+            InboxStore.restore(ChatPersistence.load(f))
+            assertTrue(InboxStore.conversation().first { it.id == "rs1" }.recalled)
+            assertFalse(InboxStore.conversation().first { it.id == "rs2" }.recalled)
+        } finally {
+            f.delete()
+        }
+    }
+
+    @Test
     fun `add markRead 与 clear 都触发变更回调且重复 addAll 不触发`() {
         var hits = 0
         val l: () -> Unit = { hits++ }

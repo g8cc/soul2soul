@@ -142,12 +142,10 @@ class MessageActivity : AppCompatActivity() {
     // ---------- 列表与已读 ----------
 
     private fun syncFromStore() {
-        val known = shown.mapTo(HashSet()) { it.id }
-        var added = false
-        for (m in InboxStore.conversation()) {
-            if (m.id !in known) { shown.add(m); added = true }
-        }
-        if (added) shown.sortWith(compareBy({ it.ts }, { it.id }))
+        // 整表取自 InboxStore（条目不可变，撤回/已读都是换新对象）：
+        // 增量追加会让撤回墓碑等状态变更到不了屏幕（v0.2.41 撤回依赖这一点）
+        shown.clear()
+        shown.addAll(InboxStore.conversation())
         render()
         ackAll()
     }
@@ -191,8 +189,10 @@ class MessageActivity : AppCompatActivity() {
             toast(getString(R.string.msg_not_connected)); return
         }
         etInput.setText("")
+        // id 由客户端生成并随 msg.post 上送：撤回要能对上服务端那条的号
+        val id = UUID.randomUUID().toString()
         InboxStore.add(Msg(
-            id = UUID.randomUUID().toString(),
+            id = id,
             from = Prefs.deviceId(this),
             kind = "text",
             text = text,
@@ -202,6 +202,7 @@ class MessageActivity : AppCompatActivity() {
             mine = true,
         ))
         Presence.client.send("msg.post") {
+            put("id", id)
             put("kind", "text")
             put("text", text)
         }
@@ -502,7 +503,10 @@ class MessageActivity : AppCompatActivity() {
                 runCatching { file.copyTo(target, overwrite = true) }
                 file.delete()
             }
+            // 同文字留言：客户端 id 贯穿本地存档与 msg.post，撤回靠它对号
+            val id = UUID.randomUUID().toString()
             if (!Presence.client.send("msg.post") {
+                    put("id", id)
                     put("kind", "voice")
                     put("voiceId", voiceId)
                     put("durMs", durMs)
@@ -512,7 +516,7 @@ class MessageActivity : AppCompatActivity() {
                 return@upload
             }
             InboxStore.add(Msg(
-                id = UUID.randomUUID().toString(),
+                id = id,
                 from = Prefs.deviceId(this),
                 kind = "voice",
                 text = "",
@@ -603,13 +607,33 @@ class MessageActivity : AppCompatActivity() {
         override fun onBindViewHolder(holder: VH, position: Int) {
             val m = shown[position]
             holder.row.gravity = if (m.mine) Gravity.END else Gravity.START
+            if (m.recalled) {
+                // 微信式提示行：内容没了，居中灰字留痕
+                holder.row.gravity = Gravity.CENTER
+                holder.bubble.setBackgroundResource(0)
+                holder.bubble.setTextColor(
+                    resources.getColor(R.color.text_secondary, theme)
+                )
+                holder.bubble.setTextIsSelectable(false)
+                holder.bubble.text =
+                    getString(if (m.mine) R.string.msg_recalled_me else R.string.msg_recalled_peer)
+                holder.bubble.setCompoundDrawablesRelativeWithIntrinsicBounds(null, null, null, null)
+                holder.bubble.compoundDrawablePadding = 0
+                (holder.bubble.layoutParams as ViewGroup.LayoutParams).width =
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                holder.bubble.isClickable = false
+                holder.bubble.setOnClickListener(null)
+                holder.bubble.setOnLongClickListener(null)
+                return
+            }
             holder.bubble.setBackgroundResource(if (m.mine) R.drawable.bg_msg_me else R.drawable.bg_msg_peer)
             holder.bubble.setTextColor(
                 resources.getColor(if (m.mine) R.color.white else R.color.text_primary, theme)
             )
             val label = timeFmt.format(Date(m.ts))
             val voice = m.kind == "voice"
-            holder.bubble.setTextIsSelectable(!voice)
+            // 自己的文字不长按选复制：selectable 的 TextView 长按会被选择菜单吃掉，撤回就没入口了
+            holder.bubble.setTextIsSelectable(!voice && !m.mine)
             val secs = ceil(m.durMs / 1000.0).toInt().coerceAtLeast(1)
             holder.bubble.text = if (voice) getString(R.string.msg_voice_play, secs)
             else "$label\n${m.text}"
@@ -643,7 +667,35 @@ class MessageActivity : AppCompatActivity() {
                 holder.bubble.isClickable = false
                 holder.bubble.setOnClickListener(null)
             }
+            // 长按自己的消息 → 撤回（5 分钟内）；服务端回执 msg.recalled 才打墓碑，本地不抢跑
+            if (m.mine) {
+                holder.bubble.setOnLongClickListener { offerRecall(m); true }
+            } else {
+                holder.bubble.setOnLongClickListener(null)
+            }
         }
+    }
+
+    private fun offerRecall(m: Msg) {
+        val now = System.currentTimeMillis()
+        if (MsgRecallPolicy.tooLate(m, now)) {
+            toast(getString(R.string.msg_recall_expired))
+            return
+        }
+        if (!MsgRecallPolicy.canRecall(m, now)) return
+        if (!Presence.client.isConnected) {
+            toast(getString(R.string.msg_recall_not_connected))
+            return
+        }
+        androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle(R.string.msg_recall_action)
+            .setMessage(R.string.msg_recall_confirm)
+            .setPositiveButton(R.string.msg_recall_action) { _, _ ->
+                if (!Presence.client.send("msg.recall") { put("id", m.id) })
+                    toast(getString(R.string.msg_recall_not_connected))
+            }
+            .setNegativeButton(R.string.cancel, null)
+            .show()
     }
 
     // ---------- 生命周期 ----------

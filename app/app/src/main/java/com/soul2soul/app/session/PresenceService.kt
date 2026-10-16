@@ -207,6 +207,11 @@ class PresenceService : Service() {
                 com.soul2soul.app.msg.Msg.fromJson(json, mine = false)
                     ?.let { com.soul2soul.app.msg.InboxStore.add(it) }
             }
+            "msg.recalled" -> {
+                // 撤回事件同时下发给双方：本地打墓碑（折叠成提示行），UI 靠 InboxStore 监听刷新
+                val id = json.optString("id")
+                if (id.isNotEmpty()) com.soul2soul.app.msg.InboxStore.recall(id)
+            }
         }
     }
 
