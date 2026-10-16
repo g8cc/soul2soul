@@ -171,31 +171,34 @@
         <item>😂</item>
         <item>👍</item>
         <item>😮</item>
-        <item>🥺</item>
+        <item>😢</item>
         <item>🔥</item>
         <item>😘</item>
-        <item>🥰</item>
+        <item>💕</item>
         <item>😊</item>
         <item>😭</item>
         <item>🌹</item>
-        <item>🫶</item>
+        <item>💗</item>
         <item>✨</item>
         <item>🎉</item>
         <item>💤</item>
         <item>🐱</item>
     </string-array>
-    <!-- 留言表情面板：往这里加就行，代码按列表生成 -->
+    <!-- 留言表情面板：往这里加就行，代码按列表生成。只收"常用"表情：
+         冷门占位（🧸🎈🍭🐶）换成高频聊天款（🍑🍫😜😏🙈）；
+         全部码位已用 Mi5 的 /system/fonts/NotoColorEmoji.ttf cmap 实测覆盖，
+         🥰🥺🫶 等 Unicode 9/11/14 新码位 Android 7 是方框，已换 💕💗😢；加新表情前重跑一次覆盖检查 -->
     <string-array name="msg_emojis" translatable="false">
         <item>❤️</item>
         <item>😘</item>
-        <item>🥰</item>
+        <item>💕</item>
         <item>😍</item>
         <item>😊</item>
         <item>😭</item>
         <item>😂</item>
         <item>👍</item>
         <item>🌹</item>
-        <item>🫶</item>
+        <item>💗</item>
         <item>💤</item>
         <item>🤗</item>
         <item>😉</item>
@@ -208,11 +211,8 @@
         <item>✨</item>
         <item>🎉</item>
         <item>🎂</item>
-        <item>🍭</item>
         <item>☕</item>
         <item>🍚</item>
-        <item>🐶</item>
-        <item>🐱</item>
         <item>🌙</item>
         <item>☀️</item>
         <item>🌈</item>
@@ -222,8 +222,11 @@
         <item>👀</item>
         <item>🔥</item>
         <item>💋</item>
-        <item>🧸</item>
-        <item>🎈</item>
+        <item>😜</item>
+        <item>😏</item>
+        <item>🙈</item>
+        <item>🍑</item>
+        <item>🍫</item>
     </string-array>
     <string name="mic_granted_rehold">麦克风已授权，再按住说话就能录了</string>
     <string name="mic_revoked_title">手机把麦克风权限重置了</string>

@@ -51,19 +51,22 @@
         android:textSize="15sp"
         android:visibility="gone" />
 
-    <!-- 表情面板：点 😊 弹出，微信/QQ 式多行网格（8 列、纵向滚动），点表情插到输入框光标处。
-         单行横滑在 30+ 个表情下根本够不着，收起前还得左右挪 -->
+    <!-- 表情面板：点 😊 弹出，微信/QQ 式多行网格（纵向滚动），点表情插到输入框光标处。
+         单行横滑在 30+ 个表情下根本够不着，收起前还得左右挪。
+         列数自适应而非写死 8：窄屏（360dp）上 8 列单元格仅约 41dp，容不下
+         28sp 表情+左右 padding（约 48dp+），每个表情两侧都被裁（真机反馈）。 -->
     <GridView
         android:id="@+id/emojiPanel"
         android:layout_width="match_parent"
         android:layout_height="232dp"
         android:background="@color/white"
-        android:numColumns="8"
+        android:numColumns="auto_fit"
+        android:columnWidth="56dp"
         android:paddingHorizontal="6dp"
         android:paddingVertical="6dp"
         android:horizontalSpacing="2dp"
         android:verticalSpacing="2dp"
-        android:stretchMode="columnWidth"
+        android:stretchMode="spacingWidthUniform"
         android:scrollbars="vertical"
         android:visibility="gone" />
 
