@@ -1,11 +1,32 @@
 #!/usr/bin/env python3
 """UI 自动化助手：从 uiautomator dump 里找到指定文本节点的中心坐标"""
 import re
+import os
+import shutil
 import subprocess
 import sys
 import xml.etree.ElementTree as ET
 
-ADB = "/Users/wardonguo/Library/Android/sdk/platform-tools/adb"
+
+def _find_adb():
+    """Resolve adb once, while allowing CI/Linux/other macOS SDK layouts."""
+    configured = os.environ.get("ADB_BIN")
+    if configured:
+        return configured
+    found = shutil.which("adb")
+    if found:
+        return found
+    candidates = (
+        os.path.expanduser("~/Library/Android/sdk/platform-tools/adb"),
+        os.path.expanduser("~/Android/Sdk/platform-tools/adb"),
+    )
+    for candidate in candidates:
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return "adb"
+
+
+ADB = _find_adb()
 
 
 def dump(ser):
@@ -15,29 +36,50 @@ def dump(ser):
     import time
     last = ""
     for attempt in range(12):
-        subprocess.run([ADB, "-s", ser, "shell", "uiautomator", "dump", "/sdcard/ui.xml"],
-                       capture_output=True, timeout=30)
-        xml = subprocess.run([ADB, "-s", ser, "shell", "cat", "/sdcard/ui.xml"],
-                             capture_output=True, text=True, timeout=30).stdout
-        if xml.strip().startswith("<?xml"):
+        try:
+            dumped = subprocess.run(
+                [ADB, "-s", ser, "shell", "uiautomator", "dump", "/sdcard/ui.xml"],
+                capture_output=True, text=True, timeout=30,
+            )
+            xml_result = subprocess.run(
+                [ADB, "-s", ser, "shell", "cat", "/sdcard/ui.xml"],
+                capture_output=True, text=True, timeout=30,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            last = str(exc)
+            time.sleep(2)
+            continue
+        xml = xml_result.stdout
+        if dumped.returncode == 0 and xml.strip().startswith("<?xml"):
             last = xml
             if "responding" in xml:
                 tapped = False
-                for el in ET.fromstring(xml).iter("node"):
-                    if el.get("text") == "Wait":
-                        x, y = center(el.get("bounds"))
-                        subprocess.run([ADB, "-s", ser, "shell", "input", "tap", str(x), str(y)],
-                                       capture_output=True)
-                        tapped = True
-                        break
+                try:
+                    for el in ET.fromstring(xml).iter("node"):
+                        if el.get("text") == "Wait":
+                            x, y = center(el.get("bounds"))
+                            subprocess.run(
+                                [ADB, "-s", ser, "shell", "input", "tap", str(x), str(y)],
+                                capture_output=True, timeout=10,
+                            )
+                            tapped = True
+                            break
+                except (ET.ParseError, subprocess.SubprocessError):
+                    tapped = False
                 if tapped:
                     time.sleep(2)
                     continue
                 return xml
             return xml
         # 降级: 直接从 stdout 读
-        xml = subprocess.run([ADB, "-s", ser, "exec-out", "uiautomator", "dump", "/dev/tty", "2>/dev/null"],
-                             capture_output=True, text=True, timeout=30).stdout
+        try:
+            xml = subprocess.run(
+                [ADB, "-s", ser, "exec-out", "uiautomator", "dump", "/dev/tty"],
+                capture_output=True, text=True, timeout=30,
+            ).stdout
+        except (OSError, subprocess.SubprocessError) as exc:
+            last = str(exc)
+            xml = ""
         if xml.strip().startswith("<?xml"):
             return xml
         time.sleep(2)
@@ -58,6 +100,8 @@ def find_nodes(ser, pattern):
 
 def center(bounds):
     m = re.match(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", bounds)
+    if not m:
+        raise ValueError(f"invalid UI bounds: {bounds!r}")
     x1, y1, x2, y2 = map(int, m.groups())
     return (x1 + x2) // 2, (y1 + y2) // 2
 

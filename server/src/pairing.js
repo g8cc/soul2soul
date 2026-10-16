@@ -8,11 +8,15 @@ export class PairCodeBook {
     ttlMs = 10 * 60 * 1000,
     requestMinIntervalMs = 5000,
     maxEnterAttempts = 5,
+    isPaired = () => false,
+    randomInt = crypto.randomInt,
   } = {}) {
     this.now = now;
     this.ttlMs = ttlMs;
     this.requestMinIntervalMs = requestMinIntervalMs;
     this.maxEnterAttempts = maxEnterAttempts;
+    this.isPaired = isPaired;
+    this.randomInt = randomInt;
     this.codes = new Map();          // code -> { deviceId, expires }
     this.lastRequestAt = new Map();  // deviceId -> 上次 pair.request 时间戳
   }
@@ -28,7 +32,14 @@ export class PairCodeBook {
     for (const [c, e] of this.codes) {
       if (e.deviceId === deviceId) this.codes.delete(c);
     }
-    const code = String(crypto.randomInt(0, 1000000)).padStart(6, '0');
+    // 随机碰撞概率很低，但不能让新码覆盖另一台设备仍在展示的有效码。
+    // 注入生成器后可以在单测中稳定复现碰撞，而不依赖概率。
+    let code = '';
+    for (let i = 0; i < 100; i++) {
+      const candidate = String(this.randomInt(0, 1000000)).padStart(6, '0');
+      if (!this.codes.has(candidate)) { code = candidate; break; }
+    }
+    if (!code) return { out: 'failed', reason: 'unavailable' };
     this.codes.set(code, { deviceId, expires: now + this.ttlMs });
     return { out: 'code', code };
   }
@@ -54,6 +65,11 @@ export class PairCodeBook {
       return { out: 'failed', reason: 'self_pair' };
     }
     const a = pending.deviceId, b = deviceId;
+    // 配对码在对方设备上展示期间，另一端可能已经被别的连接配对。
+    // 不能消费这个码后再覆盖现有关系，否则会留下单向脏 pairing。
+    if (this.isPaired(a) || this.isPaired(b)) {
+      return { out: 'failed', reason: 'already_paired' };
+    }
     const token = crypto.randomBytes(16).toString('hex');
     this.codes.delete(code);
     return { out: 'paired', a, b, token };

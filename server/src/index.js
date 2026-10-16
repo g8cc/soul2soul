@@ -26,6 +26,7 @@ const MESSAGES_FILE = process.env.S2S_MESSAGES_FILE || path.join(path.dirname(DA
 const HISTORY_FILE = process.env.S2S_HISTORY_FILE || path.join(path.dirname(DATA_FILE), 'history.json');
 const VOICE_DIR = path.join(path.dirname(MESSAGES_FILE), 'voice');
 const VOICE_MAX_BYTES = 1024 * 1024; // 30s AAC ≈ 300KB，1MB 封顶
+const VOICE_ORPHAN_TTL_MS = 60 * 60 * 1000;
 const PAIR_CODE_TTL_MS = Number(process.env.PAIR_CODE_TTL_MS || 10 * 60 * 1000);
 const PAIR_ENTER_MAX_ATTEMPTS = Number(process.env.PAIR_ENTER_MAX_ATTEMPTS || 5);
 const PAIR_REQUEST_MIN_INTERVAL_MS = 5000;
@@ -45,11 +46,21 @@ try {
   console.log(`[pair] loaded ${Object.keys(pairings).length} pairing entries`);
 } catch { /* 首次启动无文件 */ }
 
+function saveJsonAtomic(file, value, label) {
+  const tmp = file + '.tmp';
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(tmp, JSON.stringify(value, null, 2));
+    fs.renameSync(tmp, file);
+    return true;
+  } catch (err) {
+    console.error(`[persist] ${label} failed: ${err.message}`);
+    try { fs.rmSync(tmp, { force: true }); } catch { /* 保留原文件，等待下次重试 */ }
+    return false;
+  }
+}
 function savePairings() {
-  fs.mkdirSync(path.dirname(DATA_FILE), { recursive: true });
-  const tmp = DATA_FILE + '.tmp';
-  fs.writeFileSync(tmp, JSON.stringify(pairings, null, 2));
-  fs.renameSync(tmp, DATA_FILE);
+  return saveJsonAtomic(DATA_FILE, pairings, 'pairings');
 }
 
 // ---------- 历史配对关系（找回TA / 摇一摇复配的依据）----------
@@ -60,10 +71,7 @@ try {
   console.log(`[recall] loaded ${recallBook.history.size} history entries`);
 } catch { /* 首次启动无文件 */ }
 function saveHistory() {
-  fs.mkdirSync(path.dirname(HISTORY_FILE), { recursive: true });
-  const tmp = HISTORY_FILE + '.tmp';
-  fs.writeFileSync(tmp, JSON.stringify(recallBook.snapshot(), null, 2));
-  fs.renameSync(tmp, HISTORY_FILE);
+  return saveJsonAtomic(HISTORY_FILE, recallBook.snapshot(), 'history');
 }
 
 // 存量回填：本功能上线前绑定的老配对没有 history 行，不补的话这对情侣一旦解绑
@@ -85,10 +93,17 @@ function saveHistory() {
 
 /** 建立/重建配对关系并通知双方：pair.enter 与召回绑定共用 */
 function bindPair(a, b) {
+  if (pairingOf(a) || pairingOf(b)) return false;
   const token = crypto.randomBytes(16).toString('hex');
+  const oldA = pairings[a];
+  const oldB = pairings[b];
   pairings[a] = { peer: b, token };
   pairings[b] = { peer: a, token };
-  savePairings();
+  if (!savePairings()) {
+    if (oldA) pairings[a] = oldA; else delete pairings[a];
+    if (oldB) pairings[b] = oldB; else delete pairings[b];
+    return false;
+  }
   recallBook.recordPair(a, b);
   saveHistory();
   const wa = online.get(a), wb = online.get(b);
@@ -96,6 +111,7 @@ function bindPair(a, b) {
   if (wa) { wa.authed = true; send(wa, { type: 'paired', token, peerOnline: !!wb }); }
   if (wb) { wb.authed = true; send(wb, { type: 'paired', token, peerOnline: !!wa }); }
   console.log(`[pair] bound ${a} <-> ${b}`);
+  return true;
 }
 
 // ---------- 离线留言（文字/语音）持久化 ----------
@@ -111,11 +127,41 @@ try {
   console.log(`[msg] loaded ${msgBook.totalCount()} message entries`);
 } catch { msgBook = new MessageBook(); /* 首次启动无文件 */ }
 
+// 上传完成但尚未提交 msg.post 的语音没有消息索引，不能无限期留在磁盘。
+// 运行时登记归属，重启后以留言箱为准，旧孤儿按 mtime 延迟清理。
+const voiceUploads = new Map(); // voiceId -> { owner, ts }
+function referencedVoiceIds() {
+  const ids = new Set();
+  for (const items of msgBook.inbox.values()) {
+    for (const item of items) {
+      if (item && item.kind === 'voice' && typeof item.voiceId === 'string') ids.add(item.voiceId);
+    }
+  }
+  return ids;
+}
+function cleanupOrphanVoices() {
+  const referenced = referencedVoiceIds();
+  fs.readdir(VOICE_DIR, { withFileTypes: true }, (err, entries) => {
+    if (err) { if (err.code !== 'ENOENT') console.warn(`[voice] scan failed: ${err.message}`); return; }
+    for (const entry of entries) {
+      if (!entry.isFile() || !/^[0-9a-f-]{36}\.m4a$/i.test(entry.name)) continue;
+      const voiceId = entry.name.slice(0, -4);
+      if (referenced.has(voiceId) || voiceUploads.has(voiceId)) continue;
+      const file = path.join(VOICE_DIR, entry.name);
+      fs.stat(file, (statErr, st) => {
+        if (!statErr && Date.now() - st.mtimeMs >= VOICE_ORPHAN_TTL_MS) {
+          fs.rm(file, { force: true }, (rmErr) => {
+            if (rmErr) console.warn(`[voice] orphan cleanup failed: ${rmErr.message}`);
+          });
+        }
+      });
+    }
+  });
+}
+cleanupOrphanVoices();
+
 function saveMessages() {
-  fs.mkdirSync(path.dirname(MESSAGES_FILE), { recursive: true });
-  const tmp = MESSAGES_FILE + '.tmp';
-  fs.writeFileSync(tmp, JSON.stringify({ inbox: Object.fromEntries(msgBook.inbox) }, null, 2));
-  fs.renameSync(tmp, MESSAGES_FILE);
+  return saveJsonAtomic(MESSAGES_FILE, { inbox: Object.fromEntries(msgBook.inbox) }, 'messages');
 }
 function deleteVoices(items) {
   for (const m of items) {
@@ -131,6 +177,7 @@ const pairBook = new PairCodeBook({
   ttlMs: PAIR_CODE_TTL_MS,
   requestMinIntervalMs: PAIR_REQUEST_MIN_INTERVAL_MS,
   maxEnterAttempts: PAIR_ENTER_MAX_ATTEMPTS,
+  isPaired: (deviceId) => Boolean(pairings[deviceId]),
 });
 const lastInviteAt = new Map();     // deviceId -> 上次 invite 时间戳
 
@@ -140,6 +187,14 @@ setInterval(() => pairBook.sweep(), 60 * 1000).unref();
 setInterval(() => {
   const removed = msgBook.sweep();
   if (removed.length) { deleteVoices(removed); saveMessages(); }
+  const now = Date.now();
+  for (const [voiceId, upload] of voiceUploads) {
+    if (now - upload.ts >= VOICE_ORPHAN_TTL_MS) {
+      voiceUploads.delete(voiceId);
+      fs.rm(path.join(VOICE_DIR, voiceId + '.m4a'), { force: true }, () => {});
+    }
+  }
+  cleanupOrphanVoices();
 }, 60 * 1000).unref();
 // 清扫召回挂起（60s 无答复）与过期历史（30 天）：过期通知发起方，历史有删减即落盘
 setInterval(() => {
@@ -161,8 +216,16 @@ function send(ws, obj) {
       console.log(`[relay] ${ws.deviceId || '?'} <- ${obj.type}` +
         (quiet ? '' : ` ${JSON.stringify(obj).slice(0, 120)}`));
     }
-    ws.send(JSON.stringify(obj));
+    try {
+      ws.send(JSON.stringify(obj));
+      return true;
+    } catch (err) {
+      // readyState 检查和 send 之间存在关闭竞态；不能让一个掉线连接
+      // 的同步异常冒泡到 WebSocket 业务回调，进而影响整个进程。
+      console.log(`[ws] ${ws.deviceId || '?'} send failed: ${err.message}`);
+    }
   }
+  return false;
 }
 function iceServers() {
   // 纯逻辑在 turn.js（单测覆盖）：reverse-proxy 限时凭证 + stun/turn udp+tcp 三 urls
@@ -189,22 +252,36 @@ const server = http.createServer((req, res) => {
     const deviceId = authedDevice(url);
     if (!deviceId) { res.writeHead(401); res.end('{}'); return; }
     let size = 0;
+    let tooLarge = false;
     const chunks = [];
     req.on('data', (c) => {
+      if (tooLarge) return;
       size += c.length;
-      if (size > VOICE_MAX_BYTES) { req.destroy(); res.writeHead(413); res.end('{}'); return; }
+      if (size > VOICE_MAX_BYTES) {
+        tooLarge = true;
+        chunks.length = 0;
+        // 先给出完整 HTTP 响应，再继续消费请求流；req.destroy() 会把
+        // 客户端看到的 413 变成连接重置，移动网络下容易被误判为断网。
+        res.writeHead(413, { 'content-type': 'application/json' });
+        res.end('{}');
+        req.resume();
+        return;
+      }
       chunks.push(c);
     });
     req.on('end', () => {
-      if (res.headersSent || size === 0) return;
+      if (res.headersSent || tooLarge) return;
+      if (size === 0) { res.writeHead(400, { 'content-type': 'application/json' }); res.end('{}'); return; }
       const id = crypto.randomUUID();
       try {
         fs.mkdirSync(VOICE_DIR, { recursive: true });
         fs.writeFileSync(path.join(VOICE_DIR, id + '.m4a'), Buffer.concat(chunks));
+        voiceUploads.set(id, { owner: deviceId, ts: Date.now() });
       } catch { res.writeHead(500); res.end('{}'); return; }
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end(JSON.stringify({ id }));
     });
+    req.on('aborted', () => {});
     req.on('error', () => {});
     return;
   }
@@ -218,7 +295,13 @@ const server = http.createServer((req, res) => {
     fs.stat(file, (err, st) => {
       if (err) { res.writeHead(404); res.end(); return; }
       res.writeHead(200, { 'content-type': 'audio/mp4', 'content-length': st.size });
-      fs.createReadStream(file).pipe(res);
+      const stream = fs.createReadStream(file);
+      stream.on('error', (streamErr) => {
+        console.warn(`[voice] read failed: ${streamErr.message}`);
+        if (!res.headersSent) res.writeHead(404);
+        res.destroy();
+      });
+      stream.pipe(res);
     });
     return;
   }
@@ -291,7 +374,7 @@ wss.on('connection', (ws) => {
       case 'pair.enter': {
         const r = pairBook.enter(ws, ws.deviceId, msg.code);
         if (r.out === 'failed') { send(ws, { type: 'pair.failed', reason: r.reason }); break; }
-        bindPair(r.a, r.b);
+        if (!bindPair(r.a, r.b)) send(ws, { type: 'pair.failed', reason: 'server_storage' });
         break;
       }
       case 'pair.recall': {
@@ -331,7 +414,10 @@ wss.on('connection', (ws) => {
           if (online.get(b)) send(online.get(b), { type: 'pair.recall_failed', reason: 'peer_busy' });
           break;
         }
-        bindPair(a, b);
+        if (!bindPair(a, b)) {
+          if (online.get(a)) send(online.get(a), { type: 'pair.recall_failed', reason: 'server_storage' });
+          if (online.get(b)) send(online.get(b), { type: 'pair.recall_failed', reason: 'server_storage' });
+        }
         break;
       }
       case 'pair.shake': {
@@ -347,7 +433,10 @@ wss.on('connection', (ws) => {
           if (online.get(b)) send(online.get(b), { type: 'pair.recall_failed', reason: 'peer_busy' });
           break;
         }
-        bindPair(a, b);
+        if (!bindPair(a, b)) {
+          if (online.get(a)) send(online.get(a), { type: 'pair.recall_failed', reason: 'server_storage' });
+          if (online.get(b)) send(online.get(b), { type: 'pair.recall_failed', reason: 'server_storage' });
+        }
         break;
       }
 
@@ -390,9 +479,16 @@ wss.on('connection', (ws) => {
         if (!ws.authed) break;
         const peer = peerDeviceId(ws.deviceId);
         if (!peer) { send(ws, { type: 'unpaired' }); break; }
+        const oldSelfPair = pairings[ws.deviceId];
+        const oldPeerPair = pairings[peer];
         delete pairings[ws.deviceId];
         delete pairings[peer];
-        savePairings();
+        if (!savePairings()) {
+          pairings[ws.deviceId] = oldSelfPair;
+          pairings[peer] = oldPeerPair;
+          send(ws, { type: 'error', reason: 'server_storage' });
+          break;
+        }
         // 历史关系保留（找回TA 的凭据），只清挂起的召回/摇动
         recallBook.settle(ws.deviceId);
         recallBook.settle(peer);
@@ -409,15 +505,29 @@ wss.on('connection', (ws) => {
         if (!ws.authed) break;
         const peer = peerDeviceId(ws.deviceId);
         if (!peer) { send(ws, { type: 'msg.failed', reason: 'unpaired' }); break; }
+        if (msg.kind === 'voice' && /^[0-9a-f-]{36}$/i.test(String(msg.voiceId || ''))) {
+          const upload = voiceUploads.get(String(msg.voiceId).toLowerCase()) || voiceUploads.get(String(msg.voiceId));
+          if (!upload || upload.owner !== ws.deviceId) {
+            send(ws, { type: 'msg.failed', reason: 'voice_not_uploaded' });
+            break;
+          }
+        }
         const r = msgBook.post(ws.deviceId, peer, msg);
         if (r.out === 'rejected') {
-          // 被拒的语音文件是孤儿（收件人永远看不到它）：立即删掉
+          // 被拒的语音文件是孤儿（收件人永远看不到它）：只清理当前
+          // 设备自己上传且已登记的文件，避免任意请求借机删别人的文件。
           if (msg.kind === 'voice' && msg.voiceId) {
-            fs.rm(path.join(VOICE_DIR, msg.voiceId + '.m4a'), { force: true }, () => {});
+            const voiceId = String(msg.voiceId).toLowerCase();
+            const upload = voiceUploads.get(voiceId);
+            if (upload && upload.owner === ws.deviceId) {
+              voiceUploads.delete(voiceId);
+              fs.rm(path.join(VOICE_DIR, voiceId + '.m4a'), { force: true }, () => {});
+            }
           }
           send(ws, { type: 'msg.failed', reason: r.reason });
           break;
         }
+        if (r.item.kind === 'voice') voiceUploads.delete(r.item.voiceId.toLowerCase());
         saveMessages();
         deleteVoices(r.dropped); // 超容量挤掉的最旧语音一并删文件
         send(ws, { type: 'msg.sent', id: r.item.id });

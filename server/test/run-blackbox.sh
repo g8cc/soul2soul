@@ -3,8 +3,11 @@
 # 关键护栏：
 #  - 数据文件走 mktemp，绝不触碰 server/data/pairings.json（生产配对关系所在）
 #  - cwd 必须是 server/（两个黑盒脚本从 process.cwd() 解析 node_modules/ws）
-set -eu
+set -Eeuo pipefail
 cd "$(cd "$(dirname "$0")/.." && pwd)"
+
+command -v node >/dev/null 2>&1 || { echo "T3 需要 node" >&2; exit 2; }
+command -v curl >/dev/null 2>&1 || { echo "T3 需要 curl" >&2; exit 2; }
 
 PORT=$(node test/port.mjs)
 TMPDATA=$(mktemp -d)

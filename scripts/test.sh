@@ -7,24 +7,64 @@
 #   scripts/test.sh --e2e        追加 T4 模拟器 E2E（需 2 台已 boot 设备 + 本地信令 + coturn）
 #
 # 环境约定：仓库无 gradlew（Android Studio 之外的命令行构建走 ~/tools 下的 JDK17 + Gradle 8.7）
-set -u
+set -Eeuo pipefail
 cd "$(cd "$(dirname "$0")/.." && pwd)"
 ROOT="$PWD"
-export JAVA_HOME="${JAVA_HOME:-$HOME/tools/jdk17/jdk-17.0.2.jdk/Contents/Home}"
+if [ -n "${JAVA_HOME:-}" ] && [ ! -x "$JAVA_HOME/bin/java" ]; then
+  echo "警告: JAVA_HOME 无效($JAVA_HOME)，尝试自动探测 JDK17" >&2
+  unset JAVA_HOME
+fi
+if [ -z "${JAVA_HOME:-}" ]; then
+  for candidate in \
+    "$HOME/tools/jdk17/jdk-17.0.2.jdk/Contents/Home" \
+    "$HOME/tools/jdk17/usr/lib/jvm/java-17-openjdk-amd64" \
+    "/usr/lib/jvm/java-17-openjdk-amd64"; do
+    if [ -x "$candidate/bin/java" ]; then JAVA_HOME="$candidate"; export JAVA_HOME; break; fi
+  done
+fi
+if [ -n "${ANDROID_HOME:-}" ] && [ ! -d "$ANDROID_HOME/platform-tools" ]; then
+  echo "警告: ANDROID_HOME 无效($ANDROID_HOME)，尝试自动探测 Android SDK" >&2
+  unset ANDROID_HOME
+fi
+if [ -z "${ANDROID_HOME:-}" ]; then
+  for candidate in "$HOME/tools/android-sdk" "$HOME/Library/Android/sdk" "$HOME/Android/Sdk"; do
+    if [ -d "$candidate/platform-tools" ]; then ANDROID_HOME="$candidate"; export ANDROID_HOME; break; fi
+  done
+fi
+if [ -n "${ANDROID_HOME:-}" ] && [ -z "${ANDROID_SDK_ROOT:-}" ]; then
+  export ANDROID_SDK_ROOT="$ANDROID_HOME"
+fi
 GRADLE="${GRADLE_BIN:-$HOME/tools/gradle-8.7/bin/gradle}"
 COVERAGE=0
 E2E=0
 ONLY=""
+STRICT_AUDIT=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --tier) ONLY="${2:-}"; shift 2 ;;
+    --tier)
+      if [ $# -lt 2 ]; then
+        echo "--tier 必须是 t0|t1|t2|t3|t4" >&2
+        exit 2
+      fi
+      case "$2" in
+        t0|t1|t2|t3|t4) ;;
+        *)
+        echo "--tier 必须是 t0|t1|t2|t3|t4" >&2
+        exit 2
+        ;;
+      esac
+      ONLY="$2"; shift 2 ;;
     --coverage) COVERAGE=1; shift ;;
     --e2e) E2E=1; shift ;;
+    --strict-audit) STRICT_AUDIT=1; shift ;;
     -h|--help) grep '^#' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
-    *) echo "未知参数: $1（--tier/--coverage/--e2e）" >&2; exit 2 ;;
+    *) echo "未知参数: $1（--tier/--coverage/--e2e/--strict-audit）" >&2; exit 2 ;;
   esac
 done
+
+# 显式指定 T4 时不应因为漏写 --e2e 而静默 SKIP。
+[ "$ONLY" = t4 ] && E2E=1
 
 declare -a SUMMARY=()
 overall=0
@@ -57,8 +97,14 @@ t0_static() {
   for f in "$ROOT"/scripts/*.sh "$ROOT"/server/test/*.sh; do
     [ -e "$f" ] && { bash -n "$f" || { echo "bash -n: $f"; fail=1; }; }
   done
-  for f in "$ROOT"/server/src/*.js "$ROOT"/server/*.cjs "$ROOT"/server/test/*.mjs; do
+  for f in "$ROOT"/server/src/*.js "$ROOT"/server/*.cjs "$ROOT"/server/test/*.mjs "$ROOT"/server/test/*.cjs; do
     [ -e "$f" ] && { node --check "$f" || { echo "node --check: $f"; fail=1; }; }
+  done
+  for f in "$ROOT"/scripts/*.py; do
+    if [ -e "$f" ]; then
+      python3 -c 'import pathlib,sys; p=pathlib.Path(sys.argv[1]); compile(p.read_text(), str(p), "exec")' "$f" \
+        || { echo "python syntax: $f"; fail=1; }
+    fi
   done
   node -e "JSON.parse(require('fs').readFileSync('$ROOT/server/package.json','utf8'))" || fail=1
   python3 - "$ROOT" <<'PY' || fail=1
@@ -106,9 +152,30 @@ PY
     echo "静态检查: 通知动作按钮禁 icon=0（折叠态不可见），用 res/drawable/ic_notif_* 真实图标"
     fail=1
   fi
-  # 审计矩阵空格（AUDIT.md L1）：不算失败，但每次跑测试都必须看见欠了几格
+  # 审计矩阵：GAP 是确认存在的问题，必须失败；⬜ 是尚未验证的欠债，
+  # 日常模式告警，严格审计/发版模式失败。只在矩阵文件内统计，避免把
+  # AUDIT.md 的说明文字误当成状态。
   if [ -f "$ROOT/docs/AUDIT-MATRIX.md" ]; then
-    echo "审计矩阵: $(grep -c '⬜' "$ROOT/docs/AUDIT-MATRIX.md" || true) 个空格(⬜)待填 — docs/AUDIT-MATRIX.md"
+    local matrix="$ROOT/docs/AUDIT-MATRIX.md" blanks gaps
+    blanks=$(grep -E '^\|' "$matrix" | grep -o '⬜' | wc -l | tr -d ' ')
+    gaps=$(grep -E '^\|' "$matrix" | grep -oE '(^|[^[:alnum:]_])GAP([^[:alnum:]_]|$)' | wc -l | tr -d ' ')
+    echo "审计矩阵: ${blanks:-0} 个空格(⬜)待填，${gaps:-0} 个 GAP — docs/AUDIT-MATRIX.md"
+    if [ "${gaps:-0}" -gt 0 ]; then
+      echo "静态检查: AUDIT-MATRIX.md 仍登记 GAP，必须先修复并填回 PASS/N-A" >&2
+      fail=1
+    fi
+    if [ "$STRICT_AUDIT" = 1 ] && [ "${blanks:-0}" -gt 0 ]; then
+      echo "严格审计: AUDIT-MATRIX.md 仍有未验证格子(⬜)" >&2
+      fail=1
+    fi
+  else
+    echo "静态检查: 缺少 docs/AUDIT-MATRIX.md" >&2
+    fail=1
+  fi
+  if grep -RInE '/Users/wardonguo/|Documents/work/code/AI' \
+      "$ROOT/scripts/e2e.sh" "$ROOT/scripts/drive-test.sh" "$ROOT/scripts/ui.py" >/dev/null 2>&1; then
+    echo "静态检查: E2E harness 禁止绑定其他开发机绝对路径" >&2
+    fail=1
   fi
   [ "$fail" -eq 0 ]
 }
@@ -116,6 +183,14 @@ PY
 t1_android_unit() {
   if [ ! -x "$GRADLE" ]; then
     echo "gradle 不存在: $GRADLE（设 GRADLE_BIN 环境变量后可启用 T1）"
+    return 2
+  fi
+  if [ -z "${JAVA_HOME:-}" ] && ! command -v java >/dev/null 2>&1; then
+    echo "JDK17 不存在（设置 JAVA_HOME 或加入 PATH 后可启用 T1）"
+    return 2
+  fi
+  if [ -z "${ANDROID_HOME:-}" ] || [ ! -d "$ANDROID_HOME/platform-tools" ]; then
+    echo "Android SDK 不存在（设置 ANDROID_HOME 后可启用 T1）"
     return 2
   fi
   local args=(-p "$ROOT/app" :app:testProdDebugUnitTest -q)
@@ -147,15 +222,32 @@ t3_blackbox() {
 }
 
 t4_e2e() {
-  local ADB="${ADB_BIN:-$HOME/Library/Android/sdk/platform-tools/adb}"
-  if [ ! -x "$ADB" ]; then echo "adb 不存在: $ADB"; return 2; fi
+  local ADB="${ADB_BIN:-$(command -v adb 2>/dev/null || true)}"
+  if [ -z "$ADB" ]; then
+    for candidate in "$HOME/Library/Android/sdk/platform-tools/adb" "$HOME/Android/Sdk/platform-tools/adb"; do
+      if [ -x "$candidate" ]; then ADB="$candidate"; break; fi
+    done
+  fi
+  if [ -z "$ADB" ] || [ ! -x "$ADB" ]; then echo "adb 不存在，请设置 ADB_BIN"; return 2; fi
   local devices
-  devices=$("$ADB" devices 2>/dev/null | grep -cw device)
+  if ! devices=$(python3 - "$ADB" <<'PY'
+import subprocess, sys
+try:
+    out = subprocess.run([sys.argv[1], "devices"], capture_output=True, text=True, timeout=10)
+except (OSError, subprocess.TimeoutExpired):
+    raise SystemExit(1)
+count = sum(1 for line in out.stdout.splitlines()[1:] if line.split()[1:2] == ["device"])
+print(count)
+PY
+  ); then
+    echo "adb daemon 在 10 秒内未响应，T4 SKIP" >&2
+    return 2
+  fi
   if [ "${devices:-0}" -lt 2 ]; then
     echo "需要 2 台在线模拟器/设备（当前 $devices），见 docs/TESTING.md T4 前置"
     return 2
   fi
-  bash "$ROOT/scripts/e2e.sh"
+  ADB_BIN="$ADB" bash "$ROOT/scripts/e2e.sh"
 }
 
 run_tier t0 t0_static

@@ -83,6 +83,14 @@ const closed = (ws) => new Promise((r) => ws.on('close', r));
   await sleep(1100);
 
   // 3) 语音：A 上传 → 留言 → B 上线取箱下载；非收件人下载被拒
+  const emptyUpload = await fetch(`${HTTP}/voice?deviceId=msgDevA&token=${tokens.a}`, {
+    method: 'POST', body: Buffer.alloc(0),
+  });
+  check('空语音上传快速返回 400（不能悬挂）', emptyUpload.status === 400);
+  const oversizedUpload = await fetch(`${HTTP}/voice?deviceId=msgDevA&token=${tokens.a}`, {
+    method: 'POST', body: Buffer.alloc(1024 * 1024 + 1, 7),
+  });
+  check('超限语音上传返回 413（不能连接重置）', oversizedUpload.status === 413);
   const blob = crypto.randomBytes(2048);
   const up = await fetch(`${HTTP}/voice?deviceId=msgDevA&token=${tokens.a}`, {
     method: 'POST', body: blob,
@@ -109,6 +117,9 @@ const closed = (ws) => new Promise((r) => ws.on('close', r));
   check('B 上线收到留言箱（2 条：被拒的不入库）', Array.isArray(inbox.items) && inbox.items.length === 2);
   const vItem = inbox.items.find((m) => m.kind === 'voice');
   check('留言箱含语音条目', !!vItem && vItem.durMs === 4200 && vItem.from === 'msgDevA');
+  B2.send({ type: 'msg.post', kind: 'voice', voiceId: upJson.id, durMs: 4200 });
+  const ownerFail = await B2.waitFor((m) => m.type === 'msg.failed', 3000, 'msg.failed(voice-owner)');
+  check('非上传者不能盗用语音文件', ownerFail.reason === 'voice_not_uploaded');
   const dl = await fetch(`${HTTP}/voice/${vItem.voiceId}?deviceId=msgDevB&token=${tokens.b}`);
   const got = Buffer.from(await dl.arrayBuffer());
   check('收件人下载语音内容一致', dl.status === 200 && got.equals(blob));

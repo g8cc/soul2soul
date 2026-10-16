@@ -9,7 +9,7 @@
 | T0 | 静态检查 | `bash -n scripts/*.sh`；`node --check` 全部服务端 JS；AndroidManifest XML 良构（python minidom）；package.json JSON 校验 | 无 | ✅ |
 | T1 | Android JVM 单测 | `gradle -p app :app:testProdDebugUnitTest` | JDK17 + Gradle 8.7 | ✅ |
 | T2 | Server 单测 | `node --test 'test/*.test.mjs'`（pairing/turn/messages 纯逻辑） | node ≥ 22 | ✅ |
-| T3 | 协议黑盒 | 随机空闲端口起临时服务器（`S2S_DATA_FILE=$(mktemp)`）→ 等 `/health` → `protocol-test.cjs`（17 项）+ `smoke-test.cjs`（15 项）+ `msg-blackbox.cjs`（16 项：离线留言全链路含语音鉴权）→ trap 清理 | node | ✅ |
+| T3 | 协议黑盒 | 随机空闲端口起临时服务器（`S2S_DATA_FILE=$(mktemp)`）→ 等 `/health` → 协议/冒烟/留言/召回/存量回填黑盒 → trap 清理 | node | ✅ |
 | T4 | 模拟器/真机 E2E | 复用 `scripts/e2e.sh`，需 adb + ≥2 台已 boot 设备 | adb、设备 | ❌ 门控 |
 
 关键保证：**测试永不写 `server/data/pairings.json`**（T3 用临时数据文件），跑完无残留 node 进程。
@@ -21,7 +21,25 @@ bash scripts/test.sh              # T0–T3，秒级到分钟级，日常默认
 bash scripts/test.sh --tier t2    # 只跑某一层：t0|t1|t2|t3|t4
 bash scripts/test.sh --coverage   # 追加覆盖率（见 §5）
 bash scripts/test.sh --e2e        # 探测到 adb + 2 台 boot 设备才执行 T4，否则 SKIP
+bash scripts/test.sh --strict-audit # 未填矩阵格子(⬜)也让 T0 FAIL，用于发版前审计
 ```
+
+参数和退出码是门禁的一部分：`--tier` 只接受 `t0`、`t1`、`t2`、`t3`、`t4`；显式指定
+`--tier t4` 会自动启用 T4。各层函数返回 `0=PASS`、`1=FAIL`、`2=SKIP`，汇总中的
+`SKIP` 不会伪装成 `PASS`；日常模式允许 T4 因没有双设备而 SKIP，发版前应人工确认。
+T0 始终拦截矩阵中的 `GAP`；`--strict-audit` 额外拦截未填的 `⬜`。
+
+T4/E2E 不再依赖某台开发机的绝对路径，可用以下变量接入 CI 或其他电脑：
+
+```bash
+ADB_BIN=/path/to/adb EMU_BIN=/path/to/emulator \
+APK_PATH=/tmp/s2s-emu.apk E2E_S1=emulator-5554 E2E_S2=emulator-5556 \
+bash scripts/test.sh --e2e
+```
+
+失败时 `scripts/e2e.sh` 返回非零并保留日志/截图目录；只有本机由脚本启动的模拟器会在
+`KEEP_OFF=1` 时被清理，不会误杀用户已经启动的设备。`scripts/drive-test.sh` 也遵循同一
+套环境变量和 `PASS/FAIL` 退出语义。
 
 环境事实（别踩坑）：
 - `app/` **没有 gradlew 包装器**，用系统 Gradle：

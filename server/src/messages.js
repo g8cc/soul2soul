@@ -49,7 +49,7 @@ export class MessageBook {
       if (text.length > this.maxTextChars) return { out: 'rejected', reason: 'too_long' };
       item = { id: this.pickId(msg.id), from, kind: 'text', text, ts: now, expires: now + this.ttlMs };
     } else if (msg.kind === 'voice') {
-      const voiceId = String(msg.voiceId || '');
+      const voiceId = String(msg.voiceId || '').toLowerCase();
       if (!/^[0-9a-f-]{36}$/i.test(voiceId)) return { out: 'rejected', reason: 'bad_voice_id' };
       const durMs = Number(msg.durMs) || 0;
       if (durMs <= 0 || durMs > 60_000) return { out: 'rejected', reason: 'bad_duration' };
