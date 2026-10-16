@@ -51,24 +51,21 @@
         android:textSize="15sp"
         android:visibility="gone" />
 
-    <!-- 表情面板：点 😊 弹出，点表情插到输入框光标处（微信式）。和会话页飘表情不同，这里是"发进留言" -->
-    <HorizontalScrollView
+    <!-- 表情面板：点 😊 弹出，微信/QQ 式多行网格（8 列、纵向滚动），点表情插到输入框光标处。
+         单行横滑在 30+ 个表情下根本够不着，收起前还得左右挪 -->
+    <GridView
         android:id="@+id/emojiPanel"
         android:layout_width="match_parent"
-        android:layout_height="wrap_content"
+        android:layout_height="232dp"
         android:background="@color/white"
-        android:paddingHorizontal="8dp"
-        android:scrollbars="none"
-        android:visibility="gone">
-
-        <LinearLayout
-            android:id="@+id/emojiRow"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:gravity="center_vertical"
-            android:orientation="horizontal"
-            android:paddingVertical="6dp" />
-    </HorizontalScrollView>
+        android:numColumns="8"
+        android:paddingHorizontal="6dp"
+        android:paddingVertical="6dp"
+        android:horizontalSpacing="2dp"
+        android:verticalSpacing="2dp"
+        android:stretchMode="columnWidth"
+        android:scrollbars="vertical"
+        android:visibility="gone" />
 
     <LinearLayout
         android:layout_width="match_parent"

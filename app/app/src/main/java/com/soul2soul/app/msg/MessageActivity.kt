@@ -15,6 +15,7 @@ import android.view.ViewGroup
 import android.view.MotionEvent
 import android.widget.Button
 import android.widget.EditText
+import android.widget.GridView
 import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
@@ -126,14 +127,8 @@ class MessageActivity : AppCompatActivity() {
         btnSend.setOnClickListener { sendText() }
         btnMic.setOnClickListener { setVoiceMode(!voiceMode) }
         btnEmoji.setOnClickListener { toggleEmojiPanel() }
-        // 表情条按资源列表生成，加表情只改 strings.xml 的 msg_emojis
-        val emojiRow = findViewById<android.widget.LinearLayout>(R.id.emojiRow)
-        for (e in resources.getStringArray(R.array.msg_emojis)) {
-            val tv = TextView(this, null, 0, R.style.MsgEmoji)
-            tv.text = e
-            tv.setOnClickListener { insertEmoji(e) }
-            emojiRow.addView(tv)
-        }
+        // 微信/QQ 式多行表情网格：加表情只改 strings.xml 的 msg_emojis
+        (findViewById<GridView>(R.id.emojiPanel)).adapter = emojiAdapter
         btnHoldTalk.setOnTouchListener { _, ev -> onHoldTouch(ev) }
         syncFromStore()
         InboxStore.addListener(storeListener)
@@ -587,6 +582,23 @@ class MessageActivity : AppCompatActivity() {
         if (playingId != null) {
             playingId = null
             adapter.notifyItemRangeChanged(0, shown.size)
+        }
+    }
+
+    // ---------- 表情网格 ----------
+
+    private val emojiItems by lazy { resources.getStringArray(R.array.msg_emojis) }
+    private val emojiAdapter = object : android.widget.BaseAdapter() {
+        override fun getCount(): Int = emojiItems.size
+        override fun getItem(position: Int): Any = emojiItems[position]
+        override fun getItemId(position: Int): Long = position.toLong()
+        override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
+            val tv = (convertView as? TextView)
+                ?: TextView(this@MessageActivity, null, 0, R.style.MsgEmoji)
+                    .apply { gravity = Gravity.CENTER }
+            tv.text = emojiItems[position]
+            tv.setOnClickListener { insertEmoji(emojiItems[position]) }
+            return tv
         }
     }
 
