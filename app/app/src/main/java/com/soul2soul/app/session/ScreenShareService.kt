@@ -512,9 +512,11 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
             .setContentText(text)
             .setContentIntent(consentIntent)
             .setOngoing(true)
-            .addAction(0, if (micMuted) getString(R.string.action_unmute) else getString(R.string.action_mute), muteIntent)
-            .addAction(0, if (ctlAllowed) getString(R.string.ctl_disallow) else getString(R.string.ctl_allow), ctlIntent)
-            .addAction(0, getString(R.string.action_end), stopIntent)
+            // 动作必须带图标：Android 8+ 通知折叠态只渲染图标按钮，icon=0 的纯文字按钮
+            // 要展开才显示，而 MIUI/HyperOS 常驻通知默认折叠——v0.2.46 真机实锤"按钮时有时无"
+            .addAction(R.drawable.ic_notif_mic, if (micMuted) getString(R.string.action_unmute) else getString(R.string.action_mute), muteIntent)
+            .addAction(R.drawable.ic_notif_ctl, if (ctlAllowed) getString(R.string.ctl_disallow) else getString(R.string.ctl_allow), ctlIntent)
+            .addAction(R.drawable.ic_notif_end, getString(R.string.action_end), stopIntent)
             .build()
     }
 

@@ -100,6 +100,12 @@ PY
     echo "静态检查: 悬浮窗 wm.addView 缺配对 wm.removeView:$unpaired"
     fail=1
   fi
+  # v0.2.46 真机踩坑锁定：Android 8+ 通知折叠态只渲染图标按钮，
+  # addAction(0=无图标) 在 MIUI/HyperOS 默认折叠下=按钮"消失"
+  if grep -rn --include='*.kt' "addAction(0," "$ROOT/app/app/src/main/java" 2>/dev/null; then
+    echo "静态检查: 通知动作按钮禁 icon=0（折叠态不可见），用 res/drawable/ic_notif_* 真实图标"
+    fail=1
+  fi
   # 审计矩阵空格（AUDIT.md L1）：不算失败，但每次跑测试都必须看见欠了几格
   if [ -f "$ROOT/docs/AUDIT-MATRIX.md" ]; then
     echo "审计矩阵: $(grep -c '⬜' "$ROOT/docs/AUDIT-MATRIX.md" || true) 个空格(⬜)待填 — docs/AUDIT-MATRIX.md"

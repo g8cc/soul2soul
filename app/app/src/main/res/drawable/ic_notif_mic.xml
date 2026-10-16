@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 通知动作图标：纯色无 tint，系统按通知配色自动着色（折叠态 compact action 只渲染图标） -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:fillColor="#FF000000"
+        android:pathData="M12,14 C13.66,14 15,12.66 15,11 L15,5 C15,3.34 13.66,2 12,2 C10.34,2 9,3.34 9,5 L9,11 C9,12.66 10.34,14 12,14 Z" />
+    <path
+        android:fillColor="#FF000000"
+        android:pathData="M17,11 C17,13.76 14.76,16 12,16 C9.24,16 7,13.76 7,11 L5,11 C5,14.42 7.48,17.25 10.75,17.84 L10.75,21 L13.25,21 L13.25,17.84 C16.52,17.25 19,14.42 19,11 Z" />
+</vector>
