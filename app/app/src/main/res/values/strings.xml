@@ -184,47 +184,90 @@
         <item>💤</item>
         <item>🐱</item>
     </string-array>
-    <!-- 留言表情面板：往这里加就行，代码按列表生成。只收"常用"表情：
-         冷门占位（🧸🎈🍭🐶）换成高频聊天款（🍑🍫😜😏🙈）；
-         全部码位已用 Mi5 的 /system/fonts/NotoColorEmoji.ttf cmap 实测覆盖，
-         🥰🥺🫶 等 Unicode 9/11/14 新码位 Android 7 是方框，已换 💕💗😢；加新表情前重跑一次覆盖检查 -->
-    <string-array name="msg_emojis" translatable="false">
-        <item>❤️</item>
-        <item>😘</item>
-        <item>💕</item>
-        <item>😍</item>
+    <!-- 留言表情面板：微信式四组 tab，往对应组里加就行，代码按列表生成。
+         全部码位已用 Mi5(Android7) 的 /system/fonts/NotoColorEmoji.ttf cmap 实测覆盖
+         （v0.2.48 重跑核验：🥰🥺🫂🧡 在该字体缺字形=方框，已排除）；加新表情前重跑覆盖检查。
+         ⚠︎ 文本呈现码位（❤☀❄✌❣）必须带 U+FE0F 变体选择符，否则安卓 7 显示成黑白字符 -->
+    <string name="emoji_tab_faces">笑脸</string>
+    <string name="emoji_tab_hands">手势</string>
+    <string name="emoji_tab_hearts">爱心</string>
+    <string name="emoji_tab_misc">符号</string>
+    <string-array name="msg_emoji_faces" translatable="false">
         <item>😊</item>
-        <item>😭</item>
+        <item>😄</item>
         <item>😂</item>
-        <item>👍</item>
-        <item>🌹</item>
-        <item>💗</item>
-        <item>💤</item>
-        <item>🤗</item>
+        <item>🤣</item>
+        <item>😍</item>
+        <item>😘</item>
+        <item>💋</item>
         <item>😉</item>
-        <item>😴</item>
+        <item>😜</item>
+        <item>😝</item>
+        <item>😳</item>
+        <item>😢</item>
+        <item>😭</item>
+        <item>😅</item>
         <item>🤔</item>
         <item>😎</item>
-        <item>🙄</item>
+        <item>😴</item>
         <item>😡</item>
-        <item>💔</item>
-        <item>✨</item>
-        <item>🎉</item>
-        <item>🎂</item>
-        <item>☕</item>
-        <item>🍚</item>
-        <item>🌙</item>
-        <item>☀️</item>
-        <item>🌈</item>
-        <item>👫</item>
-        <item>💑</item>
-        <item>🙏</item>
-        <item>👀</item>
-        <item>🔥</item>
-        <item>💋</item>
-        <item>😜</item>
+        <item>🙄</item>
         <item>😏</item>
         <item>🙈</item>
+    </string-array>
+    <string-array name="msg_emoji_hands" translatable="false">
+        <item>👍</item>
+        <item>👎</item>
+        <item>👌</item>
+        <item>✌️</item>
+        <item>🤞</item>
+        <item>👏</item>
+        <item>🙏</item>
+        <item>💪</item>
+        <item>👋</item>
+        <item>🤝</item>
+        <item>✋</item>
+        <item>🙌</item>
+        <item>👇</item>
+        <item>🤗</item>
+        <item>👊</item>
+        <item>👀</item>
+    </string-array>
+    <string-array name="msg_emoji_hearts" translatable="false">
+        <item>❤️</item>
+        <item>💘</item>
+        <item>💝</item>
+        <item>💖</item>
+        <item>💗</item>
+        <item>💕</item>
+        <item>💛</item>
+        <item>💜</item>
+        <item>💙</item>
+        <item>💚</item>
+        <item>🖤</item>
+        <item>❣️</item>
+        <item>💔</item>
+        <item>👫</item>
+        <item>💑</item>
+    </string-array>
+    <string-array name="msg_emoji_misc" translatable="false">
+        <item>🎉</item>
+        <item>🎁</item>
+        <item>🌹</item>
+        <item>💯</item>
+        <item>✨</item>
+        <item>🔥</item>
+        <item>⭐</item>
+        <item>🌟</item>
+        <item>🌙</item>
+        <item>☀️</item>
+        <item>❄️</item>
+        <item>🌈</item>
+        <item>🍀</item>
+        <item>☕</item>
+        <item>🎂</item>
+        <item>💤</item>
+        <item>🍚</item>
         <item>🍑</item>
         <item>🍫</item>
     </string-array>

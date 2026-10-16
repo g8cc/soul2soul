@@ -144,8 +144,14 @@ class MessageActivity : AppCompatActivity() {
         etInput.setOnClickListener {
             if (emojiOpen) setEmojiPanel(false)
         }
-        // 微信/QQ 式多行表情网格：加表情只改 strings.xml 的 msg_emojis
-        (findViewById<GridView>(R.id.emojiPanel)).adapter = emojiAdapter
+        // 微信式分组网格：加表情只改 strings.xml 的 msg_emoji_* 四个数组
+        findViewById<GridView>(R.id.emojiGrid).adapter = emojiAdapter
+        emojiTabs = listOf(
+            findViewById(R.id.tabFaces), findViewById(R.id.tabHands),
+            findViewById(R.id.tabHearts), findViewById(R.id.tabMisc),
+        )
+        emojiTabs.forEachIndexed { i, tab -> tab.setOnClickListener { selectEmojiTab(i) } }
+        refreshEmojiTabs()
         btnHoldTalk.setOnTouchListener { _, ev -> onHoldTouch(ev) }
         syncFromStore()
         InboxStore.addListener(storeListener)
@@ -609,19 +615,53 @@ class MessageActivity : AppCompatActivity() {
         }
     }
 
-    // ---------- 表情网格 ----------
+    // ---------- 表情网格（微信式分组 tab） ----------
 
-    private val emojiItems by lazy { resources.getStringArray(R.array.msg_emojis) }
+    private val emojiGroups by lazy {
+        listOf(
+            resources.getStringArray(R.array.msg_emoji_faces),
+            resources.getStringArray(R.array.msg_emoji_hands),
+            resources.getStringArray(R.array.msg_emoji_hearts),
+            resources.getStringArray(R.array.msg_emoji_misc),
+        )
+    }
+    private var emojiTab = 0
+    private lateinit var emojiTabs: List<TextView>
+
+    private fun selectEmojiTab(i: Int) {
+        if (i == emojiTab) return
+        emojiTab = i
+        emojiAdapter.notifyDataSetChanged()
+        refreshEmojiTabs()
+    }
+
+    /** 选中态样式集中一处：tab 加一个就得改这里，别散在点击回调里 */
+    private fun refreshEmojiTabs() {
+        if (!::emojiTabs.isInitialized) return
+        emojiTabs.forEachIndexed { i, tab ->
+            tab.setBackgroundResource(
+                if (i == emojiTab) R.drawable.bg_chip_active else R.drawable.bg_chip
+            )
+            tab.setTextColor(
+                if (i == emojiTab)
+                    androidx.core.content.ContextCompat.getColor(this, R.color.primary)
+                else
+                    androidx.core.content.ContextCompat.getColor(this, R.color.text_secondary)
+            )
+        }
+    }
+
     private val emojiAdapter = object : android.widget.BaseAdapter() {
-        override fun getCount(): Int = emojiItems.size
-        override fun getItem(position: Int): Any = emojiItems[position]
+        private val items get() = emojiGroups[emojiTab]
+        override fun getCount(): Int = items.size
+        override fun getItem(position: Int): Any = items[position]
         override fun getItemId(position: Int): Long = position.toLong()
         override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
             val tv = (convertView as? TextView)
                 ?: TextView(this@MessageActivity, null, 0, R.style.MsgEmoji)
                     .apply { gravity = Gravity.CENTER }
-            tv.text = emojiItems[position]
-            tv.setOnClickListener { insertEmoji(emojiItems[position]) }
+            tv.text = items[position]
+            tv.setOnClickListener { insertEmoji(items[position]) }
             return tv
         }
     }
