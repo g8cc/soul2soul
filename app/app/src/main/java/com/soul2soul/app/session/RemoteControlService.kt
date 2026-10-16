@@ -107,11 +107,14 @@ class RemoteControlService : AccessibilityService() {
         /**
          * 归一化手势点（0..1，含 letterbox 语义）→ 共享端屏幕像素路径 → 立即注入。
          * 抬手即发、整笔一次，端到端延迟只剩网络单向 + 系统注入。
+         * @param onSettled (dispatchedAt, doneAt, effectiveDur) 仅普通笔迹有回放回调，
+         *        系统动作/拒绝路径不回调（调用方按"未结算"处理即可）。
          */
         fun dispatchNormalized(
             pts: List<PointF>,
             durMs: Long,
             onFailure: ((String) -> Unit)? = null,
+            onSettled: ((Long, Long, Long) -> Unit)? = null,
         ): DispatchResult {
             val svc = instance ?: return DispatchResult.SERVICE_UNAVAILABLE
             if (Build.VERSION.SDK_INT < 24) return DispatchResult.SERVICE_UNAVAILABLE
@@ -133,7 +136,13 @@ class RemoteControlService : AccessibilityService() {
             GestureIntent.edgeGlobalAction(norm, durMs)?.let { action ->
                 // 返回键打在我们自己的通话界面上 = 退出会话断线（实测踩坑）。
                 // 共享进行中改按 HOME：通话界面退到后台、共享继续，她立刻落到桌面接着操作
-                return dispatchSystemAction(action)
+                val dispatchedAt = android.os.SystemClock.elapsedRealtime()
+                val r = dispatchSystemAction(action)
+                // 系统动作没有回放回调：ACCEPTED 也要结算，否则遥测 inflight 泄漏
+                if (r == DispatchResult.ACCEPTED) {
+                    onSettled?.invoke(dispatchedAt, android.os.SystemClock.elapsedRealtime(), 0L)
+                }
+                return r
             }
             // 真实显示尺寸：dispatchGesture 的坐标系是全屏幕，用 app 视角 dm 会整体偏小、底部点不到
             val (screenW, screenH) = com.soul2soul.app.util.ScreenSize.real(svc)
@@ -156,19 +165,31 @@ class RemoteControlService : AccessibilityService() {
                 val clickEndX = if (prevX + 0.5f <= maxX) prevX + 0.5f else prevX - 0.5f
                 path.lineTo(clickEndX.coerceIn(1f, maxX), prevY)
             }
+            val effectiveDur = durMs.coerceIn(50L, 3000L)
             val stroke = GestureDescription.StrokeDescription(
-                path, 0L, durMs.coerceIn(50L, 3000L),
+                path, 0L, effectiveDur,
             )
+            val dispatchedAt = android.os.SystemClock.elapsedRealtime()
             val ok = runCatching {
                 svc.dispatchGesture(
                     GestureDescription.Builder().addStroke(stroke).build(),
                     object : GestureResultCallback() {
                         override fun onCompleted(gestureDescription: GestureDescription?) {
                             Log.v(TAG, "dispatchGesture completed")
+                            onSettled?.invoke(
+                                dispatchedAt,
+                                android.os.SystemClock.elapsedRealtime(),
+                                effectiveDur,
+                            )
                         }
 
                         override fun onCancelled(gestureDescription: GestureDescription?) {
                             Log.w(TAG, "dispatchGesture cancelled by system")
+                            onSettled?.invoke(
+                                dispatchedAt,
+                                android.os.SystemClock.elapsedRealtime(),
+                                effectiveDur,
+                            )
                             onFailure?.invoke("gesture_interrupted")
                         }
                     },

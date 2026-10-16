@@ -45,6 +45,7 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
     private var screenReceiverRegistered = false
     private var audioRoute: AudioRouteController? = null
     private var lastCtlErrorAt = 0L
+    private val ctlTelemetry = CtlLatencyTelemetry { android.os.SystemClock.elapsedRealtime() }
 
     /**
      * 锁屏看门狗（PRD FR-8）：锁屏后 VirtualDisplay 停止出帧，15 秒后自动结束防挂死。
@@ -141,6 +142,7 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
         // 上一通话的"允许TA操控"绝不能带进这一通
         consent.resetForNewSession()
         lastCtlErrorAt = 0L
+        ctlTelemetry.reset()
         updateNotification(statusText())
         com.soul2soul.app.util.WifiKeeper.acquire(this) // WiFi 高性能锁：防省电断流
         // AudioDeviceModule 构造时会读取系统音频参数，必须先固定通信模式和扬声器路由。
@@ -242,6 +244,8 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
     override fun onRemoteVideoSize(width: Int, height: Int) {}
 
     override fun onDataMessage(json: JSONObject) {
+        // signaling 线程第一时间打时间戳：后面每一跳（主线程排队、系统串行回放）都能算账
+        val recvAt = android.os.SystemClock.elapsedRealtime()
         // WebRTC 在 signaling 线程回调；悬浮窗、授权状态机和采集切档统一回主线程串行。
         watchdog.post {
             if (stopping) return@post
@@ -249,14 +253,14 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
                 "res" -> webRtc?.setCaptureLongEdgeOnMain(
                     json.optInt("edge", com.soul2soul.app.webrtc.VideoQualityPolicy.DEFAULT_EDGE)
                 )
-                "g" -> handleGesture(json)
+                "g" -> handleGesture(json, recvAt)
                 else -> AnnotationOverlayService.hook?.invoke(json)
             }
         }
     }
 
-    /** 远程操控手势（可靠 ctl 通道，整笔一条）：仅在用户允许时注入 */
-    private fun handleGesture(json: JSONObject) {
+    /** 远程操控手势（ctlg 快道，整笔一条）：仅在用户允许时注入 */
+    private fun handleGesture(json: JSONObject, recvAt: Long) {
         when (val held = consent.heldCheck()) {
             is CtlConsentMachine.Decision.Allow -> Unit
             is CtlConsentMachine.Decision.Deny -> {
@@ -289,11 +293,26 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
                 if (x.isNaN() || y.isNaN()) continue
                 list.add(PointF(x.toFloat(), y.toFloat()))
             }
+            ctlTelemetry.onStrokeAccepted()
             val result = RemoteControlService.dispatchNormalized(
                 list,
                 json.optLong("dur", 120L),
-            ) { reason -> sendControlError(reason) }
+                { reason -> sendControlError(reason) },
+            ) { dispatchedAt, doneAt, playMs ->
+                val sample = ctlTelemetry.onStrokeSettled(recvAt, dispatchedAt, doneAt, playMs)
+                if (ctlTelemetry.shouldLog(doneAt)) {
+                    Log.d(
+                        "S2S-Lag",
+                        "stroke wait=${sample.queueWaitMs}ms total=${sample.totalMs}ms " +
+                            "play=${sample.playMs}ms overflow=${sample.overflowMs}ms " +
+                            "inflight=${sample.inflight}",
+                    )
+                }
+            }
             if (result != RemoteControlService.DispatchResult.ACCEPTED) {
+                // 无回放回调的失败路径也要结算，否则 inflight 只增不减
+                val now = android.os.SystemClock.elapsedRealtime()
+                ctlTelemetry.onStrokeSettled(recvAt, now, now, 0L)
                 sendControlError(result.toControlErrorReason())
             }
         }
