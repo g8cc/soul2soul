@@ -139,6 +139,11 @@ class MessageActivity : AppCompatActivity() {
         btnSend.setOnClickListener { sendText() }
         btnMic.setOnClickListener { setVoiceMode(!voiceMode) }
         btnEmoji.setOnClickListener { toggleEmojiPanel() }
+        // 微信同款：点输入框=要打字，表情面板先收、键盘自然弹出来，
+        // 不收的话面板和键盘叠着，用户找不到第二个关闭入口
+        etInput.setOnClickListener {
+            if (emojiOpen) setEmojiPanel(false)
+        }
         // 微信/QQ 式多行表情网格：加表情只改 strings.xml 的 msg_emojis
         (findViewById<GridView>(R.id.emojiPanel)).adapter = emojiAdapter
         btnHoldTalk.setOnTouchListener { _, ev -> onHoldTouch(ev) }

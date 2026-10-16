@@ -65,6 +65,7 @@
 | 事件＼状态 | 面板关 | 面板开 | 录音中 | 撤回窗口内/外 |
 |---|---|---|---|---|
 | 按返回键 | PASS 正常退出 | PASS v0.2.45：先收面板不退页（OnBackPressedCallback + AuditRound2WiringTest） | ⬜ 录音中返回=取消路径待真机 | N-A |
+| 点输入框 | PASS 聚焦弹键盘（常规） | PASS v0.2.47：微信同款——面板先收、键盘上位（AuditRound2WiringTest） | N-A | N-A |
 | 表情插入/键盘互斥 | PASS | PASS 面板替代键盘位、语音模式互斥（v0.2.33 崩溃锁定：t0 INPUT_SERVICE 检查） | N-A | N-A |
 | 文字发送×断网 | PASS v0.2.45：send() 返回 false 保留草稿+提示，与语音路径同判据（AuditRound2WiringTest） | 同左 | N-A | N-A |
 | 语音发送×失败 | — | — | PASS too_short/上传失败/上送失败三分支齐（uploadAndSend） | N-A |

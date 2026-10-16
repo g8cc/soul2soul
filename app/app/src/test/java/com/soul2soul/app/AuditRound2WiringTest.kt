@@ -100,4 +100,13 @@ class AuditRound2WiringTest {
         assertTrue("必须注册 OnBackPressedCallback 先收表情面板",
             src.contains("OnBackPressedCallback") && src.contains("if (emojiOpen) setEmojiPanel(false)"))
     }
+
+    @Test
+    fun `tapping input closes emoji panel like wechat`() {
+        val lines = source("app/src/main/java/com/soul2soul/app/msg/MessageActivity.kt")
+        val i = lines.indexOfFirst { it.contains("etInput.setOnClickListener") }
+        assertTrue("点输入框必须收表情面板（微信同款，否则面板和键盘叠着）", i >= 0)
+        val block = lines.drop(i).take(4)
+        assertTrue(block.any { it.contains("if (emojiOpen) setEmojiPanel(false)") })
+    }
 }
