@@ -13,6 +13,7 @@ object Notif {
     const val ID_SESSION = 2
     const val ID_CALL = 3
     const val ID_MSG = 4
+    const val ID_RECALL = 5
 
     fun ensureChannels(ctx: Context) {
         if (android.os.Build.VERSION.SDK_INT < 26) return // 26 以下无通知渠道概念，NotificationCompat 优先级兜底

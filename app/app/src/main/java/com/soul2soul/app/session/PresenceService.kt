@@ -31,6 +31,26 @@ object Presence {
     @Volatile
     var sessionBusy: Boolean = false
 
+    // 找回请求的服务端弹窗是"一次性"的：SharedFlow 无 replay，Activity 可能错过事件。
+    // 服务收到后先落这里，再把主页顶到前台，由 onResume/onNewIntent 领取（只领一次）。
+    @Volatile
+    private var pendingRecallFrom: String? = null
+
+    @Volatile
+    private var pendingRecallAt = 0L
+
+    fun offerRecall(from: String?) {
+        pendingRecallFrom = from
+        pendingRecallAt = System.currentTimeMillis()
+    }
+
+    /** @return 60s 内的待答找回请求发起方；领取即清空（与服务端 pendingTtl 对齐） */
+    fun claimRecall(): String? = synchronized(this) {
+        val v = pendingRecallFrom ?: return null
+        pendingRecallFrom = null
+        if (System.currentTimeMillis() - pendingRecallAt > 60_000) null else v
+    }
+
     fun ensureStarted(ctx: Context) {
         if (android.os.Build.VERSION.SDK_INT >= 26) {
             ctx.startForegroundService(Intent(ctx, PresenceService::class.java))
@@ -195,6 +215,18 @@ class PresenceService : Service() {
                 Presence.client.setPairToken(null)
                 com.soul2soul.app.msg.InboxStore.clear()
             }
+            "pair.recall_ask" -> {
+                // 老搭档找回请求：主页可能压根不在（SharedFlow 无 replay），
+                // 先落领取槽再顶前台+挂通知，弹窗由 MainActivity 领取后展示
+                Presence.offerRecall(json.optString("from"))
+                showRecallNotification()
+                runCatching {
+                    startActivity(
+                        Intent(this, MainActivity::class.java)
+                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    )
+                }
+            }
             "msg.inbox" -> {
                 // 上线送达的留言箱：由常驻服务入库（UI 可能根本不存在），已读删除在留言页完成
                 val arr = json.optJSONArray("items") ?: return
@@ -236,6 +268,28 @@ class PresenceService : Service() {
             .build()
         try {
             nm.notify(Notif.ID_CALL, notification)
+        } catch (e: SecurityException) {
+            Log.w("PresenceService", "no notification permission", e)
+        }
+    }
+
+    private fun showRecallNotification() {
+        val nm = androidx.core.app.NotificationManagerCompat.from(this)
+        if (!nm.areNotificationsEnabled()) return
+        val pi = PendingIntent.getActivity(
+            this, 14, Intent(this, MainActivity::class.java),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+        val notification: Notification = NotificationCompat.Builder(this, Notif.CH_CALL)
+            .setSmallIcon(R.drawable.ic_heart)
+            .setContentTitle(getString(R.string.recall_ask_title))
+            .setContentText(getString(R.string.recall_ask_msg))
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setContentIntent(pi)
+            .setAutoCancel(true)
+            .build()
+        try {
+            nm.notify(Notif.ID_RECALL, notification)
         } catch (e: SecurityException) {
             Log.w("PresenceService", "no notification permission", e)
         }

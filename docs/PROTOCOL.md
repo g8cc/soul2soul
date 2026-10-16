@@ -17,7 +17,10 @@
 |---|---|---|---|
 | `hello` | `deviceId`(≤64字符), `token`(可选) | 连接后第一条 | 注册设备。已配对设备**必须**携带正确 token，否则回 `{type:"error",reason:"bad_token"}` 并以 4001 关闭连接（防知 deviceId 即冒充）。 |
 | `pair.request` | — | 已 hello | 申请 6 位配对码。每设备限速 5s/次（超限回 `pair.failed:too_fast`）；申请新码即作废旧码。 |
-| `pair.enter` | `code` | 已 hello | 输入对方配对码。每连接最多尝试 5 次（防爆破，超限回 `too_many_attempts`）；码过期/不存在回 `code_invalid`；输自己的码回 `self_pair`。 |
+| `pair.enter` | `code` | 已 hello | 输入对方配对码。每连接最多尝试 5 次（防爆破，超限回 `too_many_attempts`）；码过期/不存在回 `code_invalid`；输自己的码回 `self_pair`。扫码配对只是客户端把二维码里的 6 位码喂给这条通道，服务器无特判。 |
+| `pair.recall` | — | 已 hello + 未配对 | 老搭档找回：服务端校验 30 天内配对历史（`history.json`），在线时给对方下发 `pair.recall_ask`。无历史/限速（10s/次）回 `pair.recall_failed`。 |
+| `pair.recall_ok` | `accept`(bool) | 已 hello + 未配对 | 被召回方答复：true 且双方仍未配对 → 双向 `paired`（新 token）；false → 发起端收 `pair.recall_failed:declined`；超 60s 未答自动 `expired`。 |
+| `pair.shake` | — | 已 hello + 未配对 | 本机摇一摇判定通过后上报（客户端 ShakeDetector + 服务端 2s 节流）。"对方有找回请求正等你" 或 "3s 内双方都摇过" 才直绑；单摇只进等待，永不单方绑定。 |
 | `invite` | — | 已鉴权 | 呼叫对端。限速 2s/次。对端不在线回 `peer.offline`。 |
 | `accept` | — | 已鉴权 | 接听。 |
 | `decline` | — | 已鉴权 | 拒接。 |
@@ -25,7 +28,7 @@
 | `bye` | — | 已鉴权 | 挂断，原样转发给对端。 |
 | `sdp` | `sdp:{type, sdp}` | 已鉴权 | 原样转发给对端（日志省略正文）。 |
 | `ice` | `candidate:{...}` | 已鉴权 | 原样转发给对端（日志省略正文）。 |
-| `unpair` | — | 已鉴权 | 解除配对：删除双向关系并**双向清空留言箱**（文字+语音文件），在线端立即收 `unpaired`。 |
+| `unpair` | — | 已鉴权 | 解除配对：删除双向关系并**双向清空留言箱**（文字+语音文件），在线端立即收 `unpaired`。历史关系（`history.json`）保留 30 天——这是"找回TA"的凭据。 |
 | `msg.post` | `kind:"text"`+`text`(≤500字) 或 `kind:"voice"`+`voiceId`(UUID)+`durMs`(0<d≤60000)，可选 `id`(UUID) | 已鉴权+已配对 | 给对端留言（对方离线也收）。发件限速 1 条/秒；被拒回 `msg.failed`。语音文件先经 HTTP `POST /voice` 上传（见 2.4）。`id` 为客户端预生成 id：合法且不撞号则服务端采用（撤回靠它对号），否则服务端另生成并以 `msg.sent` 为准。 |
 | `msg.read` | `ids`[] | 已鉴权 | 阅后即删：从**自己**的留言箱删除这些 id（含语音文件），只能删自己的。 |
 | `msg.recall` | `id`(UUID) | 已鉴权 | 撤回自己发出、**5 分钟内**的留言：未读的从对方信箱摘除（语音文件同删），成功双方各收 `msg.recalled`，被拒收 `msg.recall_failed`。 |
@@ -38,12 +41,15 @@
 
 | type | 载荷 | 触发 |
 |---|---|---|
-| `registered` | `paired`(bool), `peerOnline`(bool) | hello 成功后 |
+| `registered` | `paired`(bool), `peerOnline`(bool), `hasHistory`(bool) | hello 成功后；`hasHistory`=存在 30 天内配对历史，客户端据此显示"找回TA"/启用摇一摇 |
 | `peer.online` | — | 对端上线（本端已配对时） |
 | `error` | `reason`: `bad_device_id` / `bad_token` | hello 校验失败；`bad_token` 后紧跟 close 4001 |
 | `pair.code` | `code`(6位数字串) | pair.request 成功 |
 | `pair.failed` | `reason`: `too_fast` / `too_many_attempts` / `code_invalid` / `self_pair` | 配对各类失败 |
-| `paired` | `token`(32hex), `peerOnline` | 配对成功，双方各发一条；token 由客户端持久化用于后续 hello |
+| `paired` | `token`(32hex), `peerOnline` | 配对成功，双方各发一条；token 由客户端持久化用于后续 hello。找回确认/互摇直绑成功也走这条（bindPair 单一路径）。 |
+| `pair.recall_sent` | — | 找回请求已转发给对方，等待确认（60s 有效） |
+| `pair.recall_ask` | `from`(发起方 deviceId) | 老搭档发起找回请求，被召回端弹窗确认 |
+| `pair.recall_failed` | `reason`: `no_history` / `peer_offline` / `peer_busy` / `declined` / `too_fast` / `expired` | 找回失败/过期（发起端；peer_busy 双方都收） |
 | `unpaired` | — | 解绑成功（双方） |
 | `incoming` | `from`(主叫deviceId), `iceServers` | 被呼叫。`from` 供双方同时呼叫（撞车）时按设备号确定性裁决 |
 | `accepted` | `iceServers` | 对方接听 |
@@ -115,8 +121,10 @@
 ## 4. 会话时序（正常路径）
 
 ```
-配对:  A pair.request → pair.code ─┐
-                                   B pair.enter(code) → 双方 paired(token)
+配对:  A pair.request → pair.code(客户端同时渲染二维码 soul2soul://pair?code=xxx)
+                                    B 手输/扫码 → pair.enter(code) → 双方 paired(token)
+找回:  A pair.recall → B pair.recall_ask → B pair.recall_ok(accept) → 双方 paired(新token)
+互摇:  双端各发 pair.shake（3s 窗口内）→ 双方 paired(新token)
 呼叫:  B invite → A incoming(from, iceServers)
 接听:  A accept → B accepted(iceServers) → B 启动 ScreenShareService
 协商:  B sdp(offer) → A sdp(answer) → ice×N 双向

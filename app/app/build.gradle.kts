@@ -76,6 +76,14 @@ dependencies {
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     // 预编译 libwebrtc（官方 org.webrtc API）
     implementation("io.getstream:stream-webrtc-android:1.1.1")
+    // 扫码配对：CameraX 预览/取帧 + MLKit 二维码识别（仅 QR 格式，约 +2-3MB）
+    implementation("androidx.camera:camera-core:1.3.4")
+    implementation("androidx.camera:camera-camera2:1.3.4")
+    implementation("androidx.camera:camera-lifecycle:1.3.4")
+    implementation("androidx.camera:camera-view:1.3.4")
+    implementation("com.google.mlkit:barcode-scanning:17.3.0")
+    // 配对码二维码生成（纯 Java，无网络依赖）
+    implementation("com.google.zxing:core:3.5.3")
 
     testImplementation("junit:junit:4.13.2")
     // 本地单测用真实 org.json 实现（android.jar 里是 stub）

@@ -71,12 +71,52 @@
                 android:textStyle="bold"
                 android:visibility="gone" />
 
+            <!-- 配对码二维码：让对方扫，免输数字 -->
+            <ImageView
+                android:id="@+id/ivMyCodeQr"
+                android:layout_width="200dp"
+                android:layout_height="200dp"
+                android:layout_gravity="center_horizontal"
+                android:layout_marginTop="16dp"
+                android:contentDescription="@string/qr_hint"
+                android:visibility="gone" />
+
             <Button
                 android:id="@+id/btnEnterCode"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="24dp"
                 android:text="@string/enter_code" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnScan"
+                style="@style/Widget.Material3.Button.OutlinedButton"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:text="@string/scan_button"
+                android:textColor="@color/primary"
+                app:strokeColor="@color/primary" />
+
+            <!-- 老搭档一键复配：仅当服务端登记有 30 天内配对历史时可见 -->
+            <Button
+                android:id="@+id/btnRecall"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:text="@string/recall_button"
+                android:visibility="gone" />
+
+            <TextView
+                android:id="@+id/tvShakeHint"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="10dp"
+                android:gravity="center"
+                android:text="@string/shake_hint"
+                android:textColor="@color/text_secondary"
+                android:textSize="13sp"
+                android:visibility="gone" />
         </LinearLayout>
 
         <!-- 已配对 -->

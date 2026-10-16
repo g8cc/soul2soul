@@ -4,6 +4,10 @@ import android.Manifest
 import android.app.Activity
 import android.content.Context
 import android.content.Intent
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -14,6 +18,7 @@ import android.util.Log
 import android.view.View
 import android.widget.Button
 import android.widget.EditText
+import android.widget.ImageView
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
@@ -23,6 +28,9 @@ import androidx.lifecycle.lifecycleScope
 import com.soul2soul.app.session.Notif
 import com.soul2soul.app.session.Presence
 import com.soul2soul.app.session.ScreenShareService
+import com.soul2soul.app.session.ShakeDetector
+import com.soul2soul.app.signaling.PairQr
+import com.soul2soul.app.signaling.PairScanActivity
 import com.soul2soul.app.signaling.SignalBus
 import com.soul2soul.app.util.Prefs
 import kotlinx.coroutines.launch
@@ -36,9 +44,24 @@ import org.json.JSONObject
 class MainActivity : AppCompatActivity() {
 
     private var peerOnline = false
+    private var hasHistory = false // 服务端 30 天内配对历史：决定「找回TA」+摇一摇是否可用
     private var pendingUpdateInfo: com.soul2soul.app.util.Updater.Info? = null
     private var pendingInstallFile: java.io.File? = null
     private val callTimeout = Handler(Looper.getMainLooper())
+
+    private var shakeListening = false
+    private var paused = false
+    private val shakeDetector = ShakeDetector(clock = { System.currentTimeMillis() })
+    private val shakeListener = object : SensorEventListener {
+        override fun onSensorChanged(event: SensorEvent) {
+            if (event.sensor.type != Sensor.TYPE_ACCELEROMETER) return
+            if (shakeDetector.onSample(event.values[0], event.values[1], event.values[2])) {
+                fireShake()
+            }
+        }
+
+        override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
+    }
 
     /** 主叫状态标记（PresenceService 撞车裁决也要读，故放伴生对象） */
     companion object {
@@ -113,6 +136,25 @@ class MainActivity : AppCompatActivity() {
             refreshPermissionRows()
         }
 
+    private val scanLauncher =
+        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+            // 扫码页只回传解析成功的 6 位码；沿用 pair.enter 老通道，服务器零特判
+            val code = if (result.resultCode == Activity.RESULT_OK)
+                PairQr.parse(result.data?.getStringExtra(PairScanActivity.EXTRA_TEXT)) else null
+            if (code != null) {
+                Presence.client.send("pair.enter") { put("code", code) }
+            }
+        }
+
+    private val cameraPermission =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+            if (granted) {
+                scanLauncher.launch(Intent(this, PairScanActivity::class.java))
+            } else {
+                toast(R.string.scan_permission_denied)
+            }
+        }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
@@ -160,6 +202,8 @@ class MainActivity : AppCompatActivity() {
             }
         }
         findViewById<View>(R.id.btnEnterCode).setOnClickListener { showEnterCodeDialog() }
+        findViewById<View>(R.id.btnScan).setOnClickListener { onScanClicked() }
+        findViewById<View>(R.id.btnRecall).setOnClickListener { onRecallClicked() }
         findViewById<View>(R.id.btnEndSharing).setOnClickListener {
             ScreenShareService.stopFromOverlay(this)
             boxSharing.postDelayed({ updateUi() }, 500)
@@ -195,8 +239,10 @@ class MainActivity : AppCompatActivity() {
         Log.d(TAG, "signal: ${json.optString("type")}")
         when (json.optString("type")) {
             "pair.code" -> {
-                tvMyCode.text = json.optString("code")
+                val code = json.optString("code")
+                tvMyCode.text = code
                 tvMyCode.visibility = View.VISIBLE
+                showPairQr(code)
             }
             "paired" -> {
                 Prefs.setPaired(this, true)
@@ -205,14 +251,29 @@ class MainActivity : AppCompatActivity() {
                     Presence.client.setPairToken(it)
                 }
                 peerOnline = json.optBoolean("peerOnline", false)
+                hasHistory = false
+                findViewById<View>(R.id.ivMyCodeQr).visibility = View.GONE
                 toast(R.string.paired_done)
                 maybeShowRomGuide() // 配对完成才是引导保活的合理时机（首启连弹两窗太吵）
                 updateUi()
             }
             "pair.failed" -> toast(R.string.pair_failed)
+            "pair.recall_sent" -> toast(R.string.recall_sent)
+            "pair.recall_failed" -> toast(
+                when (json.optString("reason")) {
+                    "no_history" -> R.string.recall_fail_no_history
+                    "peer_offline" -> R.string.recall_fail_peer_offline
+                    "declined" -> R.string.recall_fail_declined
+                    "too_fast" -> R.string.recall_fail_too_fast
+                    "expired" -> R.string.recall_fail_expired
+                    "peer_busy" -> R.string.recall_fail_peer_busy
+                    else -> R.string.recall_fail_generic
+                }
+            )
             "registered" -> {
                 Prefs.setPaired(this, json.optBoolean("paired", false))
                 peerOnline = json.optBoolean("peerOnline", false)
+                hasHistory = json.optBoolean("hasHistory", false)
                 updateUi()
             }
             "peer.online" -> {
@@ -310,6 +371,9 @@ class MainActivity : AppCompatActivity() {
                     java.io.File(filesDir, com.soul2soul.app.msg.ChatPersistence.FILE_NAME).delete()
                 }
                 peerOnline = false
+                // 服务器历史关系保留 30 天：解绑后当场就能"找回TA"/摇一摇复配
+                hasHistory = true
+                findViewById<View>(R.id.ivMyCodeQr).visibility = View.GONE
                 toast(R.string.unpaired_done)
                 updateUi()
             }
@@ -555,6 +619,144 @@ class MainActivity : AppCompatActivity() {
             .show()
     }
 
+    // ---------- 扫码配对 ----------
+
+    private fun onScanClicked() {
+        if (!Presence.client.isConnected) {
+            toast(R.string.connecting_server)
+            return
+        }
+        val granted = checkSelfPermission(Manifest.permission.CAMERA) ==
+            android.content.pm.PackageManager.PERMISSION_GRANTED
+        if (granted) {
+            scanLauncher.launch(Intent(this, PairScanActivity::class.java))
+        } else {
+            cameraPermission.launch(Manifest.permission.CAMERA)
+        }
+    }
+
+    /** 配对码二维码：zxing 纯内存生成，失败（理论上不会）就只留数字 */
+    private fun showPairQr(code: String) {
+        val iv = findViewById<ImageView>(R.id.ivMyCodeQr)
+        val bmp = PairQr.build(code)?.let { payload -> runCatching { qrBitmap(payload) }.getOrNull() }
+        if (bmp == null) {
+            iv.visibility = View.GONE
+            return
+        }
+        iv.setImageBitmap(bmp)
+        iv.visibility = View.VISIBLE
+    }
+
+    private fun qrBitmap(text: String): android.graphics.Bitmap? {
+        val matrix = com.google.zxing.qrcode.QRCodeWriter().encode(
+            text,
+            com.google.zxing.BarcodeFormat.QR_CODE,
+            440,
+            440,
+            mapOf(com.google.zxing.EncodeHintType.MARGIN to 1),
+        )
+        val w = matrix.width
+        val h = matrix.height
+        val bmp = android.graphics.Bitmap.createBitmap(w, h, android.graphics.Bitmap.Config.ARGB_8888)
+        for (y in 0 until h) {
+            for (x in 0 until w) {
+                bmp.setPixel(
+                    x, y,
+                    if (matrix.get(x, y)) android.graphics.Color.BLACK else android.graphics.Color.WHITE,
+                )
+            }
+        }
+        return bmp
+    }
+
+    // ---------- 老搭档复配（找回TA / 摇一摇） ----------
+
+    private fun onRecallClicked() {
+        if (Prefs.paired(this)) return
+        if (!Presence.client.isConnected) {
+            toast(R.string.connecting_server)
+            return
+        }
+        Presence.client.send("pair.recall")
+    }
+
+    /** 被召回方答复弹窗：PresenceService 落 pending 后由 onResume/onNewIntent 领取 */
+    private fun showRecallAskDialog() {
+        if (isFinishing || isDestroyed) return
+        androidx.core.app.NotificationManagerCompat.from(this).cancel(Notif.ID_RECALL)
+        AlertDialog.Builder(this)
+            .setTitle(R.string.recall_ask_title)
+            .setMessage(R.string.recall_ask_msg)
+            .setCancelable(true)
+            .setPositiveButton(R.string.recall_accept) { _, _ ->
+                Presence.client.send("pair.recall_ok") { put("accept", true) }
+            }
+            .setNegativeButton(R.string.recall_decline) { _, _ ->
+                Presence.client.send("pair.recall_ok") { put("accept", false) }
+            }
+            // 直接关掉不答复：服务器 60s 后给发起端报"过期"，不猜用户意愿
+            .show()
+    }
+
+    private fun fireShake() {
+        if (Prefs.paired(this) || !hasHistory) return
+        vibrateShort()
+        if (!Presence.client.isConnected) {
+            toast(R.string.connecting_server)
+            return
+        }
+        toast(R.string.shake_sent)
+        Presence.client.send("pair.shake")
+    }
+
+    private fun vibrateShort() {
+        runCatching {
+            @Suppress("DEPRECATION")
+            val vib = if (Build.VERSION.SDK_INT >= 31) {
+                (getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as? android.os.VibratorManager)?.defaultVibrator
+            } else {
+                getSystemService(Context.VIBRATOR_SERVICE) as? android.os.Vibrator
+            }
+            if (Build.VERSION.SDK_INT >= 26) {
+                vib?.vibrate(
+                    android.os.VibrationEffect.createOneShot(
+                        120,
+                        android.os.VibrationEffect.DEFAULT_AMPLITUDE,
+                    )
+                )
+            } else {
+                vib?.vibrate(120)
+            }
+        }
+    }
+
+    /** 只在"未配对 + 有历史"的前台窗口监听加速度计，其余场景一律注销（省电+防误触） */
+    private fun syncShakeListening() {
+        val sm = getSystemService(Context.SENSOR_SERVICE) as SensorManager
+        val want = !paused && !isDestroyed &&
+            !Prefs.paired(this) && hasHistory && !ScreenShareService.isRunning()
+        if (want && !shakeListening) {
+            val sensor = sm.getDefaultSensor(Sensor.TYPE_ACCELEROMETER) ?: return
+            sm.registerListener(shakeListener, sensor, SensorManager.SENSOR_DELAY_NORMAL)
+            shakeListening = true
+        } else if (!want && shakeListening) {
+            sm.unregisterListener(shakeListener)
+            shakeListening = false
+        }
+    }
+
+    override fun onPause() {
+        paused = true
+        syncShakeListening()
+        super.onPause()
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        // PresenceService 收到找回请求后把主页顶到前台：在这里领取弹窗
+        Presence.claimRecall()?.let { showRecallAskDialog() }
+    }
+
     private fun requestNotificationPermissionIfNeeded(force: Boolean = false) {
         if (Build.VERSION.SDK_INT >= 33 &&
             (force || checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) !=
@@ -607,6 +809,14 @@ class MainActivity : AppCompatActivity() {
         boxPairing.visibility = if (paired) View.GONE else View.VISIBLE
         boxReady.visibility = if (paired && !sharing) View.VISIBLE else View.GONE
         boxSharing.visibility = if (sharing) View.VISIBLE else View.GONE
+        // 老搭档复配入口：仅未配对 + 服务端有 30 天内历史时出现
+        val recallVisible = !paired && hasHistory
+        findViewById<View>(R.id.btnRecall).visibility =
+            if (recallVisible) View.VISIBLE else View.GONE
+        findViewById<View>(R.id.tvShakeHint).visibility =
+            if (recallVisible) View.VISIBLE else View.GONE
+        if (paired) findViewById<View>(R.id.ivMyCodeQr).visibility = View.GONE
+        syncShakeListening()
         btnCall.text = if (outgoingPending) getString(R.string.btn_cancel_call) else getString(R.string.btn_call)
         val unread = com.soul2soul.app.msg.InboxStore.received().size
         btnMessage.text = if (unread > 0) {
@@ -683,6 +893,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
+        paused = false
         // 从"安装未知应用"授权页返回后，继续刚才搁置的安装
         pendingInstallFile?.let { file ->
             if (Build.VERSION.SDK_INT < 26 || packageManager.canRequestPackageInstalls()) {
@@ -697,6 +908,8 @@ class MainActivity : AppCompatActivity() {
         }
         updateUi()
         maybePromptAccReset()
+        // 后台时 PresenceService 落下的找回请求：回前台立刻补弹窗（60s 内有效）
+        Presence.claimRecall()?.let { showRecallAskDialog() }
     }
 
     /** 更新安装后 ROM 常把无障碍悄悄弄坏：真被关 → 递一键重开；开关在但服务被冻 → 教"关→开一次"。

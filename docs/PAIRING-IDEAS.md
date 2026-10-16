@@ -48,4 +48,13 @@
 2. **C 跟进**（在 A 之上换触发方式，产品记忆点）。
 3. 服务器属于高风险区：上线前须人工比对线上 env/常量，改动与部署均需明确确认（AGENTS）。
 
-*（仅调研提案，未动任何代码/服务器。）*
+## 落地状态（2026-10-16）
+
+A + C + D 三案均已实现（用户拍板：三个都加；D 扫码端用 MLKit，接受 +2-3MB；C 互摇±3s 窗口=直接绑定，不再二次确认）：
+
+- **A 老搭档一键复配**：服务端 `recall.js`（history.json 30 天 TTL）+ `pair.recall / recall_ok / recall_sent / recall_ask / recall_failed`；客户端主页"找回TA"按钮（仅 `registered.hasHistory` 时显示）+ 确认弹窗（后台经 PresenceService 通知+领取槽补弹）。
+- **C 摇一摇复配**：复用 `ShakeDetector`（原涂鸦入口那套），未配对+有历史时主页前台监听加速度计；`pair.shake` 2s 节流/3s 互摇窗口，触发即振动+上报，双方都摇直接绑定。
+- **D 扫码配对**：`pair.code` 到达即本地渲染二维码（zxing core，`soul2soul://pair?code=xxx`，`PairQr` 纯逻辑+单测）；扫描端 `PairScanActivity`（CameraX + MLKit，只认自家载荷/裸 6 位码），结果仍走原 `pair.enter` 通道——服务器零特判。
+- 服务器与客户端均过 T1/T2/T3（recall 黑盒 10 场景）；**尚未部署上线**，服务器改动等用户明确确认后执行。
+
+*（调研 → 已全部落地为代码，仅剩部署与真机验证。）*
