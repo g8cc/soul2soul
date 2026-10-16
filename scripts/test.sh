@@ -89,6 +89,21 @@ PY
     echo "静态检查: 主源码禁用 java.nio.file（API 26+，minSdk 23 会崩；用 File API 代替）"
     fail=1
   fi
+  # v0.2.44 真机踩坑锁定（AUDIT.md L2）：挂上去的悬浮窗必须有配对的拆除调用，
+  # 防"加了不拆 / 退出模式不还入口"类单边接线（涂鸦入口球整场丢失的根因）
+  local unpaired uf
+  unpaired=""
+  for uf in $(grep -rl --include='*.kt' "wm\.addView(" "$ROOT/app/app/src/main/java" 2>/dev/null); do
+    grep -q "wm\.removeView(" "$uf" || unpaired="$unpaired $uf"
+  done
+  if [ -n "$unpaired" ]; then
+    echo "静态检查: 悬浮窗 wm.addView 缺配对 wm.removeView:$unpaired"
+    fail=1
+  fi
+  # 审计矩阵空格（AUDIT.md L1）：不算失败，但每次跑测试都必须看见欠了几格
+  if [ -f "$ROOT/docs/AUDIT-MATRIX.md" ]; then
+    echo "审计矩阵: $(grep -c '⬜' "$ROOT/docs/AUDIT-MATRIX.md" || true) 个空格(⬜)待填 — docs/AUDIT-MATRIX.md"
+  fi
   [ "$fail" -eq 0 ]
 }
 

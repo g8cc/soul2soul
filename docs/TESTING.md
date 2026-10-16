@@ -121,6 +121,11 @@ bash scripts/test.sh --coverage
 - 迟到 bye 误杀新页面 → SignalRouterTest
 - 内联版本事故（versionCode=0）→ VersionManifestTest
 - 配对码爆破 → PairCodeBook 单测 + protocol-test.cjs 对抗
+- 涂鸦「完成」退出丢入口球（v0.2.44）→ OverlayBallWiringTest（源码扫描配对不变式）+ t0 悬浮窗 addView/removeView 配对守卫
+
+Service 窗口接线这类 JVM 跑不了的代码，锁定用例的形态是**源码扫描测试/t0 grep 守卫**（把修复
+回滚用例必须变红才算锁定）。审计流程本身的规范（状态机矩阵、5 维度清单、gate 登记制）见
+`docs/AUDIT.md`，矩阵在 `docs/AUDIT-MATRIX.md`（t0 打印空格数）。
 
 ## 附录 A：用例矩阵映射
 
