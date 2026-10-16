@@ -48,3 +48,5 @@ echo "-- msg-blackbox.cjs @ :$PORT"
 SIG_URL="ws://127.0.0.1:$PORT" HTTP_URL="http://127.0.0.1:$PORT" node msg-blackbox.cjs
 echo "-- recall-blackbox.cjs @ :$PORT"
 SIG_URL="ws://127.0.0.1:$PORT" node recall-blackbox.cjs
+echo "-- recall-backfill-blackbox.cjs (自管服务器+预置pairings)"
+node recall-backfill-blackbox.cjs

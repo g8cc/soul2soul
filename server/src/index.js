@@ -66,6 +66,23 @@ function saveHistory() {
   fs.renameSync(tmp, HISTORY_FILE);
 }
 
+// 存量回填：本功能上线前绑定的老配对没有 history 行，不补的话这对情侣一旦解绑
+// 就当场失去"找回TA/互摇"资格（正是本功能要救的场景）。启动时把在册 pairings 补进历史。
+{
+  let backfilled = 0;
+  for (const [a, v] of Object.entries(pairings)) {
+    const b = v && v.peer;
+    if (b && pairings[b] && b !== a && !recallBook.hasHistory(a)) {
+      recallBook.recordPair(a, b);
+      backfilled++;
+    }
+  }
+  if (backfilled > 0) {
+    saveHistory();
+    console.log(`[recall] backfilled ${backfilled} history entries from active pairings`);
+  }
+}
+
 /** 建立/重建配对关系并通知双方：pair.enter 与召回绑定共用 */
 function bindPair(a, b) {
   const token = crypto.randomBytes(16).toString('hex');
