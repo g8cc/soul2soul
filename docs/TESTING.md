@@ -157,6 +157,9 @@ bash scripts/test.sh --coverage
 - 观看端入口球拖不动（v0.2.55）→ ViewerBallDragTest B1：btnBall 点击旁必装 setupBallDrag()/setOnTouchListener；B2：必须用 scaledTouchSlop 分点击与拖动且未拖动时 performClick()（保无障碍点击）；B3：clampBallIntoParent 必钳制 translationX/Y 且父未测量时跳过，父 layout 变化回调里必须重新钳制（转屏后球不能留在屏外）
 - 锁屏不再断连（v0.2.56，推翻 PRD FR-8 原设计）→ LockScreenKeepAliveTest L1：`screenOffStop`/`SCREEN_OFF_TIMEOUT_MS`/`screen_off_timeout` 三个符号在 ScreenShareService 全文件不得再出现（加回看门狗即红）；L2：暂停/恢复对称——SCREEN_OFF 分支仍须 revokeOnScreenOff + sendScreenStatus("screenoff")，SCREEN_ON 分支仍须 sendScreenStatus("screenon")；L3：`peer_screen_off` 文案不得再写「自动结束」且须给出路（语音）；L4：video_stall 判定必被 `!remoteScreenPaused` 门控，setRemoteScreenPaused 恢复侧必清 streak，screenoff/screenon 两条 UI 路径各自置位复位（单一收口）
 - F/G 采集盲点（v0.2.56）→ PiPLockScreenGuardTest L1：onUserLeaveHint 内 `isInteractive` 判断必须排在 enterPictureInPictureMode 之前（锁屏触发的小窗会拆 surface）；L2：`pip_enter`/`pip_exit` 双向都必须在 onPictureInPictureModeChanged 里报（只加判据不改行为，surface 重挂等日志证据）；L3/L4：两处启动失败 catch 各带一条 diag.event（fgs_start_failed / webrtc_start_failed）且 detail 只放异常类名，起流失败还须先 noteEnd 抢在 local_stop 之前（否则服务器收到一句谎报）；L4b：PresenceService.onState 会话期报 signaling_down/signaling_up 且以 Presence.sessionBusy 为门（待机期不产噪声）
+- t4 锁屏判据（v0.2.56）→ `scripts/drive-test.sh` AC-6 用**实况**而非日志字符串：被控端 `dumpsys activity services <pkg>` 里 ScreenShareService 的 ServiceRecord 还在 + 观看端 `dumpsys window` 焦点仍是 SessionActivity，解锁 10s 后前者再验一次。
+  ⚠️ 反面教材：原先写成 `logcat | grep -c "signal: bye"`，而客户端**从不打印**这个字符串，`grep -c` 恒为 0 → 无论会不会话被拆都用例变绿。
+  **反向断言必须证明"能变红"**：用桩 adb（有记录→1/1，无记录→0/0）各跑一遍再登记，否则等价于没测。
 
 Service 窗口接线这类 JVM 跑不了的代码，锁定用例的形态是**源码扫描测试/t0 grep 守卫**（把修复
 回滚用例必须变红才算锁定）。审计流程本身的规范（状态机矩阵、5 维度清单、gate 登记制）见

@@ -40,7 +40,8 @@
 | 启动失败不谎报（v0.2.56 盲点） | N-A | ⬜ `fgs_start_failed` / `webrtc_start_failed` 两条新事件首次真机命中待核 | PASS 两处 catch 各带一条 diag.event，且起流失败先 noteEnd 抢在 local_stop 前（PiPLockScreenGuardTest L3/L4） | N-A | N-A |
 | 观看端本端锁屏→解锁（黑屏排查，v0.2.55） | N-A | ⬜ 握手中锁屏是否丢首帧渲染，待真机 | PASS 观测面补齐：surface_created/size/destroyed + sink_attached + 连续 3 个诊断窗口零帧报 video_stall + viewer_paused/resumed（D5 锁）。**只加判据、不改行为**——真实修法等双端日志回来 | — | N-A |
 | 观看端进/出小窗（PiP，v0.2.56） | N-A | — | PASS 锁屏/息屏引起的 onUserLeaveHint 不再进小窗（`isInteractive` 前置判断）；进出各报 `pip_enter`/`pip_exit`（PiPLockScreenGuardTest L1/L2）。⬜ surface 只观测不重挂——若日志证实 destroyed 后无 created，下一版补重挂 | N-A | N-A |
-| 信令断 vs 媒体断（v0.2.56） | N-A | — | PASS 会话期 onState 断/续报 `signaling_down`/`signaling_up`（无会话不报，防噪声；PiPLockScreenGuardTest L4） | 同左（锁屏期间信令掉也照报） | N-A |
+| 信令断 vs 媒体断（v0.2.56） | N-A | — | PASS 会话期 onState 断/续报 `signaling_down`/`signaling_up`（无会话不报，防噪声；PiPLockScreenGuardTest L4b） | 同左（锁屏期间信令掉也照报） | N-A |
+| 信令假死被服务器主动拆（`[ws] pong 超时 terminate`，30s ping 漏一次即 terminate） | ⬜ 待机期被误杀=对端看到"离线"，可接受但会放大重连风暴 | ⬜ 误杀即 peer.gone，与"对方没接"难分 | ⬜ **未解风险**：0.2.55 实测 18:03:14/18:10:14 各一次 pong terminate，观看端重连后仅 8.1s 又 `code=1006`——P2P 媒体可能仍是好的，但 peer.gone 会让双端拆会话。对策（放宽 pong 窗口 / 收到 peer.gone 先探 ICE 存活再拆）等 0.2.56 的 `signaling_down`+`ice_outage` 差分回来再定 | ⬜ 锁屏后 Doze 冻结客户端最易命中此项，与"锁屏保活"新语义直接冲突，复现必查 | N-A |
 | 观看端入口球（小铅笔）拖动（v0.2.55） | N-A | N-A 球未显 | PASS 可拖到画面任意角落：slop 内仍算点击（performClick 保住菜单展开+无障碍），拖出由 clampBallIntoParent 钳回；父容器重布局（转屏/系统栏）时重新钳制；ViewerBallDragTest B1–B3 锁 | — | N-A |
 
 ## 3. 配对三通道（找回/互摇/扫码）
