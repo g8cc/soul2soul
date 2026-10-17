@@ -151,6 +151,7 @@ bash scripts/test.sh --coverage
 - 离线错误分支不进留言漏斗（v0.2.52）→ AuditRound2WiringTest L5：peer.offline else 臂（too_fast/not_authed）必须 NONE+toast(peer_offline)，块内不得出现 MessageActivity
 - overlay 可见性单点收口（v0.2.52）→ AuditRound2WiringTest L6：`outgoingOverlay.visibility` 全 MainActivity 仅 1 处赋值且在 updateUi 内（多入口多出口漏收=横幅残留）
 - 呼叫出口全清（v0.2.52）→ AuditRound2WiringTest L6：declined/bye/call.canceled/unpaired/local.sessionEnded/local.sessionLive 各 case 臂必含 endOutgoing()；accepted 臂必含 ringback 清理+phase=NONE；endOutgoing 必含 callTimeout+ringback 双 removeCallbacks；媒体超时臂含 `gen == callGen` 守卫
+- 连接状态胶囊（v0.2.53）→ ConnStatusChipTest L1：Presence.onState 两分支都落 connState 且广播 local.connState；L2：MainActivity handleSignal 有 `"local.connState" -> updateUi()`；L3：connChip/connDot 取色各一处且都在 updateUi 内（单点收口，散写即红）；L4：conn_connecting/offline/connected_unpaired/online/offline 五态文案全引用
 
 Service 窗口接线这类 JVM 跑不了的代码，锁定用例的形态是**源码扫描测试/t0 grep 守卫**（把修复
 回滚用例必须变红才算锁定）。审计流程本身的规范（状态机矩阵、5 维度清单、gate 登记制）见

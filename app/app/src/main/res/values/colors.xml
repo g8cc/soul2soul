@@ -8,5 +8,16 @@
     <color name="black">#FF000000</color>
     <color name="green">#FF34C759</color>
     <color name="blue">#FF1E90FF</color>
+    <!-- 连接状态胶囊配色（v0.2.53）：前景=圆点+文字，_bg=胶囊底色（同色系 ~18% alpha） -->
+    <color name="conn_green">#FF1B9E45</color>
+    <color name="conn_green_bg">#2E34C759</color>
+    <color name="conn_blue">#FF1E7FD6</color>
+    <color name="conn_blue_bg">#2E1E90FF</color>
+    <color name="conn_amber">#FFB26A00</color>
+    <color name="conn_amber_bg">#2EFF9500</color>
+    <color name="conn_red">#FFD6273C</color>
+    <color name="conn_red_bg">#2EE53946</color>
+    <color name="conn_gray">#FF6B7280</color>
+    <color name="conn_gray_bg">#2E8A8F99</color>
     <color name="ic_launcher_background">#FFE3EA</color>
 </resources>

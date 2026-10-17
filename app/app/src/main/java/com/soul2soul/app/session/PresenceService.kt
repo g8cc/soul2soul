@@ -32,6 +32,15 @@ object Presence {
     @Volatile
     var sessionBusy: Boolean = false
 
+    // 信令连接态（主页醒目胶囊的唯一权威可读源）。SharedFlow 无 replay，
+    // Activity 可能错过 onState 事件，故落在此处，onResume 也能直接读到当前值。
+    const val CONN_CONNECTING = 0
+    const val CONN_CONNECTED = 1
+    const val CONN_OFFLINE = 2
+
+    @Volatile
+    var connState: Int = CONN_CONNECTING
+
     // 找回请求的服务端弹窗是"一次性"的：SharedFlow 无 replay，Activity 可能错过事件。
     // 服务收到后先落这里，再把主页顶到前台，由 onResume/onNewIntent 领取（只领一次）。
     @Volatile
@@ -133,6 +142,8 @@ class PresenceService : Service() {
             Presence.client.setPairToken(Prefs.pairToken(this))
             Presence.client.stateListener = object : SignalingClient.StateListener {
                 override fun onState(connected: Boolean) {
+                    Presence.connState = if (connected) Presence.CONN_CONNECTED else Presence.CONN_OFFLINE
+                    SignalBus.emit(org.json.JSONObject().put("type", "local.connState").put("connected", connected))
                     if (connected) {
                         reconnectAttempt = 0
                     } else {

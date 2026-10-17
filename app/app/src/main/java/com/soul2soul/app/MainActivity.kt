@@ -86,6 +86,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     private lateinit var tvStatus: TextView
+    private lateinit var connChip: View
+    private lateinit var connDot: View
     private lateinit var boxPairing: View
     private lateinit var boxReady: View
     private lateinit var boxSharing: View
@@ -203,6 +205,8 @@ class MainActivity : AppCompatActivity() {
         maybeAskBatteryExemption()
 
         tvStatus = findViewById(R.id.tvStatus)
+        connChip = findViewById(R.id.connChip)
+        connDot = findViewById(R.id.connDot)
         boxPairing = findViewById(R.id.boxPairing)
         boxReady = findViewById(R.id.boxReady)
         boxSharing = findViewById(R.id.boxSharing)
@@ -438,6 +442,11 @@ class MainActivity : AppCompatActivity() {
                 // 否则 outgoingPending 挂着，主页整个共享期间都显示"呼叫中…"（v0.2.38 真机踩坑）。
                 // 会话本身的存续由共享服务/boxSharing 负责，与呼叫状态无关。
                 endOutgoing()
+                updateUi()
+            }
+            "local.connState" -> {
+                // 信令连接态变化（PresenceService.onState 广播）：胶囊底色实时刷新。
+                // 权威值存 Presence.connState，这里只触发重绘；错过事件由 onResume 兜底。
                 updateUi()
             }
         }
@@ -895,14 +904,27 @@ class MainActivity : AppCompatActivity() {
         } else {
             getString(R.string.msg_button)
         }
-        tvStatus.setText(
-            when {
-                !paired -> R.string.status_unpaired
-                outgoingPending -> R.string.calling
-                peerOnline -> R.string.status_paired_online
-                else -> R.string.status_paired_offline
-            }
-        )
+        // v0.2.53 连接状态胶囊：底色/圆点/文字色只在这一处收口（回滚任何一态漏刷即变红）。
+        // 合并信令连接态（Presence.connState）与对方在线态，一眼看出"能不能联系上"。
+        val conn = com.soul2soul.app.session.Presence.connState
+        val (fgRes, bgRes, textRes) = when {
+            conn == com.soul2soul.app.session.Presence.CONN_CONNECTED && paired && peerOnline ->
+                Triple(R.color.conn_green, R.color.conn_green_bg, R.string.conn_connected_online)
+            conn == com.soul2soul.app.session.Presence.CONN_CONNECTED && paired ->
+                Triple(R.color.conn_blue, R.color.conn_blue_bg, R.string.conn_connected_offline)
+            conn == com.soul2soul.app.session.Presence.CONN_CONNECTED ->
+                Triple(R.color.conn_gray, R.color.conn_gray_bg, R.string.conn_connected_unpaired)
+            conn == com.soul2soul.app.session.Presence.CONN_OFFLINE ->
+                Triple(R.color.conn_red, R.color.conn_red_bg, R.string.conn_offline)
+            else -> // CONNECTING：服务已起、WS 首次未连通
+                Triple(R.color.conn_amber, R.color.conn_amber_bg, R.string.conn_connecting)
+        }
+        val ctx = this
+        fun paint(res: Int) = androidx.core.content.ContextCompat.getColor(ctx, res)
+        (connChip.background.mutate() as android.graphics.drawable.GradientDrawable).setColor(paint(bgRes))
+        (connDot.background.mutate() as android.graphics.drawable.GradientDrawable).setColor(paint(fgRes))
+        tvStatus.setTextColor(paint(fgRes))
+        tvStatus.setText(textRes)
         refreshPermissionRows()
     }
 

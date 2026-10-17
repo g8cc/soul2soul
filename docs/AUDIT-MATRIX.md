@@ -92,5 +92,17 @@
 | 多入口多出口配对 | 一起玩起手 callGen+=1 复位 | 二次点一起玩=取消（send cancel/bye+endOutgoing）；挂断=onHangupClicked | 去留言/算了/挂断三路 |
 | 降级老机型（Android7 Mi5） | ⬜ 全屏 overlay 渲染待真机 | ⬜ 假振铃 6s 手感待真机（Mi5 无注入权限，手动验证） | ⬜ 待真机 |
 
+## 7. 连接状态胶囊（MainActivity connChip / Presence.connState）
+
+状态：`CONNECTING` / `OFFLINE` / `CONNECTED`(×未配对·对方在线·TA不在线)。合并"信令连接×对方在线"为单枚带底色胶囊。
+
+| 事件＼状态 | CONNECTING(黄) | OFFLINE(红) | CONNECTED·未配对(灰) | CONNECTED·在线(绿) | CONNECTED·离线(蓝) |
+|---|---|---|---|---|---|
+| 恢复对称（断线/重连/回前台都刷） | PASS v0.2.53：Presence.onState 两分支落 connState+广播 local.connState（ConnStatusChipTest L1）；MainActivity 消费事件 updateUi（L2）；onResume 读 Presence.connState 兜底（Activity 错过 SharedFlow） | 同左（onState(false)→OFFLINE） | 已连接后按 paired 分档 | 同左 | 同左（peer.gone/online 经既有 updateUi） |
+| 取色单点收口 | PASS L3：connChip/connDot 取色各一处且都在 updateUi 内（散写=某态漏刷，与呼叫横幅假象同类风险） | 同左 | 同左 | 同左 | 同左 |
+| 五态话术齐 | PASS L4：conn_connecting/offline/connected_unpaired/online/offline 全引用，漏一态即红 | 同左 | 同左 | 同左 | 同左 |
+| 权限/配对多入口 | 首启未连=黄→连上转档 | 拔网/服务端故障=红，退避重连回绿（不动退避逻辑） | 解绑 unpaired→paired=false 落灰档 | 配对 paired→绿 | peer 离线→蓝 |
+| 降级老机型（Android7 Mi5） | ⬜ GradientDrawable.mutate().setColor 在 API24/25 实机渲染待真机截图 | ⬜ 同左 | ⬜ 同左 | ⬜ 同左 | ⬜ 同左 |
+
 ---
 维护规则（AUDIT.md §5）：每关一条真机 bug，本表加一行/填一格并登记 gate；新有状态功能上线前必须先有 §表头，格子可以 ⬜，表不能没有。
