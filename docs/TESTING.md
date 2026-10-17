@@ -63,6 +63,8 @@ bash scripts/test.sh --e2e
   ⑭ **`dumpsys window` 的 `mFocusedApp` 会滞后，不能当"页面还在"的判据**：`sess_page` 旧口径统计 `mCurrentFocus|mFocusedApp` 两个键，实测 B 的会话页 20:52:29 已 CLOSE、`mCurrentFocus` 已回落到 `MainActivity`，而 `mFocusedApp` 仍挂着 `SessionActivity` 的 ActivityRecord → 「观看端会话页未退出」恒真，锁屏保活那条 AC-6 判据一直没测到东西。焦点判据只准写 `grep -cE "mCurrentFocus=Window.*SessionActivity"`（e2e.sh 的 T4-6 本来就是这口径，drive-test.sh 抄漏了），进 t0 守卫。
   ⑮ **负向断言（"零 bye"）的基线必须取在窗口起点**：drive-test.sh 原先在锁屏前才 `endlog` 取基线，而 ICE 失败看门狗早在接通后 ~30s 就发了 bye（实测 20:52:15 FAILED → 20:52:28 `signal: bye` → B CLOSE），基线把这段吞掉 → 增量恒 0 → 恒绿。现在基线在 `signal: accept` 之后立刻取（`EA0/EB0`），锁屏窗口再单独取一份（`E0A/E0B`）；并且 AC-6 整块加了**前置条件**：锁屏瞬间共享服务在跑 + 观看端焦点在会话页，才做四条硬断言，否则显式 `SKIP(环境)` 并让整层返回 2——本机 ICE 连不通时会话根本撑不到锁屏，这时候记 PASS 是撒谎、记 FAIL 是冤枉产品。
   ⑯ **中文文案里 `$VAR` 紧跟全角括号会当场崩脚本**：`echo "…$APK（设置 APK_PATH）"` 在 UTF-8 下 bash 把 `（` 的首字节算进变量名，`set -u` 直接 `unbound variable`（实测 drive-test.sh:254 整段 AC-6 就这么死掉，白跑一轮 8 分钟）。一律写大括号形式；已进 t0 守卫（扫 `scripts/*.sh` 里变量引用后接非 ASCII 的行）。
+  ⑰ **采集进程"活着"不等于在采集**：v0.2.56 那一轮 adb 传输掉线后，`adb -s 7c6a9986 logcat` 停在 `- waiting for device -`，ps 里进程还在、输出文件从 19:35 起一个字节没写，整轮 0.2.56 客户端日志白丢。复现期采集改为 `scripts/repro-capture.sh`（`start` 起 ssh `tail -F` 自愈重连 + 真机 logcat，`check` 只做三件事：ssh/adb 各打一次哑铃探传输、state 里两路日志的行必须都在、文件字节数是否在涨），**复现开始前必须 check 到 READY 才让人动手**。
+    反向实测：故意写一份缺 `device` 行的 state → `check` 必须 rc=2；第一版没有这两条 `saw_*` 守卫时，它因为变量为空整段跳过设备分支、照样打 READY（=⑰ 本身的坑，已进 t0 守卫）。无人操作时"零增长"只报 WARN 不判死——静默不是断链，拿它当 FAIL 会让体检变成天天喊狼来了。
   模拟器只验信令/服务/UI 状态，媒体与手感的结论仍以真机为准。宿主 load 高时两台 qemu 会饿死 app 主线程（实测 `ANR in … Waited 5002ms for FocusEvent` → 系统杀进程），此时 ICE/`viewer-ready` 变红属环境而非产品，drive-test.sh 会把 ANR/杀进程计数打在媒体断言之前。
   诚实边界：坑⑩里「ICE 连上→媒体硬断言」这条分支本机**从没跑过**（没有可路由的 relay 就没有 CONNECTED）。要让媒体段重新具备判定力，得先在本机起一个真 TURN，并把 dev server 的 `TURN_HOST` 指到模拟器可达的地址（一般是宿主在 SLIRP 里的 `10.0.2.2`，需自行验证）；做不到之前，媒体结论只能来自真机双端。**同理，AC-6 锁屏保活（坑⑮）本机也只验证了"判据不再是空的"，没验证过"锁屏真的不断连"——那要等真机双端。**
 - T4 断言的五条铁律（v0.2.56 复盘：e2e.sh 里曾同时存在**恒真**与**恒假**两种空断言，绿了半年）：
@@ -187,6 +189,7 @@ bash scripts/test.sh --coverage
 - 秒断无从判定（v0.2.57 候选，#51/#55）→ PeerSignalProbeTest P1/P2：`bye`/`peer.gone` 与 `PeerEnded` 两条拆除路径都必须在 `stopSession`/`finishWithCleanup` **之前**报 `peer_signal`（ice 取当时实况、detail 分 `sig=gone|bye`）——顺序就是证据，拆完 ICE 只会是 `CLOSED`，"是不是信令假死拆的"就永久无法回答；P3：事件名必须已登记进 PROTOCOL §2.3（服务端日志出现了却没人知道怎么读=白埋）。把上报挪到拆除之后用例即红。
 - t4 锁屏判据（v0.2.56）→ `scripts/drive-test.sh` AC-6 用**实况**而非日志字符串：被控端 `dumpsys activity services <pkg>` 里 ScreenShareService 的 ServiceRecord 还在 + 观看端 `dumpsys window` 焦点仍是 SessionActivity，解锁 10s 后前者再验一次。
   ⚠️ 反面教材：原先写成 `logcat | grep -c "signal: bye"`，而客户端**从不打印**这个字符串，`grep -c` 恒为 0 → 无论会不会话被拆都用例变绿。
+- 采集链路自己也会产空证据（v0.2.57）→ t0 守卫：`scripts/repro-capture.sh` 的 `check` 必须同时有 `saw_srv`/`saw_dev` 两条 state 缺行断言（缺任一路日志必须 rc=2，删一条守卫 t0 即红，已实测回滚变红）。判据分两层且不许混：**传输**用 ssh/adb 哑铃探（能抓住"logcat 停在 waiting for device"这种进程在、文件不动的死法），**流量**只用文件字节增量看、静默期一律 WARN——把"没人操作"报成 FAIL 只会让人忽略体检。
   **反向断言必须证明"能变红"**：用桩 adb（有记录→1/1，无记录→0/0）各跑一遍再登记，否则等价于没测。
 
 Service 窗口接线这类 JVM 跑不了的代码，锁定用例的形态是**源码扫描测试/t0 grep 守卫**（把修复

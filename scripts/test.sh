@@ -230,6 +230,14 @@ PY
     echo "静态检查: harness 判据用的信号类型源码里不存在（恒假断言）:$missing" >&2
     fail=1
   fi
+  # v0.2.56 复盘的第二个坑：采集脚本 check 里"这一路根本没启动"必须显式红。
+  # 实测第一版把 device 行漏写进 state，check 因为变量为空整段跳过设备分支 → 打 READY，
+  # 而客户端日志一个都没采（和 0.2.56 那轮 logcat 停在 waiting for device 同一类错误）。
+  if ! grep -q 'saw_dev" = 1' "$ROOT/scripts/repro-capture.sh" 2>/dev/null ||
+     ! grep -q 'saw_srv" = 1' "$ROOT/scripts/repro-capture.sh" 2>/dev/null; then
+    echo "静态检查: repro-capture.sh 的 check 缺 state 缺行守卫（缺一路日志会被打成 READY）" >&2
+    fail=1
+  fi
   [ "$fail" -eq 0 ]
 }
 
