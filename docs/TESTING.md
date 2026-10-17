@@ -147,6 +147,10 @@ bash scripts/test.sh --coverage
 - 发送收表情墙（v0.2.50）→ AuditRound2WiringTest：sendText 内 setEmojiPanel(false) 必须排在 if (!sent) 成功校验之后（失败/断网先 return，草稿+面板原样保留）
 - 息屏断连根修（v0.2.51）→ AuditRound2WiringTest：wakelock acquire 必在 startForeground 之后+带 WAKELOCK_TIMEOUT_MS 超时；onDestroy/unpaired 必 release；PresenceService FGS 类型 specialUse 禁 dataSync（Android14 每日时长上限会定时杀常驻连接）
 - 电池豁免只问一次缺口（v0.2.51）→ AuditRound2WiringTest：maybeAskBatteryExemption 必须走 batteryPromptAt 时间戳节流，出现 askedBattery 即变红
+- 主叫呼叫页状态机（v0.2.52）→ AuditRound2WiringTest L4：peer.offline 空 reason 走 ringback+OFFLINE_PROMPT，不得再直调 showLeaveMessageDialog（该方法已删，出现即变红）
+- 离线错误分支不进留言漏斗（v0.2.52）→ AuditRound2WiringTest L5：peer.offline else 臂（too_fast/not_authed）必须 NONE+toast(peer_offline)，块内不得出现 MessageActivity
+- overlay 可见性单点收口（v0.2.52）→ AuditRound2WiringTest L6：`outgoingOverlay.visibility` 全 MainActivity 仅 1 处赋值且在 updateUi 内（多入口多出口漏收=横幅残留）
+- 呼叫出口全清（v0.2.52）→ AuditRound2WiringTest L6：declined/bye/call.canceled/unpaired/local.sessionEnded/local.sessionLive 各 case 臂必含 endOutgoing()；accepted 臂必含 ringback 清理+phase=NONE；endOutgoing 必含 callTimeout+ringback 双 removeCallbacks；媒体超时臂含 `gen == callGen` 守卫
 
 Service 窗口接线这类 JVM 跑不了的代码，锁定用例的形态是**源码扫描测试/t0 grep 守卫**（把修复
 回滚用例必须变红才算锁定）。审计流程本身的规范（状态机矩阵、5 维度清单、gate 登记制）见

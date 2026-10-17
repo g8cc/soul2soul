@@ -58,6 +58,11 @@
     <string name="connecting_server">正在重连服务器，等几秒再试一次吧</string>
     <string name="btn_cancel_call">取消呼叫</string>
     <string name="call_canceled">对方取消了呼叫</string>
+    <!-- v0.2.52 全屏呼叫页 -->
+    <string name="outgoing_calling">正在呼叫 TA…</string>
+    <string name="outgoing_preparing">准备呼叫中，请先允许屏幕共享</string>
+    <string name="outgoing_hangup">挂断</string>
+    <string name="outgoing_dismiss">算了</string>
     <string name="unpaired_done">已解除配对，可以和新的设备重新绑定了</string>
     <string name="unpair_button">解除配对</string>
     <string name="unpair_title">解除配对？</string>

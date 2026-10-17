@@ -194,4 +194,72 @@ class AuditRound2WiringTest {
         assertTrue("电池引导必须用 batteryPromptAt 时间戳", text.contains("batteryPromptAt(this)"))
         assertTrue("不得再走只问一次的 askedBattery", !text.contains("askedBattery"))
     }
+
+    // ==== v0.2.52 全屏主叫页：peer.offline 温柔漏斗 + 呼叫态收口，回滚即变红 ====
+
+    private fun mainSource() = source("app/src/main/java/com/soul2soul/app/MainActivity.kt")
+
+    @Test
+    fun `peer offline uses ringback not instant message dialog`() {
+        // L4：冷冰冰的"TA不在线要留言吗"弹窗必须整体移除，改为呼叫页假振铃后再出温柔引导
+        val text = mainSource().joinToString("\n")
+        assertTrue("showLeaveMessageDialog 冷弹窗必须删除", !text.contains("showLeaveMessageDialog"))
+        val block = linesAfter(mainSource(), { it.contains("\"peer.offline\" ->") }, 24)
+        assertTrue("真离线必须走 ringback 假振铃再转 OFFLINE_PROMPT",
+            block.any { it.contains("ringback.postDelayed") } &&
+                block.any { it.contains("OutgoingPhase.OFFLINE_PROMPT") })
+        assertTrue("必须按 reason 分流（空=TA离线，非空=主叫侧问题）",
+            block.any { it.contains("reason.isEmpty()") })
+    }
+
+    @Test
+    fun `offline reason errors do not enter message funnel`() {
+        // L5：too_fast/not_authed 属主叫侧问题，只 toast，绝不进留言漏斗
+        val block = linesAfter(mainSource(), { it.contains("\"peer.offline\" ->") }, 24)
+        val elseArm = block.dropWhile { !it.contains("} else {") }
+        assertTrue("非空 reason 分支必须落回 NONE + 轻量 toast",
+            elseArm.any { it.contains("OutgoingPhase.NONE") } &&
+                elseArm.any { it.contains("toast(R.string.peer_offline)") })
+        assertTrue("peer.offline 处理内不得直接跳留言页（只有离线子态的按钮可以）",
+            block.none { it.contains("MessageActivity") })
+    }
+
+    @Test
+    fun `outgoing overlay visibility funnels through updateUi only`() {
+        // L6：overlay 显隐单点收口——散落赋值迟早漏一条（v0.2.44 丢球同款根因）
+        val lines = mainSource()
+        val assigns = lines.count { it.contains("outgoingOverlay.visibility =") }
+        assertTrue("outgoingOverlay 可见性必须只有一处赋值，实际 ${assigns} 处", assigns == 1)
+        val i = lines.indexOfFirst { it.contains("private fun updateUi") }
+        val j = lines.indexOfFirst { it.contains("outgoingOverlay.visibility =") }
+        assertTrue("且必须位于 updateUi 内", i >= 0 && j > i)
+    }
+
+    @Test
+    fun `every outgoing exit clears handlers and resets phase`() {
+        // L6：六路出口全清——任何一条漏撤 Handler 或漏复位，呼叫页就会挂死
+        val lines = mainSource()
+        val exits = listOf(
+            "\"declined\" -> {", "\"bye\" -> {", "\"call.canceled\" -> {",
+            "\"unpaired\" -> {", "\"local.sessionEnded\" -> {", "\"local.sessionLive\" -> {",
+        )
+        for (marker in exits) {
+            val block = linesAfter(lines, { it.contains(marker) }, 12)
+            assertTrue("$marker 必须经 endOutgoing 统一复位",
+                block.any { it.contains("endOutgoing()") })
+        }
+        val accepted = linesAfter(lines, { it.contains("\"accepted\" -> {") }, 10)
+        assertTrue("accepted 必须收起呼叫页（置 NONE）并撤 ringback",
+            accepted.any { it.contains("outgoingPhase = OutgoingPhase.NONE") } &&
+                accepted.any { it.contains("ringback.removeCallbacksAndMessages") })
+        val helper = linesAfter(lines, { it.contains("private fun endOutgoing") }, 8)
+        assertTrue("endOutgoing 必须同时撤 callTimeout 与 ringback 两把 Handler",
+            helper.any { it.contains("callTimeout.removeCallbacksAndMessages") } &&
+                helper.any { it.contains("ringback.removeCallbacksAndMessages") })
+        val timeout = linesAfter(lines, { it.contains("if (outgoingPending && gen == callGen)") }, 5)
+        assertTrue("呼叫超时必须经 endOutgoing 收口", timeout.any { it.contains("endOutgoing()") })
+        val denied = linesAfter(lines, { it.contains("toast(R.string.projection_denied)") }, 3)
+        assertTrue("授权拒绝必须经 endOutgoing 收口（呼叫页不能留在屏上）",
+            denied.any { it.contains("endOutgoing()") })
+    }
 }

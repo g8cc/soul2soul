@@ -70,6 +70,8 @@ class MainActivity : AppCompatActivity() {
         private const val MEDIA_CONNECT_TIMEOUT_MS = 45_000L
         // 电池豁免引导节流：未豁免用户每 3 天最多被 gentle 提醒一次（首启仍走原时机）
         private const val BATTERY_PROMPT_INTERVAL_MS = 3L * 24 * 60 * 60 * 1000
+        // 假振铃时长：TA 离线时先保持呼叫画面这么多秒，再转温柔的留言引导（微信式缓冲）
+        private const val RINGBACK_MS = 6_000L
 
         @Volatile var outgoingPending = false
         @Volatile var acceptedReceived = false
@@ -95,6 +97,19 @@ class MainActivity : AppCompatActivity() {
     private lateinit var permOverlay: View
     private lateinit var permAccessibility: View
 
+    // ---------- v0.2.52 全屏主叫页 ----------
+    private lateinit var outgoingOverlay: View
+    private lateinit var tvOutgoingStatus: TextView
+    private lateinit var offlinePrompt: View
+    private lateinit var btnDismiss: View
+
+    private enum class OutgoingPhase { NONE, RINGING, OFFLINE_PROMPT }
+
+    private var outgoingPhase = OutgoingPhase.NONE
+    private var inviteSent = false
+    private var callGen = 0
+    private val ringback = Handler(Looper.getMainLooper())
+
     /** 留言箱变化（含后台经 PresenceService 收到的）实时刷主页角标 */
     private val inboxListener: () -> Unit = {
         runOnUiThread { if (!isDestroyed) updateUi() }
@@ -107,15 +122,19 @@ class MainActivity : AppCompatActivity() {
                 // 用户可能在系统授权页期间点了取消，或主叫等待超时；不要让迟到的授权结果重新发起邀请。
                 if (!outgoingPending) {
                     projectionData = null
+                    endOutgoing()
                     updateUi()
                 } else {
                     // 授权成功 → 此时才发邀请；对方接听后 accepted 到达即启动共享服务
                     projectionData = data
+                    inviteSent = true
+                    updateUi()
                     Presence.client.send("invite")
                     Log.d(TAG, "invite sent")
+                    val gen = callGen
                     callTimeout.postDelayed({
-                        if (outgoingPending) {
-                            cancelOutgoing()
+                        if (outgoingPending && gen == callGen) {
+                            endOutgoing()
                             toast(R.string.call_timeout)
                             updateUi()
                         }
@@ -123,7 +142,7 @@ class MainActivity : AppCompatActivity() {
                 }
             } else {
                 toast(R.string.projection_denied)
-                cancelOutgoing()
+                endOutgoing()
             }
             updateUi()
         }
@@ -194,6 +213,20 @@ class MainActivity : AppCompatActivity() {
         permMic = findViewById(R.id.permMic)
         permOverlay = findViewById(R.id.permOverlay)
         permAccessibility = findViewById(R.id.permAccessibility)
+        outgoingOverlay = findViewById(R.id.outgoingOverlay)
+        tvOutgoingStatus = findViewById(R.id.tvOutgoingStatus)
+        offlinePrompt = findViewById(R.id.offlinePrompt)
+        btnDismiss = findViewById(R.id.btnDismiss)
+        findViewById<View>(R.id.btnHangup).setOnClickListener { onHangupClicked() }
+        findViewById<View>(R.id.btnGoMessage).setOnClickListener {
+            endOutgoing()
+            updateUi()
+            startActivity(Intent(this, com.soul2soul.app.msg.MessageActivity::class.java))
+        }
+        btnDismiss.setOnClickListener {
+            endOutgoing()
+            updateUi()
+        }
         findViewById<TextView>(R.id.tvAppVersion).text = "v${BuildConfig.VERSION_NAME}"
 
         findViewById<View>(R.id.btnShowCode).setOnClickListener {
@@ -290,6 +323,10 @@ class MainActivity : AppCompatActivity() {
                 if (!outgoingPending) return
                 // 对方接听：屏幕授权已在邀请前完成，此刻直接启动共享服务（offer 即刻发出）
                 callTimeout.removeCallbacksAndMessages(null)
+                // 全屏呼叫页收起：会话页/共享服务接管后续
+                ringback.removeCallbacksAndMessages(null)
+                outgoingPhase = OutgoingPhase.NONE
+                updateUi()
                 acceptedReceived = true
                 Presence.iceServersJson = json.optJSONArray("iceServers")
                 // 录屏授权 token 即用即清：不留驻静态字段（异常时序也不复用旧授权）
@@ -299,15 +336,16 @@ class MainActivity : AppCompatActivity() {
                 }
                 // accepted 只代表对方点击了接听；媒体仍可能卡在授权、SDP 或 ICE。
                 // 给主叫端也留一个总出口，避免共享服务异常时主页永久显示“呼叫中”。
+                val mediaGen = callGen
                 callTimeout.postDelayed({
-                    if (outgoingPending && acceptedReceived) {
+                    if (outgoingPending && acceptedReceived && mediaGen == callGen) {
                         if (ScreenShareService.isLive()) {
                             // 主页可能在后台错过 local.sessionLive；服务状态才是权威来源。
-                            cancelOutgoing()
+                            endOutgoing()
                             updateUi()
                         } else {
                             Presence.client.send("bye")
-                            cancelOutgoing()
+                            endOutgoing()
                             toast(R.string.connect_timeout)
                             updateUi()
                         }
@@ -315,8 +353,7 @@ class MainActivity : AppCompatActivity() {
                 }, MEDIA_CONNECT_TIMEOUT_MS)
             }
             "declined" -> {
-                callTimeout.removeCallbacksAndMessages(null)
-                cancelOutgoing()
+                endOutgoing()
                 toast(R.string.peer_declined)
                 updateUi()
             }
@@ -324,23 +361,36 @@ class MainActivity : AppCompatActivity() {
                 // 对端在未接听前就结束（旧版本秒挂/异常退出兜底）：主叫端立即复位，
                 // 否则界面停留在"呼叫中"，只能干等 45s 超时
                 if (outgoingPending && !acceptedReceived) {
-                    callTimeout.removeCallbacksAndMessages(null)
-                    cancelOutgoing()
+                    endOutgoing()
                     toast(R.string.peer_ended_call)
                     updateUi()
                 }
             }
             "call.canceled" -> {
-                callTimeout.removeCallbacksAndMessages(null)
-                cancelOutgoing()
+                endOutgoing()
                 toast(R.string.call_canceled)
                 updateUi()
             }
             "peer.offline" -> {
                 callTimeout.removeCallbacksAndMessages(null)
                 cancelOutgoing()
+                // inviteSent 保持 true：假振铃阶段文案应继续是"正在呼叫 TA…"而非"等待授权"
                 val reason = json.optString("reason")
-                if (reason.isEmpty()) showLeaveMessageDialog() else toast(R.string.peer_offline)
+                // 空 reason=TA 真离线：呼叫页继续假振铃几秒，再转温柔的留言引导（点一下就弹框太冷）
+                // 带 reason(too_fast/not_authed)=主叫侧问题：轻量提示，绝不进留言漏斗
+                if (reason.isEmpty() && outgoingPhase == OutgoingPhase.RINGING) {
+                    val gen = callGen
+                    ringback.postDelayed({
+                        if (gen == callGen && outgoingPhase == OutgoingPhase.RINGING) {
+                            outgoingPhase = OutgoingPhase.OFFLINE_PROMPT
+                            updateUi()
+                        }
+                    }, RINGBACK_MS)
+                } else {
+                    ringback.removeCallbacksAndMessages(null)
+                    outgoingPhase = OutgoingPhase.NONE
+                    toast(R.string.peer_offline)
+                }
                 updateUi()
             }
             "msg.inbox" -> updateUi()
@@ -362,8 +412,7 @@ class MainActivity : AppCompatActivity() {
             "msg.recall_failed" -> toast(R.string.msg_recall_failed)
             "unpaired" -> {
                 // 被对端解除配对（或自己发起后服务端确认）
-                callTimeout.removeCallbacksAndMessages(null)
-                cancelOutgoing()
+                endOutgoing()
                 Prefs.setPaired(this, false)
                 Prefs.setPairToken(this, null)
                 Presence.client.setPairToken(null)
@@ -381,16 +430,14 @@ class MainActivity : AppCompatActivity() {
             }
             "local.sessionEnded" -> {
                 // 会话因任何原因结束时，共享服务广播此本地事件：复位主叫"呼叫中"状态
-                callTimeout.removeCallbacksAndMessages(null)
-                cancelOutgoing()
+                endOutgoing()
                 updateUi()
             }
             "local.sessionLive" -> {
                 // ICE 真连通 = 呼叫这个"动作"已完结：必须 cancelOutgoing，
                 // 否则 outgoingPending 挂着，主页整个共享期间都显示"呼叫中…"（v0.2.38 真机踩坑）。
                 // 会话本身的存续由共享服务/boxSharing 负责，与呼叫状态无关。
-                callTimeout.removeCallbacksAndMessages(null)
-                cancelOutgoing()
+                endOutgoing()
                 updateUi()
             }
         }
@@ -428,9 +475,8 @@ class MainActivity : AppCompatActivity() {
     private fun onCallClicked() {
         if (outgoingPending) {
             // 二次点击 = 取消呼叫（对方已接听则发 bye，让 TA 别干等）
-            callTimeout.removeCallbacksAndMessages(null)
             if (acceptedReceived) Presence.client.send("bye") else Presence.client.send("cancel")
-            cancelOutgoing()
+            endOutgoing()
             updateUi()
             return
         }
@@ -448,22 +494,30 @@ class MainActivity : AppCompatActivity() {
         }
         maybeShowRomGuide()
         outgoingPending = true
+        callGen += 1
+        inviteSent = false
+        outgoingPhase = OutgoingPhase.RINGING
         updateUi()
         // 先授权屏幕、后邀请：对方一接听立刻出画面，中间无授权间隙
         requestScreenCapture()
     }
 
-    /** 对方不在线时的出路：引导去留言（无厂商推送，留言在对方打开 App 时送达） */
-    private fun showLeaveMessageDialog() {
-        if (isFinishing || isDestroyed) return
-        AlertDialog.Builder(this)
-            .setTitle(R.string.msg_peer_offline_title)
-            .setMessage(R.string.msg_peer_offline_msg)
-            .setPositiveButton(R.string.msg_goto) { _, _ ->
-                startActivity(Intent(this, com.soul2soul.app.msg.MessageActivity::class.java))
-            }
-            .setNegativeButton(R.string.msg_got_it, null)
-            .show()
+    /** 主叫全出口收口：两把 Handler 必撤 + companion 状态复位 + 呼叫页收起（hideX 必穷举 restoreX） */
+    private fun endOutgoing() {
+        callTimeout.removeCallbacksAndMessages(null)
+        ringback.removeCallbacksAndMessages(null)
+        cancelOutgoing()
+        inviteSent = false
+        outgoingPhase = OutgoingPhase.NONE
+    }
+
+    /** 呼叫页挂断：与「一起玩」二次点击同语义；假振铃阶段邀请本就没送达，只收页面不发 cancel */
+    private fun onHangupClicked() {
+        if (outgoingPending) {
+            if (acceptedReceived) Presence.client.send("bye") else Presence.client.send("cancel")
+        }
+        endOutgoing()
+        updateUi()
     }
 
     /** 解除配对：换绑设备/测试切换用。解绑后双方都回到未配对状态，需重新走配对码 */
@@ -822,6 +876,19 @@ class MainActivity : AppCompatActivity() {
         if (paired) findViewById<View>(R.id.ivMyCodeQr).visibility = View.GONE
         syncShakeListening()
         btnCall.text = if (outgoingPending) getString(R.string.btn_cancel_call) else getString(R.string.btn_call)
+        // v0.2.52 全屏主叫页：可见性只在这里收口，任何状态变化都必须走 updateUi
+        outgoingOverlay.visibility = if (outgoingPhase == OutgoingPhase.NONE) View.GONE else View.VISIBLE
+        val showOffline = outgoingPhase == OutgoingPhase.OFFLINE_PROMPT
+        offlinePrompt.visibility = if (showOffline) View.VISIBLE else View.GONE
+        btnDismiss.visibility = if (showOffline) View.VISIBLE else View.GONE
+        tvOutgoingStatus.setText(
+            when (outgoingPhase) {
+                OutgoingPhase.NONE -> R.string.outgoing_calling
+                OutgoingPhase.RINGING ->
+                    if (inviteSent) R.string.outgoing_calling else R.string.outgoing_preparing
+                OutgoingPhase.OFFLINE_PROMPT -> R.string.msg_peer_offline_title
+            }
+        )
         val unread = com.soul2soul.app.msg.InboxStore.received().size
         btnMessage.text = if (unread > 0) {
             getString(R.string.msg_button) + "（$unread）"

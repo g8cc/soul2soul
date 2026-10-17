@@ -10,4 +10,9 @@
             <certificates src="system" />
         </trust-anchors>
     </base-config>
+    <!-- emu 风味双模拟器联调只连宿主机回环 10.0.2.2；本配置存在时会接管 usesCleartextTraffic，
+         必须显式放行这个纯开发地址（prod 用 wss，不受影响） -->
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">10.0.2.2</domain>
+    </domain-config>
 </network-security-config>

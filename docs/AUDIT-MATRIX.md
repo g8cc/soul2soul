@@ -78,5 +78,19 @@
 | 表情面板分组 | PASS 面板关时 tab 状态保留（emojiTab 单一内存态） | PASS v0.2.48：四组 tab（笑脸/手势/爱心/符号），全表 Android7 cmap 验证+FE0F 强制，EmojiPanelCatalogTest 锁定；回滚删组或塞 🥰 即变红。v0.2.49 模拟器全链验证：切组/连插/草稿保留 | N-A | N-A |
 | 键盘开着×点😊 | PASS 常规 | PASS v0.2.49：setEmojiPanel 先 clearFocus 再 hideSoftInput（HIDE_NOT_ALWAYS），AuditRound2WiringTest 锁定顺序；模拟器实测面板开+键盘收+草稿在。⬜ MIUI 键盘回弹路径待真机复验（Mi5 注入权限被 MIUI 收回，需手动开「USB调试(安全设置)」） | N-A | N-A |
 
+## 6. 主叫呼叫页（MainActivity outgoingOverlay 状态机）
+
+状态：`NONE` / `RINGING（inviteSent 区分 准备中↔正在呼叫）` / `OFFLINE_PROMPT`；转屏已 configChanges 不重建。
+
+| 事件＼状态 | NONE | RINGING | OFFLINE_PROMPT |
+|---|---|---|---|
+| 恢复对称性（每出口必清 Handler+复位） | N-A | PASS v0.2.52：accepted/declined/bye/call.canceled/unpaired/local.sessionEnded/local.sessionLive/CALL_TIMEOUT/projection_denied 九路全经 endOutgoing()（双 removeCallbacks + cancelOutgoing + inviteSent=false + NONE），AuditRound2WiringTest L6 逐 case 锁；媒体超时另设 mediaGen 守卫 | 算了/挂断→endOutgoing→NONE |
+| overlay 可见性单点收口 | PASS | PASS L6：`outgoingOverlay.visibility` 全文件仅 updateUi 一处赋值（gate 计 ==1） | 同左（同函数分支） |
+| 假振铃文案 | — | PASS L：peer.offline 保持 inviteSent=true，振铃期文案="正在呼叫 TA…"（非"准备呼叫中"）；v0.2.52 模拟器实测 t+1s 正确 | — |
+| 离线转留言漏斗 | — | PASS 空 reason→ringback(6s,RINGBACK_MS)→OFFLINE_PROMPT；非空 reason(too_fast/not_authed)→toast 不进漏斗（L5） | PASS 去留言→MessageActivity（模拟器实测打开）、TA不在线文案+给出路 |
+| 权限中途收回/授权拒绝 | projectionLauncher else→toast+endOutgoing | PASS stale 守卫（!outgoingPending 时投影结果作废不复呼） | N-A |
+| 多入口多出口配对 | 一起玩起手 callGen+=1 复位 | 二次点一起玩=取消（send cancel/bye+endOutgoing）；挂断=onHangupClicked | 去留言/算了/挂断三路 |
+| 降级老机型（Android7 Mi5） | ⬜ 全屏 overlay 渲染待真机 | ⬜ 假振铃 6s 手感待真机（Mi5 无注入权限，手动验证） | ⬜ 待真机 |
+
 ---
 维护规则（AUDIT.md §5）：每关一条真机 bug，本表加一行/填一格并登记 gate；新有状态功能上线前必须先有 §表头，格子可以 ⬜，表不能没有。
