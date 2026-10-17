@@ -20,14 +20,14 @@
 
 ## 2. 共享会话（ScreenShareService / SessionActivity / PresenceService）
 
-状态：`未开始` / `握手中(offer/ice待排)` / `共享中(live)` / `锁屏停格(≤15s)` / `收尾(stopping)`
+状态：`未开始` / `握手中(offer/ice待排)` / `共享中(live)` / `锁屏暂停(会话存续，v0.2.56)` / `收尾(stopping)`
 
-| 事件＼状态 | 未开始 | 握手中 | 共享中(live) | 锁屏停格 | 收尾(stopping) |
+| 事件＼状态 | 未开始 | 握手中 | 共享中(live) | 锁屏暂停 | 收尾(stopping) |
 |---|---|---|---|---|---|
 | bye / peer.gone | N-A 无会话 | PASS 未接听=上一轮呼叫回声必须忽略（SignalRouter + SignalRouterTest） | PASS PeerEnded 横幅+退出（同上） | PASS stopSession(sendBye) 后迟到=无害 | N-A |
-| 断网（peer_lost） | N-A | ⬜ 连接超时路径真机待核 | PASS peer_lost 横幅（SignalRouterTest） | N-A 已停格计时 | N-A |
-| 息屏/锁屏 | N-A | ⬜ live 前锁屏不发 screenoff（gated `if live`），观看端对着冻结画面——待真机 | PASS 立即 screenoff+收回授权横幅 | PASS screenOffStop 15s 自动结束（PRD FR-8，"帧数判据误杀"已锁） | N-A |
-| 解锁 | N-A | — | PASS v0.2.45：screenon anno+ctl 双通道补发，横幅不再被弱网丢包卡死（AuditRound2WiringTest） | PASS 撤停格计时+screenon | N-A |
+| 断网（peer_lost） | N-A | ⬜ 连接超时路径真机待核 | PASS peer_lost 横幅（SignalRouterTest） | ⬜ v0.2.56 起锁屏期间会话仍活着，断网照常要报 peer_lost（旧版此时已自杀，反而掩盖）——待真机 | N-A |
+| 息屏/锁屏（共享端） | N-A | ⬜ live 前锁屏不发 screenoff（gated `if live`），观看端对着冻结画面——待真机 | PASS 立即 screenoff+收回授权横幅 | PASS v0.2.56：**不再自动结束会话**（`screenOffStop`/`SCREEN_OFF_TIMEOUT_MS` 已删，画面冻在最后一帧·语音继续）；LockScreenKeepAliveTest L1/L2 + SessionEndDiagTest D3 反向锁。⬜ HyperOS 是否自己拆掉 MediaProjection（`projection_stopped`）只能真机证 | N-A |
+| 解锁（共享端） | N-A | — | PASS v0.2.45：screenon anno+ctl 双通道补发，横幅不再被弱网丢包卡死（AuditRound2WiringTest） | PASS screenon 撤横幅 + 复位 `remoteScreenPaused`（同一条路径，LockScreenKeepAliveTest L4）；旧"撤停格计时"随看门狗一起删除 | N-A |
 | 对方取消呼叫 | PASS 来电通知同步撤销 ID_CALL（v0.2.45，AuditRound2WiringTest） | PASS CallerCanceledBeforeAccept：停铃+提示+finish | N-A 已接听走 CanceledAfterAccept（授权阶段主叫反悔，别让对方数 30 秒） | — | N-A |
 | 操控授权中途被收回 | N-A | — | PASS v0.2.45：ctl_denied→applyControlMode(false) 退出死模式+横幅说明；controlMode 写入全文件收敛一处（AuditRound2WiringTest） | PASS 锁屏收回专用 DeniedScreenOff（CtlConsentMachineTest） | N-A |
 | 通知栏动作按钮可见性 | N-A | — | PASS v0.2.46：静音/操控/结束三键全带图标——icon=0 纯文字按钮在折叠态不渲染，MIUI/HyperOS 常驻通知默认折叠（真机实锤"按钮时有时无"；t0 addAction(0 守卫） | N-A | N-A |
@@ -36,8 +36,11 @@
 | 进程被杀 START_STICKY | ⬜ intent=null 重建路径（同 §1 孤儿球，一并真机核） | — | — | — | — |
 | 息屏待命保活（Presence 长连接） | PASS v0.2.51：配对期持 PARTIAL_WAKE_LOCK（acquire 带 6h 超时+5h 自续期，onCreate 排在 startForeground 后，onDestroy/unpaired 成对释放，AuditRound2WiringTest 锁三对偶）；FGS 类型 dataSync→specialUse（Android14 dataSync 有每日时长上限会定时停服）；服务器30s ping/OkHttp20s ping 不变 | N-A 会话期保活归上面"息屏/锁屏"行 | N-A | N-A | N-A |
 | 息屏待命真机复验 | ⬜ 双真机配对→静置锁屏≥5min→唤醒互呼直达、logcat 无 terminate/重连风暴（wakelock+豁免的实际效果只能真机证） | — | — | — | — |
-| 终止原因可追溯（diag.*，v0.2.55） | PASS 未真正起流（connectStartedAtMs≤0）不发帧，不产噪声 | PASS reason=connect_TIMEOUT/sdp_* + fg 位（Android14+ 后台起采集被拒时可辨） | PASS 所有本地收尾汇流 close()→diag.session（reason/ice/setupMs/liveMs/fg/screenOn）；SessionEndDiagTest D1/D2/D4 锁 | PASS 锁屏事件先走 DataChannel（服务器看不见），另发 diag.event screen_off + 超时结束带 screen_off_timeout；D3 锁 | PASS local_stop/user_hangup/remote_bye 三分叉（first-wins，上游真因不被覆盖） |
+| 终止原因可追溯（diag.*，v0.2.55） | PASS 未真正起流（connectStartedAtMs≤0）不发帧，不产噪声 | PASS reason=connect_TIMEOUT/sdp_* + fg 位（Android14+ 后台起采集被拒时可辨） | PASS 所有本地收尾汇流 close()→diag.session（reason/ice/setupMs/liveMs/fg/screenOn）；SessionEndDiagTest D1/D2/D4 锁 | PASS 锁屏事件先走 DataChannel（服务器看不见），另发 diag.event screen_off（detail=keepalive）；v0.2.56 起不再有 screen_off_timeout；D3 反向锁 | PASS local_stop/user_hangup/remote_bye 三分叉（first-wins，上游真因不被覆盖） |
+| 启动失败不谎报（v0.2.56 盲点） | N-A | ⬜ `fgs_start_failed` / `webrtc_start_failed` 两条新事件首次真机命中待核 | PASS 两处 catch 各带一条 diag.event，且起流失败先 noteEnd 抢在 local_stop 前（PiPLockScreenGuardTest L3/L4） | N-A | N-A |
 | 观看端本端锁屏→解锁（黑屏排查，v0.2.55） | N-A | ⬜ 握手中锁屏是否丢首帧渲染，待真机 | PASS 观测面补齐：surface_created/size/destroyed + sink_attached + 连续 3 个诊断窗口零帧报 video_stall + viewer_paused/resumed（D5 锁）。**只加判据、不改行为**——真实修法等双端日志回来 | — | N-A |
+| 观看端进/出小窗（PiP，v0.2.56） | N-A | — | PASS 锁屏/息屏引起的 onUserLeaveHint 不再进小窗（`isInteractive` 前置判断）；进出各报 `pip_enter`/`pip_exit`（PiPLockScreenGuardTest L1/L2）。⬜ surface 只观测不重挂——若日志证实 destroyed 后无 created，下一版补重挂 | N-A | N-A |
+| 信令断 vs 媒体断（v0.2.56） | N-A | — | PASS 会话期 onState 断/续报 `signaling_down`/`signaling_up`（无会话不报，防噪声；PiPLockScreenGuardTest L4） | 同左（锁屏期间信令掉也照报） | N-A |
 | 观看端入口球（小铅笔）拖动（v0.2.55） | N-A | N-A 球未显 | PASS 可拖到画面任意角落：slop 内仍算点击（performClick 保住菜单展开+无障碍），拖出由 clampBallIntoParent 钳回；父容器重布局（转屏/系统栏）时重新钳制；ViewerBallDragTest B1–B3 锁 | — | N-A |
 
 ## 3. 配对三通道（找回/互摇/扫码）

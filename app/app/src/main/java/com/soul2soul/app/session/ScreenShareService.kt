@@ -48,9 +48,11 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
     private val ctlTelemetry = CtlLatencyTelemetry { android.os.SystemClock.elapsedRealtime() }
 
     /**
-     * 锁屏看门狗（PRD FR-8）：锁屏后 VirtualDisplay 停止出帧，15 秒后自动结束防挂死。
-     * 不能用"帧数停止增长"判断 —— 静止画面同样不出帧，会误杀（已踩坑）。
-     * 锁屏瞬间立即通知观看端，别让对方对着冻结画面干等。
+     * 锁屏=画面暂停、会话存续（v0.2.56 推翻 PRD FR-8 的"15 秒自动结束"）：
+     * 两人边语音边各玩各的，手机不动就会锁屏，会话必须继续。
+     * 结束会话只剩三条路：本端挂断 / 对端 bye·peer.gone / ICE 真断超时。
+     * 仍不能用"帧数停止增长"判断锁屏 —— 静止画面同样不出帧，会误杀（已踩坑）。
+     * 锁屏瞬间立即通知观看端，让对方知道画面是暂停而不是卡死。
      */
     private val screenReceiver = object : android.content.BroadcastReceiver() {
         override fun onReceive(context: Context, intent: android.content.Intent) {
@@ -62,21 +64,17 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
                     dispatchConsent(consent.revokeOnScreenOff())
                     sendScreenStatus("screenoff")
                     // 锁屏只在 DataChannel 上通知对方，服务器看不见：自报一份，
-                    // 否则"被控端锁屏→15 秒会话结束"在服务器日志里就是无因断连
+                    // 否则"被控端锁屏后对方看到的停格"在服务器日志里就是无因现象
                     com.soul2soul.app.util.SelfCheck.reportEvent(
                         this@ScreenShareService, "sharer", "screen_off",
-                        webRtc?.iceStateName ?: "-",
-                        "timeoutMs=$SCREEN_OFF_TIMEOUT_MS",
+                        webRtc?.iceStateName ?: "-", "keepalive",
                     )
-                    watchdog.postDelayed(screenOffStop, SCREEN_OFF_TIMEOUT_MS)
                 }
                 android.content.Intent.ACTION_SCREEN_ON -> {
-                    watchdog.removeCallbacks(screenOffStop)
                     sendScreenStatus("screenon")
                     com.soul2soul.app.util.SelfCheck.reportEvent(
                         this@ScreenShareService, "sharer", "screen_on",
-                        webRtc?.iceStateName ?: "-",
-                        if (live) "rescued" else "already_ended",
+                        webRtc?.iceStateName ?: "-", "resumed",
                     )
                 }
             }
@@ -89,12 +87,6 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
         val json = org.json.JSONObject().put("k", k)
         runCatching { webRtc?.sendAnnotation(json) }
         runCatching { webRtc?.sendControl(json) }
-    }
-    private val screenOffStop = Runnable {
-        if (live) {
-            webRtc?.noteEnd("screen_off_timeout")
-            stopSession(sendBye = true)
-        }
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -135,7 +127,6 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
         // onDestroy(). Reset all per-call state before accepting the new projection.
         stopping = false
         pendingSignals.clear()
-        watchdog.removeCallbacks(screenOffStop)
 
         val projection: Intent? = intent?.let { it.getProjectionExtra(EXTRA_PROJECTION) }
         if (projection == null) {
@@ -150,6 +141,12 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
             startSessionForeground()
         } catch (e: Exception) {
             Log.e("ScreenShareService", "start foreground failed", e)
+            // 后台起 FGS 被拒（Android 12+ ForegroundServiceStartNotAllowedException /
+            // Android 14+ HyperOS FGS 类型校验）是"被控端几秒即断"的头号嫌疑。
+            // 这里只发 bye 的话，服务器看到的就是一个无因断连，必须先自报。
+            com.soul2soul.app.util.SelfCheck.reportEvent(
+                this, "sharer", "fgs_start_failed", "-", e.javaClass.simpleName,
+            )
             Presence.client.send("bye")
             MainActivity.cancelOutgoing()
             SignalBus.emit(JSONObject().put("type", "local.sessionEnded"))
@@ -213,6 +210,13 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
             startService(Intent(this, AnnotationOverlayService::class.java))
         } catch (e: Exception) {
             Log.e("ScreenShareService", "start WebRTC failed", e)
+            com.soul2soul.app.util.SelfCheck.reportEvent(
+                this, "sharer", "webrtc_start_failed", webRtc?.iceStateName ?: "-",
+                e.javaClass.simpleName,
+            )
+            // 抢在 stopSession 的 local_stop 之前把真因压进 first-wins 槽：
+            // 否则服务器收到的是"用户主动停止"，一句谎报
+            webRtc?.noteEnd("webrtc_start_failed")
             stopSession(sendBye = true)
         }
         // 系统若杀掉会话进程，不做无意义的复活（屏幕授权意图已失效）
@@ -221,7 +225,6 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
 
     override fun onDestroy() {
         stopping = true
-        watchdog.removeCallbacks(screenOffStop)
         watchdog.removeCallbacksAndMessages(null) // 排队中的手势注入一并作废（服务已亡不再代表会话授权）
         consent.resetForNewSession()
         signalJob?.cancel()
@@ -422,7 +425,6 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
         live = false
         liveState = false
         Presence.sessionBusy = false
-        watchdog.removeCallbacks(screenOffStop)
         if (screenReceiverRegistered) {
             runCatching { unregisterReceiver(screenReceiver) }
             screenReceiverRegistered = false
@@ -432,7 +434,7 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
         // 静音是发送轨属性，随 AudioSource 销毁而复位，无需再全局恢复系统麦克风
         com.soul2soul.app.util.WifiKeeper.release()
         if (sendBye) Presence.client.send("bye")
-        // 没有任何上游终止原因时才落到 local_stop：用户点停止/锁屏超时会先 noteEnd
+        // 没有任何上游终止原因时才落到 local_stop：用户点停止/连接失败会先 noteEnd
         if (sendBye) webRtc?.noteEnd("local_stop")
         val client = webRtc
         webRtc = null
@@ -552,7 +554,6 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
         const val ACTION_SET_CTL = "com.soul2soul.app.action.SET_CTL"
         const val EXTRA_CTL_ON = "ctl_on"
         const val EXTRA_PROJECTION = "projection"
-        private const val SCREEN_OFF_TIMEOUT_MS = 15_000L
         private const val CTL_ERROR_THROTTLE_MS = 2_000L
 
         /** 操控授权状态机（会话级）：通知按钮与授权对话框都经它读写，跨 Activity/Service 共享 */

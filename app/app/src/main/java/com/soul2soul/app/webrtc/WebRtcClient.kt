@@ -163,6 +163,14 @@ class WebRtcClient(
     @Volatile private var endReason = ""
     private val role = if (isSharer) "sharer" else "viewer"
     private var viewerZeroFpsStreak = 0
+    /** 对方锁屏=画面暂停、会话存续（v0.2.56）：零帧是预期行为，不能报成"卡死"告警 */
+    @Volatile private var remoteScreenPaused = false
+
+    /** screenoff/screenon 的唯一写入口：恢复侧顺手清 streak，否则解锁瞬间沿用旧计数误报 */
+    fun setRemoteScreenPaused(paused: Boolean) {
+        remoteScreenPaused = paused
+        if (!paused) viewerZeroFpsStreak = 0
+    }
     private val endedNotified = java.util.concurrent.atomic.AtomicBoolean(false)
     @Volatile private var remoteDescriptionSet = false
     private val pendingRemoteIce = mutableListOf<IceCandidate>()
@@ -893,8 +901,9 @@ class WebRtcClient(
                                 "audioConcealedMs=${formatMetric(audioWindow.concealedMs)}",
                         )
                         // 观看端"黑屏"的直接证据：ICE 仍 CONNECTED 但收流帧率连续为 0，
-                        // 说明断的是共享端的采集/编码，不是网络（服务器看不见媒体，只能自报）
-                        if (!isSharer && established) {
+                        // 说明断的是共享端的采集/编码，不是网络（服务器看不见媒体，只能自报）。
+                        // 对方锁屏期间零帧是设计行为（画面暂停·语音继续），排除在外。
+                        if (!isSharer && established && !remoteScreenPaused) {
                             if (inboundVideoFps <= 0.0) {
                                 viewerZeroFpsStreak++
                                 if (viewerZeroFpsStreak == VIEWER_STALL_POLLS) {

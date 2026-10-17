@@ -148,11 +148,13 @@ EOF
 echo "  A 端新增红点: $RED"
 ck "笔迹跨端到达 A" $([ "${RED:-0}" -gt 3 ] && echo 1 || echo 0)
 
-# 7) 锁屏 30s 自动结束 (AC-6)
+# 7) 锁屏保活 (AC-6，v0.2.56 反转：锁屏=画面暂停·语音继续，绝不结束会话)
 $ADB -s $S1 shell input keyevent 26; sleep 40
 BYE=$($ADB -s $S2 logcat -d 2>/dev/null | grep -c "signal: bye\|signal: peer.gone" || true)
-ck "锁屏后会话自动结束(B 收到 bye/gone)" $([ "$BYE" -gt 0 ] && echo 1 || echo 0)
-$ADB -s $S1 shell input keyevent 26; sleep 2; $ADB -s $S1 shell input keyevent 82
+ck "锁屏 40s 后会话仍在(B 不得收到 bye/gone)" $([ "${BYE:-0}" -eq 0 ] && echo 1 || echo 0)
+$ADB -s $S1 shell input keyevent 26; sleep 2; $ADB -s $S1 shell input keyevent 82; sleep 10
+BYE2=$($ADB -s $S2 logcat -d 2>/dev/null | grep -c "signal: bye\|signal: peer.gone" || true)
+ck "解锁后 10s 会话仍在(画面恢复的前提；是否真出帧需人眼确认)" $([ "${BYE2:-0}" -eq 0 ] && echo 1 || echo 0)
 
 echo "== DRIVE: PASS=$P FAIL=$F =="
 if [ "$F" -gt 0 ]; then exit 1; fi

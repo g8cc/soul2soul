@@ -148,7 +148,7 @@ class AuditRound2WiringTest {
         // 防 FGS 起失败却先持锁导致永久漏锁：onCreate 里 acquire 收口到 updateWakeLock，
         // 且必须在 startForeground 之后调用
         val lines = presenceSource()
-        val body = linesAfter(lines, { it.contains("override fun onCreate") }, 45)
+        val body = linesAfter(lines, { it.contains("override fun onCreate") }, 60)
         val fg = body.indexOfFirst { it.contains("startForeground(") }
         val lock = body.indexOfFirst { it.contains("updateWakeLock(") }
         assertTrue("onCreate 必须按配对状态收口 wakelock", lock >= 0)

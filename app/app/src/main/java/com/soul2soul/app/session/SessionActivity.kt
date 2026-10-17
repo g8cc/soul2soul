@@ -710,11 +710,16 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
                 SignalRouter.DataAction.PeerScreenOff -> {
                     tvState.visibility = View.VISIBLE
                     tvState.setText(R.string.peer_screen_off)
+                    // 锁屏期间零帧是设计行为（画面冻在最后一帧·语音继续），
+                    // 不同步这个位每次锁屏都会误报一次 video_stall
+                    client?.setRemoteScreenPaused(true)
                 }
                 SignalRouter.DataAction.HideBanner -> {
                     // 对方锁屏/收回授权：手势被静默丢弃时横幅必须说明原因，
                     // 否则操控端只会以为"功能坏了"（历史工单：退出后不能操控=这个）
                     tvState.visibility = View.GONE
+                    // 横幅收起与暂停复位同一条路径（screenon 唯一入口），不给漏配机会
+                    client?.setRemoteScreenPaused(false)
                 }
                 SignalRouter.DataAction.RevokedBanner -> {
                     // 对方收回授权=本地操控已成死模式：必须先同步退出，再报原因。
@@ -859,6 +864,13 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
     /** 离开全屏时自动进入画中画，继续陪看（观看端核心体验） */
     override fun onUserLeaveHint() {
         super.onUserLeaveHint()
+        // 锁屏/息屏也会回调 onUserLeaveHint：此时进小窗毫无意义，还会销毁重建 surface
+        // （观看端"解锁后永久黑屏"的头号嫌疑——renderer.init 全生命周期只跑一次）
+        val power = getSystemService(android.os.PowerManager::class.java)
+        if (power?.isInteractive == false) {
+            viewerEvent("leave_hint_screen_off")
+            return
+        }
         if (live && android.os.Build.VERSION.SDK_INT >= 26 &&
             packageManager.hasSystemFeature(android.content.pm.PackageManager.FEATURE_PICTURE_IN_PICTURE)
         ) {
@@ -876,6 +888,12 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
 
     override fun onPictureInPictureModeChanged(isInPictureInPictureMode: Boolean, newConfig: Configuration) {
         super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
+        // 埋点：G 的怀疑路径是"锁屏→自动进小窗→surface 销毁重建无人重挂"，
+        // 没有这条事件就无法证实/证伪，只能靠猜
+        viewerEvent(
+            if (isInPictureInPictureMode) "pip_enter" else "pip_exit",
+            "live=$live accepted=$accepted",
+        )
         // 小窗里隐藏操作控件，只留画面
         val inPip = isInPictureInPictureMode
         controlsContainer?.visibility = if (inPip || !live) View.GONE else View.VISIBLE

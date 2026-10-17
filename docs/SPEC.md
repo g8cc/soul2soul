@@ -122,7 +122,7 @@ Idle ──invite──► Calling ──accepted──► Preparing(授权+FGS)
 
 - `Live` 中 `peer.gone` / `bye` / ICE `FAILED` → 直接 `Ended`。
 - 断线宽限：ICE `DISCONNECTED` 容忍 10s（libwebrtc 自带重连窗口），超时视为失败。
-- 共享端锁屏：VirtualDisplay 停止出帧 → 30s 无帧定时器触发 `Ended`（FR-8）。
+- 共享端锁屏：VirtualDisplay 停止出帧 → 观看端收 `screenoff` 显示"画面暂停·语音继续"，会话存续；解锁补发 `screenon` 恢复（FR-8，v0.2.56 起**不再有自动结束定时器**）。
 
 ## 5. 坐标映射（FR-5 的精度保证）
 
@@ -155,8 +155,8 @@ yn = (touchY - videoRect.top)  / videoRect.height
    - 层2 气泡：同类型，`FLAG_NOT_FOCUSABLE`（保留触摸），可拖动，含「结束」。
    - 权限：`Settings.canDrawOverlays()` 检查 + 跳转授权（Android 10+ 无自动授予）。
 5. **重连**：信令 WebSocket 断开后 3s 定时重连（PresenceService 常驻保证）；媒体层交给 ICE。
-6. **锁屏看门狗（FR-8）**：监听 `ACTION_SCREEN_OFF/ON` 广播；锁屏 30 秒后自动结束会话并通知对端。
-   ⚠️ 不能用「帧数停止增长」判断锁屏——静止画面同样不出帧，会误杀正常会话（已踩坑并修复）。
+6. **锁屏暂停（FR-8，v0.2.56 改版）**：监听 `ACTION_SCREEN_OFF/ON` 广播；锁屏 → 收回操控授权 + 通知对端 `screenoff`，**会话继续**（语音不断、画面冻在最后一帧）；解锁 → `screenon` 恢复。原来的"锁屏 N 秒自动结束"看门狗已连根删除。
+   ⚠️ 不能用「帧数停止增长」判断锁屏/断流——静止画面同样不出帧，会误杀正常会话（已踩坑）；观看端的零帧 `video_stall` 告警因此必须被 `screenoff/screenon` 状态门控。
 7. **通知**：
    - 待命：低优先级常驻「在线待命」；
    - 来电：`CATEGORY_CALL` 高优先级 heads-up + 全屏意图（锁屏也可弹）；App 在前台时由 PresenceService 直接拉起 SessionActivity（不依赖全屏意图权限，Android 14 对侧载 App 有收紧）；
@@ -188,7 +188,7 @@ yn = (touchY - videoRect.top)  / videoRect.height
 
 **T3 边界**
 - B 开飞行模式 15s：A 自动结束（AC-5）
-- A 锁屏 30s：自动结束（AC-6）
+- A 锁屏 40s：会话仍在（双端都不 bye/peer.gone），解锁后画面恢复（AC-6，v0.2.56 反转断言）
 - 通话中来电：语音让路、屏幕共享继续、结束后恢复
 - 旋转：横屏游戏画面在 B 端正确 letterbox
 - 杀进程重开：配对仍在、待命恢复（AC-7）

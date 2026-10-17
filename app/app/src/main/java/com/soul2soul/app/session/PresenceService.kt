@@ -153,6 +153,17 @@ class PresenceService : Service() {
                         reconnectAttempt += 1
                         handler.postDelayed(reconnectRunner, delay)
                     }
+                    // 会话期间的信令断/续：用来差分"媒体还活着但信令掉了"与"两边一起断"。
+                    // 无会话不报，否则待机期每次重连都是噪声
+                    if (Presence.sessionBusy) {
+                        com.soul2soul.app.util.SelfCheck.reportEvent(
+                            this@PresenceService,
+                            if (ScreenShareService.isRunning()) "sharer" else "viewer",
+                            if (connected) "signaling_up" else "signaling_down",
+                            "-",
+                            "reconnectAttempt=$reconnectAttempt",
+                        )
+                    }
                 }
             }
             // 先建立总线订阅，再打开 WebSocket，避免服务刚启动时丢掉 registered/paired/accepted。

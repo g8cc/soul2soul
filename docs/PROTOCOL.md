@@ -76,10 +76,12 @@
 - `iceServers` 由服务端签发（`server/src/turn.js#buildIceServers`）：`username = floor(now/1000)+ttlSec`（默认 ttl 3600s），`credential = base64(HMAC-SHA1(secret, username))`（reverse-proxy 限时凭证）。含 1 条 `stun:` + 2 条 `turn:`（udp/tcp）。
 - `app.diag` 字段：`role`(viewer/sharer), `model`, `brand`, `os`, `sdk`, `rom`, `app`, `notif`, `overlay`, `acc`, `accConnected`, `accGestureCap`, `mic`, `battery`，外加扩展位（观看端 `ctlSupported`、共享端 `ctlAllowed`）。服务端只落诊断日志、不转发。
 - `app.version` 字段：`localCode`, `localName`, `remoteCode`, `remoteName`, `hasUpdate`。
-- `diag.session` 字段（**会话终止原因**，v0.2.55）：`role`(sharer/viewer), `reason`(`connect_TIMEOUT` / `ice_DISCONNECTED_TIMEOUT` / `ice_FAILED` / `capture_START_FAILED` / `projection_stopped` / `sdp_*` / `screen_off_timeout` / `local_stop` / `user_hangup` / `remote_bye` / `local_close` …), `ice`(末次 ICE 态), `setupMs`(发起→连通), `liveMs`(连通→结束), `fg`(本端是否有 Activity 在前台), `screenOn`, `app`(版本名)。服务端只落 `[diag.session]`、不转发。
-  为什么需要：WebRTC 是媒体直连，服务器只转发 `sdp/ice`，看不见采集失败、锁屏看门狗、谁按的挂断。此前"米15 发起 4~6 秒即断"在服务器日志里只能看到一对没有原因的 bye。
-- `diag.event` 字段：`role`, `event`(`screen_off`/`screen_on`/`capture_ok`/`capture_fail`/`ice_outage`/`ice_recovered`/`video_stall`/`viewer_paused`/`viewer_resumed`/`surface_created`/`surface_size`/`surface_destroyed`/`sink_attached`), `ice`, `detail`(≤64字符), `fg`, `screenOn`, `app`。服务端只落 `[diag.event]`、不转发。
-  `fg` + `capture_fail` 是 Android 14+/HyperOS "后台起屏幕采集被拒"的判据；`sink_attached` 对 `surface_destroyed` 是观看端黑屏的判据。
+- `diag.session` 字段（**会话终止原因**，v0.2.55）：`role`(sharer/viewer), `reason`(`connect_TIMEOUT` / `ice_DISCONNECTED_TIMEOUT` / `ice_FAILED` / `capture_START_FAILED` / `projection_stopped` / `sdp_*` / `webrtc_start_failed` / `local_stop` / `user_hangup` / `remote_bye` / `local_close` …), `ice`(末次 ICE 态), `setupMs`(发起→连通), `liveMs`(连通→结束), `fg`(本端是否有 Activity 在前台), `screenOn`, `app`(版本名)。服务端只落 `[diag.session]`、不转发。
+  `screen_off_timeout` 随 v0.2.56 锁屏保活一起废除（锁屏不再结束会话，因此不会再产生该原因）。
+  为什么需要：WebRTC 是媒体直连，服务器只转发 `sdp/ice`，看不见采集失败、启动失败、谁按的挂断。此前"米15 发起 4~6 秒即断"在服务器日志里只能看到一对没有原因的 bye。
+- `diag.event` 字段：`role`, `event`(`screen_off`/`screen_on`/`capture_ok`/`capture_fail`/`ice_outage`/`ice_recovered`/`video_stall`/`viewer_paused`/`viewer_resumed`/`surface_created`/`surface_size`/`surface_destroyed`/`sink_attached`/`fgs_start_failed`/`webrtc_start_failed`/`leave_hint_screen_off`/`pip_enter`/`pip_exit`/`signaling_down`/`signaling_up`), `ice`, `detail`(≤64字符), `fg`, `screenOn`, `app`。服务端只落 `[diag.event]`、不转发。
+  `fg` + `capture_fail`/`fgs_start_failed` 是 Android 14+/HyperOS "后台起屏幕采集被拒"的判据；`sink_attached` 对 `surface_destroyed`+`pip_*` 是观看端黑屏的判据；`signaling_down` 用来把"只有信令掉"和"媒体一起死"分开。
+  `video_stall`（观看端连续零帧）在 `screenoff`~`screenon` 之间**不计数不上报**——锁屏零帧是设计行为，否则每次锁屏都制造一条假"卡死"告警。
 - 以上三类均**只在连接活着时发送**（`Presence.client.isConnected` 前置判定）：本端进程被杀时来不及自报，此时以服务端 `[ws] … close code=…` 为准。`diag.*` 只允许标量与枚举名，禁止携带任何业务内容（SDP/ICE 正文、文字、坐标）。
 - 服务端日志行统一带 `HH:MM:SS.mmm` 本地时间前缀；呼叫与连接生命周期另有 `[call] kind=sdp|ice|bye …`、`[ws] … close code=… aliveFor=… iceSeen=… sessionMs=…`、`[ws] … pong 超时 terminate（假死）`，用于区分"主动挂断 / 假死被踢 / 被新连接顶掉"三种死法。
 
@@ -122,8 +124,8 @@
 
 | k | 通道 | 载荷 | 说明 |
 |---|---|---|---|
-| `screenoff` | anno | — | 对方锁屏（画面冻结，15s 后自动结束） |
-| `screenon` | anno | — | 对方解锁 |
+| `screenoff` | anno + ctl（双通道补发） | — | 对方锁屏：画面暂停（冻在最后一帧）、操控授权收回、**会话与语音继续**（v0.2.56 起不再自动结束）；观看端据此挂横幅并暂停 `video_stall` 判定 |
+| `screenon` | anno + ctl（双通道补发） | — | 对方解锁：撤横幅、恢复 `video_stall` 判定（操控授权不自动恢复，需重新点「允许一次远程协助」） |
 | `ctl_denied` | ctl | `reason`(可选: `screenoff`) | 手势被拒（未授权/收回/无障碍缺失），观看端横幅说明原因；共享端 4s 节流 |
 
 ## 4. 会话时序（正常路径）

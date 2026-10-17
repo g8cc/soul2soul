@@ -51,15 +51,16 @@ class SessionEndDiagTest {
             body.any { it.contains("noteEnd(reason)") })
     }
 
-    // D3：被控端锁屏是本端主动结束会话的合法路径，但 screenoff 只走 DataChannel，服务器必须另收一份
+    // D3：锁屏只走 DataChannel（服务器看不见），且 v0.2.56 起不再结束会话——必须自报事件、不得自杀
     @Test
-    fun `sharer lock screen is reported to server`() {
+    fun `sharer lock screen is reported without ending the session`() {
+        val branch = window(share(), "ACTION_SCREEN_OFF -> if (live)", 12)
         assertTrue("锁屏必须上报 screen_off 事件",
-            window(share(), "ACTION_SCREEN_OFF -> if (live)", 20)
-                .any { it.contains("\"screen_off\"") })
-        assertTrue("锁屏超时结束会话必须带 screen_off_timeout 原因",
-            window(share(), "private val screenOffStop", 8)
-                .any { it.contains("noteEnd(\"screen_off_timeout\")") })
+            branch.any { it.contains("\"screen_off\"") })
+        assertTrue("锁屏不得结束会话（语音要继续）：SCREEN_OFF 分支里不能出现 stopSession",
+            branch.none { it.contains("stopSession") })
+        assertTrue("锁屏不得挂任何延时看门狗（旧 15 秒自动结束就是这么死的）",
+            branch.none { it.contains("postDelayed") })
     }
 
     // D4：观看端挂断/被对方挂断也要有名分（否则服务器看到 local_close 无从区分谁关的）
