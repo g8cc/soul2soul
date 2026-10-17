@@ -12,6 +12,7 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <uses-permission android:name="android.permission.VIBRATE" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
@@ -84,10 +85,16 @@
             android:theme="@style/Theme.AppCompat.DayNight.Dialog" />
 
         <!-- 在线待命: 持有信令长连接 -->
+        <!-- Android14 对 dataSync 型前台服务有每日时长上限，超时会把常驻待命直接停掉；
+             本 App 自托管分发不走 Play 审查，specialUse（无时限）才是常驻连接的正确类型 -->
         <service
             android:name=".session.PresenceService"
             android:exported="false"
-            android:foregroundServiceType="dataSync" />
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="presence-signaling-keepalive" />
+        </service>
 
         <!-- 共享端: 屏幕采集 + 语音 (Android 14+ 要求 startForeground 先于 getMediaProjection) -->
         <service

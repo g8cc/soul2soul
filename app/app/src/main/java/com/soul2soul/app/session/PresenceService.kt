@@ -8,6 +8,7 @@ import android.content.Intent
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.os.PowerManager
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.soul2soul.app.MainActivity
@@ -78,6 +79,29 @@ class PresenceService : Service() {
         }
     }
 
+    /**
+     * 息屏保活锁：锁屏断连根因是 CPU 进 doze 睡死后回不了服务器 ping 的 pong（30s 即被 terminate）。
+     * 仅配对时持有；acquire 必须带超时——MIUI 异常杀进程时 onDestroy 不执行，无超时=永久漏锁耗电。
+     * 到期前由 wakeReArm 自我续期，等效持续持有但带防呆语义。
+     */
+    private val wakeLock: PowerManager.WakeLock by lazy {
+        (getSystemService(Context.POWER_SERVICE) as PowerManager)
+            .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "soul2soul::presence")
+            .apply { setReferenceCounted(false) }
+    }
+    private val wakeReArm = Runnable { updateWakeLock(Prefs.paired(this)) }
+
+    private fun updateWakeLock(keepAlive: Boolean) {
+        handler.removeCallbacks(wakeReArm)
+        if (keepAlive) {
+            if (wakeLock.isHeld) wakeLock.release() // 非计数锁：重获以刷新超时
+            wakeLock.acquire(WAKELOCK_TIMEOUT_MS)
+            handler.postDelayed(wakeReArm, WAKE_REARM_MS)
+        } else if (wakeLock.isHeld) {
+            wakeLock.release()
+        }
+    }
+
     /** 留言箱任何变化：同步通知栏常驻条数 + 聊天记录落盘（服务常驻，UI 不在也一样跟） */
     private val inboxListener: () -> Unit = {
         com.soul2soul.app.msg.UnreadNotifier.sync(this)
@@ -125,6 +149,8 @@ class PresenceService : Service() {
                 SignalBus.events.collect { handleSignal(it) }
             }
             connect()
+            // wakelock 必须在 startForeground 之后才允许持有（服务真正前台，防 FGS 起失败漏锁）
+            updateWakeLock(Prefs.paired(this))
         }
     }
 
@@ -132,6 +158,7 @@ class PresenceService : Service() {
 
     override fun onDestroy() {
         handler.removeCallbacksAndMessages(null)
+        if (wakeLock.isHeld) wakeLock.release() // acquire 的对偶出口（穷举 restore）
         scope.cancel()
         com.soul2soul.app.msg.InboxStore.removeListener(inboxListener)
         Presence.sessionBusy = false
@@ -212,6 +239,7 @@ class PresenceService : Service() {
                     Prefs.setPairToken(this, it)
                     Presence.client.setPairToken(it)
                 }
+                updateWakeLock(true)
             }
             "unpaired" -> {
                 // 对端解绑（或自己发起后服务端确认）：清除本地配对与令牌
@@ -219,6 +247,7 @@ class PresenceService : Service() {
                 Prefs.setPairToken(this, null)
                 Presence.client.setPairToken(null)
                 com.soul2soul.app.msg.InboxStore.clear()
+                updateWakeLock(false) // 解除配对即无呼叫需求，息屏保活锁同步释放
             }
             "pair.recall_ask" -> {
                 // 老搭档找回请求：主页可能压根不在（SharedFlow 无 replay），
@@ -323,5 +352,8 @@ class PresenceService : Service() {
         private const val RECONNECT_MAX_MS = 30_000L
         // 略大于服务端 pendingTtl(60s)+本地 claimRecall 判据：过期瞬间前一刻的点击仍应可用
         private const val RECALL_NOTIFY_TTL_MS = 65_000L
+        // 息屏保活锁：单轮 6h，5h 自我续期——即使 wakeReArm 被意外截断，锁也只会到期释放而不会永久漏持
+        private const val WAKELOCK_TIMEOUT_MS = 6 * 60 * 60 * 1000L
+        private const val WAKE_REARM_MS = 5 * 60 * 60 * 1000L
     }
 }

@@ -145,6 +145,8 @@ bash scripts/test.sh --coverage
 - 表情面板分组（v0.2.48）→ EmojiPanelCatalogTest：四组目录存在、Android7 字体缺字（🥰🥺🫶🫂🧡）禁入、文字默认码点（❤☀❄✌❣☝）必须带 FE0F——删组或塞缺字即变红
 - 键盘开着点😊（v0.2.49）→ AuditRound2WiringTest：setEmojiPanel 内 clearFocus 必须先于 hideSoftInputFromWindow（MIUI 键盘回弹会把面板盖到键盘背后）
 - 发送收表情墙（v0.2.50）→ AuditRound2WiringTest：sendText 内 setEmojiPanel(false) 必须排在 if (!sent) 成功校验之后（失败/断网先 return，草稿+面板原样保留）
+- 息屏断连根修（v0.2.51）→ AuditRound2WiringTest：wakelock acquire 必在 startForeground 之后+带 WAKELOCK_TIMEOUT_MS 超时；onDestroy/unpaired 必 release；PresenceService FGS 类型 specialUse 禁 dataSync（Android14 每日时长上限会定时杀常驻连接）
+- 电池豁免只问一次缺口（v0.2.51）→ AuditRound2WiringTest：maybeAskBatteryExemption 必须走 batteryPromptAt 时间戳节流，出现 askedBattery 即变红
 
 Service 窗口接线这类 JVM 跑不了的代码，锁定用例的形态是**源码扫描测试/t0 grep 守卫**（把修复
 回滚用例必须变红才算锁定）。审计流程本身的规范（状态机矩阵、5 维度清单、gate 登记制）见

@@ -137,4 +137,61 @@ class AuditRound2WiringTest {
         val clear = body.indexOfFirst { it.contains("etInput.clearFocus()") }
         assertTrue("收键盘前必须先 clearFocus，否则 MIUI/Android7 键盘弹回盖住面板", clear in 0 until hide)
     }
+
+    // ==== v0.2.51 息屏不断连（ wakelock + specialUse）：锁结构配对，回滚即变红 ====
+
+    private fun presenceSource() =
+        source("app/src/main/java/com/soul2soul/app/session/PresenceService.kt")
+
+    @Test
+    fun `presence wake lock acquired only after service is foreground`() {
+        // 防 FGS 起失败却先持锁导致永久漏锁：onCreate 里 acquire 收口到 updateWakeLock，
+        // 且必须在 startForeground 之后调用
+        val lines = presenceSource()
+        val body = linesAfter(lines, { it.contains("override fun onCreate") }, 45)
+        val fg = body.indexOfFirst { it.contains("startForeground(") }
+        val lock = body.indexOfFirst { it.contains("updateWakeLock(") }
+        assertTrue("onCreate 必须按配对状态收口 wakelock", lock >= 0)
+        assertTrue("wakelock 必须排在 startForeground 之后", fg in 0 until lock)
+    }
+
+    @Test
+    fun `presence wake lock acquire carries a timeout`() {
+        // MIUI 强杀进程时 onDestroy 不执行，无超时=永久漏锁耗电，acquire 必须带超时兜底
+        val lines = presenceSource()
+        val body = linesAfter(lines, { it.contains("private fun updateWakeLock") }, 15)
+        assertTrue("acquire 必须带超时 WAKELOCK_TIMEOUT_MS",
+            body.any { it.contains("wakeLock.acquire(WAKELOCK_TIMEOUT_MS)") })
+    }
+
+    @Test
+    fun `presence wake lock released on destroy and unpair`() {
+        val lines = presenceSource()
+        val destroy = linesAfter(lines, { it.contains("override fun onDestroy") }, 8)
+        assertTrue("onDestroy 必须 release 锁（acquire 的对偶出口）",
+            destroy.any { it.contains("wakeLock.release()") })
+        val unpaired = linesAfter(lines, { it.contains("\"unpaired\" ->") }, 10)
+        assertTrue("解绑后立即释放 wakelock（hideX 必穷举 restoreX）",
+            unpaired.any { it.contains("updateWakeLock(false)") })
+    }
+
+    @Test
+    fun `presence service uses specialUse not dataSync`() {
+        // Android14 对 dataSync 前台服务有每日时长上限，会定时停掉常驻连接
+        val text = source("app/src/main/AndroidManifest.xml").joinToString("\n")
+        assertTrue("PresenceService 必须用 specialUse",
+            Regex("PresenceService\"[^>]*foregroundServiceType=\"specialUse\"").containsMatchIn(text) ||
+                text.contains("PROPERTY_SPECIAL_USE_FGS_SUBTYPE"))
+        assertTrue("禁止再用 dataSync 类型", !text.contains("foregroundServiceType=\"dataSync\""))
+        assertTrue("specialUse 需 FOREGROUND_SERVICE_SPECIAL_USE 权限",
+            text.contains("android.permission.FOREGROUND_SERVICE_SPECIAL_USE"))
+    }
+
+    @Test
+    fun `battery exemption guide throttles by time not once-ever`() {
+        // 旧版 askedBattery 拒绝后永不再问，而息屏保活依赖豁免——必须改按时间戳节流
+        val text = source("app/src/main/java/com/soul2soul/app/MainActivity.kt").joinToString("\n")
+        assertTrue("电池引导必须用 batteryPromptAt 时间戳", text.contains("batteryPromptAt(this)"))
+        assertTrue("不得再走只问一次的 askedBattery", !text.contains("askedBattery"))
+    }
 }

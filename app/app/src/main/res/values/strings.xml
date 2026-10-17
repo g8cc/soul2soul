@@ -99,7 +99,7 @@
     <string name="acc_frozen_title">远程协助被系统冻住了</string>
     <string name="acc_frozen_msg">「陪着你」的无障碍开关还开着，但手机在更新后把服务停掉了，远程协助暂时用不了。去设置里把「陪着你」关掉、再重新打开一次就好，不是你们点错了。</string>
     <string name="battery_dialog_title">允许「陪着你」后台运行</string>
-    <string name="battery_dialog_msg">部分品牌手机（小米/华为/OPPO/vivo）会强杀后台应用，导致你们收不到呼叫、通话中途离线。点「去设置」后选择「不受限制/允许后台运行」即可，只需设置一次。</string>
+    <string name="battery_dialog_msg">部分品牌手机（小米/华为/OPPO/vivo）一锁屏就会强杀后台应用，导致你们收不到呼叫、通话中途离线。点「去设置」后选择「不受限制/允许后台运行」即可，只需设置一次。</string>
     <string name="battery_dialog_go">去设置</string>
     <string name="ctl_consent_title">允许 TA 临时协助你的手机？</string>
     <string name="ctl_consent_off">当前：未允许 —— TA 发来的操作不会生效</string>

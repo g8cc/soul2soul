@@ -20,10 +20,10 @@ object Prefs {
 
     fun setPaired(ctx: Context, v: Boolean) = sp(ctx).edit().putBoolean("paired", v).apply()
 
-    /** 电池优化豁免只引导一次（国产 ROM 后台杀的通用逃生门） */
-    fun askedBattery(ctx: Context): Boolean = sp(ctx).getBoolean("askedBattery", false)
+    /** 电池优化豁免引导时间戳：旧版"只问一次"拒绝后永不再问=缺口，改为按时间节流可再引导 */
+    fun batteryPromptAt(ctx: Context): Long = sp(ctx).getLong("batteryPromptAt", 0L)
 
-    fun setAskedBattery(ctx: Context, v: Boolean) = sp(ctx).edit().putBoolean("askedBattery", v).apply()
+    fun setBatteryPromptAt(ctx: Context, v: Long) = sp(ctx).edit().putLong("batteryPromptAt", v).apply()
 
     /** 配对令牌：服务端为这对设备签发的身份凭证，hello 必须携带 */
     fun pairToken(ctx: Context): String? = sp(ctx).getString("pairToken", null)

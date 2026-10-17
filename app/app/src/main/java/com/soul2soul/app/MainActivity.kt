@@ -68,6 +68,8 @@ class MainActivity : AppCompatActivity() {
         private const val TAG = "S2S-Main"
         private const val CALL_TIMEOUT_MS = 30_000L
         private const val MEDIA_CONNECT_TIMEOUT_MS = 45_000L
+        // 电池豁免引导节流：未豁免用户每 3 天最多被 gentle 提醒一次（首启仍走原时机）
+        private const val BATTERY_PROMPT_INTERVAL_MS = 3L * 24 * 60 * 60 * 1000
 
         @Volatile var outgoingPending = false
         @Volatile var acceptedReceived = false
@@ -774,8 +776,10 @@ class MainActivity : AppCompatActivity() {
     private fun maybeAskBatteryExemption() {
         if (Build.VERSION.SDK_INT < 23) return
         if (com.soul2soul.app.util.SelfCheck.batteryIgnoring(this)) return
-        if (com.soul2soul.app.util.Prefs.askedBattery(this)) return
-        com.soul2soul.app.util.Prefs.setAskedBattery(this, true)
+        // v0.2.51：旧版"只问一次"拒绝后永不再问，而息屏断连修复恰恰依赖豁免——改按时间节流再引导
+        val now = System.currentTimeMillis()
+        if (now - com.soul2soul.app.util.Prefs.batteryPromptAt(this) < BATTERY_PROMPT_INTERVAL_MS) return
+        com.soul2soul.app.util.Prefs.setBatteryPromptAt(this, now)
         AlertDialog.Builder(this)
             .setTitle(R.string.battery_dialog_title)
             .setMessage(R.string.battery_dialog_msg)

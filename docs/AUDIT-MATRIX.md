@@ -34,6 +34,8 @@
 | 快速重拨/服务复用 | ⬜ 双 start 是否丢新 projection（SSS 复位段）待真机复现 | — | — | — | PASS 迟到通知动作 webRtc==null→stopSelf（SSS:90）；stopping 幂等 |
 | 信令排队/回放 | PASS pendingSignals 入队→open 后回放并清（SSS:175/196） | — | — | — | PASS 三处清空：start 复位/回放后/onDestroy（SSS:122/197/223） |
 | 进程被杀 START_STICKY | ⬜ intent=null 重建路径（同 §1 孤儿球，一并真机核） | — | — | — | — |
+| 息屏待命保活（Presence 长连接） | PASS v0.2.51：配对期持 PARTIAL_WAKE_LOCK（acquire 带 6h 超时+5h 自续期，onCreate 排在 startForeground 后，onDestroy/unpaired 成对释放，AuditRound2WiringTest 锁三对偶）；FGS 类型 dataSync→specialUse（Android14 dataSync 有每日时长上限会定时停服）；服务器30s ping/OkHttp20s ping 不变 | N-A 会话期保活归上面"息屏/锁屏"行 | N-A | N-A | N-A |
+| 息屏待命真机复验 | ⬜ 双真机配对→静置锁屏≥5min→唤醒互呼直达、logcat 无 terminate/重连风暴（wakelock+豁免的实际效果只能真机证） | — | — | — | — |
 
 ## 3. 配对三通道（找回/互摇/扫码）
 
@@ -56,7 +58,7 @@
 | 麦克风 | PASS 时机前置到切语音（v0.2.33 实锤修复） | PASS #31 解释弹窗+设置直达 | PASS #31 重置路径引导 | ⬜ 采集中被撤：仅下次打开感知（AudioRecord 报错面未真机核） |
 | 悬浮窗 | PASS 引导+类型回退（v0.2.22 Android7 TYPE 锁定） | PASS addView 失败分支还球（c107105 m5） | 同左 | ⬜ 已挂窗被系统回收、下笔表现（同 §1，待真机） |
 | 无障碍 | PASS 引导 MIUI 路径+反馈不依赖 toast（#13） | PASS ctl_need_acc toast + 授权对话框乐观写回滚（CtlConsentMachine.setTarget） | ⬜ accConnected 区分真撤销/被冻已实现（#33 代码侧闭环），真机复验仍挂 | PASS ctl_error(reason) 横幅分级+4s 节流回灌（routeData ControlFailure + CtlConsentMachineTest） |
-| 电池豁免 | PASS 引导对话框存在 | — | ⬜ askedBattery 单向闩：拒绝后不再追问是否够用（待产品定，暂不算 bug） | N-A |
+| 电池豁免 | PASS 引导对话框存在 | — | PASS v0.2.51：askedBattery 单向闩改为 batteryPromptAt 时间戳节流（3 天内不再弹、超期未豁免再引导）；AuditRound2WiringTest 锁"不得回退成只问一次" | N-A |
 
 ## 5. 留言（面板/文字/语音/撤回）
 
