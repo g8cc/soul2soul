@@ -216,8 +216,9 @@ class PresenceService : Service() {
                 showIncomingNotification()
             }
             "accepted" -> {
-                // 主叫切到了后台时对方接听：把 TA 拉回来（offer 由已启动的共享服务处理）
-                // accepted 与主页共用 SharedFlow，主页可能在后台重建而错过这条事件；
+                // 对方接听：服务侧保证采集起流；不再把主页顶到前台（v0.2.54 无感化）——
+                // 被控端停在当前界面，操控方看到的即其真实画面（采集/注入/悬浮均不要求前台）。
+                // accepted 与主页共用 SharedFlow，主页可能在后台错过这条事件；
                 // 常驻服务必须自己启动共享端，不能把媒体建立依赖在 Activity 是否及时订阅。
                 Presence.iceServersJson = json.optJSONArray("iceServers")
                 if (MainActivity.outgoingPending) {
@@ -231,12 +232,6 @@ class PresenceService : Service() {
                             MainActivity.cancelOutgoing()
                         }
                     }
-                }
-                runCatching {
-                    startActivity(
-                        Intent(this, MainActivity::class.java)
-                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                    )
                 }
             }
             "call.canceled" ->

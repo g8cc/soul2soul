@@ -90,6 +90,7 @@
 | 离线转留言漏斗 | — | PASS 空 reason→ringback(6s,RINGBACK_MS)→OFFLINE_PROMPT；非空 reason(too_fast/not_authed)→toast 不进漏斗（L5） | PASS 去留言→MessageActivity（模拟器实测打开）、TA不在线文案+给出路 |
 | 权限中途收回/授权拒绝 | projectionLauncher else→toast+endOutgoing | PASS stale 守卫（!outgoingPending 时投影结果作废不复呼） | N-A |
 | 多入口多出口配对 | 一起玩起手 callGen+=1 复位 | 二次点一起玩=取消（send cancel/bye+endOutgoing）；挂断=onHangupClicked | 去留言/算了/挂断三路 |
+| 对方接听后被控端跳界面（无感化） | 会话结束后无跳页需求 | PASS v0.2.54：去掉 accepted→startActivity(MainActivity) 强拉前台（PresenceService 仅保留 ScreenShareService.start 起流）；采集/注入/悬浮均不要求前台，被控端停在当前界面=操控方看到的真实画面。回前台防卡：MainActivity.onResume 用 ScreenShareService.isLive() 兜底 endOutgoing。SeamlessControlStartTest S1–S3 锁（加回跳页/删起流/删兜底 均变红） | N-A |
 | 降级老机型（Android7 Mi5） | ⬜ 全屏 overlay 渲染待真机 | ⬜ 假振铃 6s 手感待真机（Mi5 无注入权限，手动验证） | ⬜ 待真机 |
 
 ## 7. 连接状态胶囊（MainActivity connChip / Presence.connState）

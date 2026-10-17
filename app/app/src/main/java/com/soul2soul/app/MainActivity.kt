@@ -999,6 +999,14 @@ class MainActivity : AppCompatActivity() {
             lastUpdateCheckAt = android.os.SystemClock.elapsedRealtime()
             checkForUpdate()
         }
+        // v0.2.54 无感化后，被控端在"呼叫中"退到后台时不再被强拉回前台，
+        // 会错过 local.sessionLive（SharedFlow 无 replay），outgoingPending 可能滞留。
+        // 服务真实态是权威来源：会话已连上却在主页仍显示"呼叫中"→ 收到即收呼叫页。
+        if (outgoingPending && acceptedReceived &&
+            com.soul2soul.app.session.ScreenShareService.isLive()
+        ) {
+            endOutgoing()
+        }
         updateUi()
         maybePromptAccReset()
         // 后台时 PresenceService 落下的找回请求：回前台立刻补弹窗（60s 内有效）
