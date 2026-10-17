@@ -189,7 +189,9 @@ bash scripts/test.sh --coverage
 - 秒断无从判定（v0.2.57 候选，#51/#55）→ PeerSignalProbeTest P1/P2：`bye`/`peer.gone` 与 `PeerEnded` 两条拆除路径都必须在 `stopSession`/`finishWithCleanup` **之前**报 `peer_signal`（ice 取当时实况、detail 分 `sig=gone|bye`）——顺序就是证据，拆完 ICE 只会是 `CLOSED`，"是不是信令假死拆的"就永久无法回答；P3：事件名必须已登记进 PROTOCOL §2.3（服务端日志出现了却没人知道怎么读=白埋）。把上报挪到拆除之后用例即红。
 - t4 锁屏判据（v0.2.56）→ `scripts/drive-test.sh` AC-6 用**实况**而非日志字符串：被控端 `dumpsys activity services <pkg>` 里 ScreenShareService 的 ServiceRecord 还在 + 观看端 `dumpsys window` 焦点仍是 SessionActivity，解锁 10s 后前者再验一次。
   ⚠️ 反面教材：原先写成 `logcat | grep -c "signal: bye"`，而客户端**从不打印**这个字符串，`grep -c` 恒为 0 → 无论会不会话被拆都用例变绿。
-- 采集链路自己也会产空证据（v0.2.57）→ t0 守卫：`scripts/repro-capture.sh` 的 `check` 必须同时有 `saw_srv`/`saw_dev` 两条 state 缺行断言（缺任一路日志必须 rc=2，删一条守卫 t0 即红，已实测回滚变红）。判据分两层且不许混：**传输**用 ssh/adb 哑铃探（能抓住"logcat 停在 waiting for device"这种进程在、文件不动的死法），**流量**只用文件字节增量看、静默期一律 WARN——把"没人操作"报成 FAIL 只会让人忽略体检。
+- 采集链路自己也会产空证据（v0.2.57）→ t0 守卫：`scripts/repro-capture.sh` 的 `check` 必须同时有 `saw_srv`/`saw_dev` 两条 state 缺行断言（缺任一路日志必须 rc=2，删一条守卫 t0 即红，已实测回滚变红）。判据分两层且不许混：**传输**用 ssh/adb 哑铃探（能抓住"logcat 停在 waiting for device"这种进程在、文件不动的死法），**流量**只用文件字节增量看、静默期一律 WARN——把"没人操作"报成 FAIL 只会让人忽略体检。真机侧一律 `logcat -T 1`，不带 `-T` 会把整块 ring buffer 倒进采集文件，采集起点含混=坑⑮同一类。
+- signaling_down 是恒不成立的服务器判据（v0.2.57）→ PiPLockScreenGuardTest L4c：`onState` 断线侧必须记 `signalingDownSinceMs = System.currentTimeMillis()`、复活侧必须读一次并 `= 0L`，且复活上报必须走具名收口 `reportSignaling("signaling_up", …)`；`reportSignaling` 里必须拼 `downMs=` 且只在 `downStartMs > 0L` 时拼（首连不许报假长度）。根因：三类 diag 都要求 `Presence.client.isConnected` 才发，`signaling_down` 按定义就是 socket 已断时触发 → 只能进本机 logcat。埋点写了不等于采得到。
+  同一轮顺带的教训：`AuditRound2WiringTest` 用 `onCreate` 起 60 行的窗口找 `updateWakeLock`，我往匿名 `onState` 监听器里加十几行就把它撑红了（合法代码增长弄破写死行数的锚点）。新增埋点一律收成具名方法，守卫按名字开窗口。
   **反向断言必须证明"能变红"**：用桩 adb（有记录→1/1，无记录→0/0）各跑一遍再登记，否则等价于没测。
 
 Service 窗口接线这类 JVM 跑不了的代码，锁定用例的形态是**源码扫描测试/t0 grep 守卫**（把修复

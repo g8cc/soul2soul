@@ -63,10 +63,14 @@ start() {
     > "$RUN_DIR/server.log" 2> "$RUN_DIR/server.err" &
   printf 'server\t%s\t%s\n' "$!" "$RUN_DIR/server.log" >> "$STATE"
 
-  # 2) 真机侧：threadtime 带绝对时间，才能和服务器日志对表
+  # 2) 真机侧：threadtime 带绝对时间，才能和服务器日志对表。
+  #    -T 1 = 只从最后一行往后写：不带 -T 会把整块 ring buffer 倒进采集文件，
+  #    采集起点变得含混（和坑⑮"基线吞掉窗口"同一类错误）。
+  #    ⚠ 设备时钟未必对（实测 Mi5 比宿主慢 ~10.5h），所以时间轴一律以服务器日志为准，
+  #    设备行只做事件序列，不许直接拿 logcat 时间戳和服务器对表。
   serial=$(pick_serial)
   if [ -n "$serial" ]; then
-    "$ADB" -s "$serial" logcat -v threadtime \
+    "$ADB" -s "$serial" logcat -T 1 -v threadtime \
       S2S-Diag:V S2S-Session:V S2S-Ctl:V PresenceService:V ScreenShareService:V \
       SessionActivity:V Overlay:V WifiKeeper:V MediaProjectionManager:V \
       ActivityTaskManager:I AndroidRuntime:E "*:S" \

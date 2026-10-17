@@ -86,4 +86,24 @@ class PiPLockScreenGuardTest {
         assertTrue("上报必须以 Presence.sessionBusy 为门（待机期每次重连都报就是噪声）",
             onState.any { it.contains("Presence.sessionBusy") })
     }
+
+    // L4c：signaling_down 按定义发生在 socket 已断时，SelfCheck.sendDiag 要求 isConnected 才发，
+    // 所以那条只能进本机 logcat——服务器要看到"断了多久"，必须由复活那一条把 downMs 带上来。
+    // 没这一格的话，0.2.56 的 B4 在服务器侧是恒不成立的判据（和 sink_attached 同一类坑）。
+    @Test
+    fun `outage length reaches the server via the recovery event`() {
+        val src = presence()
+        val onState = window(src, "override fun onState(connected: Boolean)", 30)
+        assertTrue("断线侧必须记下断口起点",
+            onState.any { it.contains("signalingDownSinceMs = System.currentTimeMillis()") })
+        assertTrue("复活侧必须读一次并清零（否则下一次断口会把上一次的长度算进来）",
+            onState.any { it.contains("signalingDownSinceMs = 0L") })
+        assertTrue("复活上报必须走收口方法（锚点按名字找，不再靠 onCreate 的行数窗口）",
+            onState.any { it.contains("reportSignaling(\"signaling_up\"") })
+        val rep = window(src, "private fun reportSignaling(", 10)
+        assertTrue("detail 必须带 downMs（服务器看不见 signaling_down）",
+            rep.any { it.contains("downMs=") })
+        assertTrue("只有真有断口才拼 downMs（首连不许报 downMs=0 的假长度）",
+            rep.any { it.contains("if (downStartMs > 0L)") })
+    }
 }

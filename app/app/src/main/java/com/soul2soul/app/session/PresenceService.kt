@@ -81,6 +81,8 @@ class PresenceService : Service() {
     private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
     private var started = false
     private var reconnectAttempt = 0
+    // 会话期信令断口的起点，复活时把 downMs 带给服务器（signaling_down 本身发不出去）
+    @Volatile private var signalingDownSinceMs = 0L
 
     private val reconnectRunner = object : Runnable {
         override fun run() {
@@ -98,6 +100,18 @@ class PresenceService : Service() {
             .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "soul2soul::presence")
             .apply { setReferenceCounted(false) }
     }
+
+    /** 信令掉线/复活的自报。downStartMs>0 才是"从断口复活"；首连不许报 downMs=0 这种假长度 */
+    private fun reportSignaling(event: String, attempt: Int, downStartMs: Long) {
+        val detail = "reconnectAttempt=$attempt" +
+            if (downStartMs > 0L) " downMs=${System.currentTimeMillis() - downStartMs}" else ""
+        com.soul2soul.app.util.SelfCheck.reportEvent(
+            this,
+            if (ScreenShareService.isRunning()) "sharer" else "viewer",
+            event, "-", detail
+        )
+    }
+
     private val wakeReArm = Runnable { updateWakeLock(Prefs.paired(this)) }
 
     private fun updateWakeLock(keepAlive: Boolean) {
@@ -156,13 +170,18 @@ class PresenceService : Service() {
                     // 会话期间的信令断/续：用来差分"媒体还活着但信令掉了"与"两边一起断"。
                     // 无会话不报，否则待机期每次重连都是噪声
                     if (Presence.sessionBusy) {
-                        com.soul2soul.app.util.SelfCheck.reportEvent(
-                            this@PresenceService,
-                            if (ScreenShareService.isRunning()) "sharer" else "viewer",
-                            if (connected) "signaling_up" else "signaling_down",
-                            "-",
-                            "reconnectAttempt=$reconnectAttempt",
-                        )
+                        // signaling_down 自己发不出去（SelfCheck.sendDiag 要求 socket 已连），它只进本机
+                        // logcat；所以"断了多久"必须由复活那一条带上来，否则服务器侧永远缺这一格。
+                        if (connected) {
+                            val down = signalingDownSinceMs
+                            signalingDownSinceMs = 0L
+                            reportSignaling("signaling_up", reconnectAttempt, down)
+                        } else {
+                            if (signalingDownSinceMs == 0L) {
+                                signalingDownSinceMs = System.currentTimeMillis()
+                            }
+                            reportSignaling("signaling_down", reconnectAttempt, 0L)
+                        }
                     }
                 }
             }
