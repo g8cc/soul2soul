@@ -22,3 +22,6 @@ keystore.properties
 
 # 本机 Agent 权限配置（含机器路径，不入库）
 .qoder/settings.local.json
+
+# harness 语法检查脚本（scripts/ui.py）编译缓存
+__pycache__/

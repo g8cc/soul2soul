@@ -177,12 +177,65 @@ PY
     echo "静态检查: E2E harness 禁止绑定其他开发机绝对路径" >&2
     fail=1
   fi
+  # v0.2.56 t4 复盘：uiautomator 按文档顺序返回，说明文字排在按钮之前，`ui tap 接受` 曾一直点在
+  # 「接受吗？」正文上 → 来电 30s 自动拒接、投屏授权永不落地。锁死「点击优先 clickable」这条不变式，
+  # 回滚成直接取首个命中即变红（详见 docs/TESTING.md T4 坑⑨）。
+  if ! grep -q 'el.get("clickable") == "true"' "$ROOT/scripts/ui.py" \
+     || ! sed -n '/^def tap_text/,/^def /p' "$ROOT/scripts/ui.py" | grep -q "_match_one"; then
+    echo "静态检查: ui.py 的 tap_text 必须经 _match_one 优先取 clickable 节点" >&2
+    fail=1
+  fi
+  # v0.2.56 t4 复盘（run5）：`grep -cE "ice state: [A-Z]->FAILED"` 里 [A-Z] 只吃**一个**字符，
+  # 真实行是 `ice state: CHECKING->FAILED` → 判据结构性恒假，把本该 SKIP(环境) 的媒体段
+  # 报成了 FAIL。状态机转移判据的字符类必须带量词，回滚成 [A-Z] 即变红（TESTING.md 坑⑬）。
+  if grep -qn '\[A-Z\]->' "$ROOT/scripts/e2e.sh" "$ROOT/scripts/drive-test.sh"; then
+    echo "静态检查: harness 的 ICE 转移判据必须写 [A-Z_]+->（单字符类匹配不到 CHECKING->FAILED=恒假）" >&2
+    fail=1
+  fi
+  # v0.2.56 t4 复盘（drive-run1）：sess_page 把 dumpsys 的 mFocusedApp 也统计进来，而它滞后停在
+  # 已 finish 的 ActivityRecord 上（实测 B 会话页 CLOSE、mCurrentFocus 已是 MainActivity，
+  # mFocusedApp 仍写着 SessionActivity）→「观看端会话页未退出」恒真。焦点判据只准看 mCurrentFocus。
+  if ! sed -n '/^sess_page/,/^}/p' "$ROOT/scripts/drive-test.sh" | grep -q 'grep -cE "mCurrentFocus=Window'; then
+    echo "静态检查: drive-test.sh 的 sess_page 必须只统计 mCurrentFocus=Window.*SessionActivity" >&2
+    fail=1
+  fi
+  # 中文文案里"变量引用紧跟全角括号"会被 bash 把多字节字符吞进变量名，set -u 下当场 unbound
+  # 崩掉整段（实测 drive-test.sh AC-6 的 SKIP 打印就是这么死的）。必须用大括号形式。
+  local fullwidth
+  fullwidth=$(python3 - "$ROOT/scripts" <<'PY'
+import glob, re, sys
+bad = []
+for f in sorted(glob.glob(sys.argv[1] + "/*.sh")):
+    for i, line in enumerate(open(f, encoding="utf-8"), 1):
+        for m in re.finditer(r"\$[A-Z_][A-Z0-9_]*", line):
+            nxt = line[m.end():m.end() + 1]
+            if nxt and ord(nxt) > 127:
+                bad.append("%s:%d" % (f, i))
+                break
+print(" ".join(bad))
+PY
+)
+  if [ -n "$fullwidth" ]; then
+    echo "静态检查: harness 变量引用紧跟全角字符（bash 会吞进变量名，set -u 当场崩），改大括号形式: $fullwidth" >&2
+    fail=1
+  fi
+  # 铁律②的机器版：harness 里每个 `signal: X` 判据的 X 必须是源码里真实写过的信号字面量。
+  # v0.2.56 之前 `"accept sent"` 这条不存在的日志当判据用了半年（恒假，重试+兜底全白跑）。
+  local sig missing=""
+  for sig in $(grep -ohE 'signal: [a-z][a-z.]*' "$ROOT/scripts/e2e.sh" "$ROOT/scripts/drive-test.sh" \
+               | awk '{print $2}' | sort -u); do
+    grep -Rq "\"$sig\"" "$ROOT/app/app/src/main/java" || missing="$missing $sig"
+  done
+  if [ -n "$missing" ]; then
+    echo "静态检查: harness 判据用的信号类型源码里不存在（恒假断言）:$missing" >&2
+    fail=1
+  fi
   [ "$fail" -eq 0 ]
 }
 
 t1_android_unit() {
   if [ ! -x "$GRADLE" ]; then
-    echo "gradle 不存在: $GRADLE（设 GRADLE_BIN 环境变量后可启用 T1）"
+    echo "gradle 不存在: ${GRADLE}（设 GRADLE_BIN 环境变量后可启用 T1）"
     return 2
   fi
   if [ -z "${JAVA_HOME:-}" ] && ! command -v java >/dev/null 2>&1; then

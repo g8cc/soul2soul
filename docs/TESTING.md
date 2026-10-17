@@ -46,6 +46,31 @@ bash scripts/test.sh --e2e
   `JAVA_HOME=/Users/wardonguo/tools/jdk17/jdk-17.0.2.jdk/Contents/Home ~/tools/gradle-8.7/bin/gradle -p app <task>`
 - 固定跑 `testProdDebugUnitTest`（勿用 `testDebugUnitTest`——flavor 矩阵会把同一套用例跑 4 遍）。
 - node v24 的 `node --test` **不接受目录参数**（`Cannot find module`），必须用带引号的 glob `'test/*.test.mjs'`。
+- T4 双模拟器（`scripts/e2e.sh` + `scripts/drive-test.sh`）十六个必踩坑，脚本已内置处理：
+  ① swiftshader 无头模式里 systemui 常弹 ANR，会卡死 `uiautomator dump`，表现为"按钮永远点不到"（实测烧光配对 4 次重试）→ `settings put global hide_error_dialogs 1`；
+  ② `pm clear` 后首次启动会弹 v0.2.51 的电池豁免引导，压在主页之上，必须先点「取消」才找得到「显示我的配对码」；
+  ③ 自动息屏会在无关阶段制造锁屏事件、污染 AC-6 判据 → `settings put system screen_off_timeout` 拉长；
+  ④ **上一轮 Ctrl-C 会留下 systemui 的投屏授权窗**：`uiautomator` 只 dump 顶层窗口，于是「一起玩」明明在界面上却查不到（实测配对已成功仍被判失败）→ 开局 `am force-stop` + `KEYCODE_HOME` 把界面归零。同一类的还有**灭屏残留**：drive-test.sh 的 AC-6 会真按电源键，脚本一崩（见坑⑯）屏幕就黑着留给下一轮，实测下一轮第一步「A 生成配对码」直接读空 → 开局一律 `KEYCODE_WAKEUP` + `wm dismiss-keyguard`，收尾 cleanup 也幂等地再做一次（灭屏不是"等等就好"的可恢复状态）。
+  ⑤ 一次 dump 实测 ~4s（宿主 load 30+ 时 10s+），它就是天然的轮询间隔——再叠 `sleep 3` 会让一轮重试耗时翻倍（原来的 8×sleep 版光授权轮询就吃 70 秒）；
+  ⑥ **来电页只有 30 秒**（`SessionActivity:946 INCOMING_TIMEOUT_MS`，到点自动 `decline`）。接听阶段前每一次 dump 都在吃这个窗口：实测 dump 轮询「B 收到来电」+ 逐次校验把 30s 烧光，主叫只收到 `signal: declined`。所以来电与接听一律用 logcat 判据（见铁律②修订）；
+  ⑦ **`--ez autoAccept` 兜底钩子是死的**：`SessionActivity` 未 exported，adb（uid 2000）起不动，实测 `Permission Denial: not exported from uid 10202`；`run-as` 也不行（`am` 会以 com.android.shell 身份被 assertPackageMatchesCallingUid 拒掉）。别再把它当"点不到就兜底"的保险；
+  ⑧ **"授权弹窗出现"不等于"已允许"**：投屏是两步弹窗（先选「整个屏幕」再点 Start now），实测点一次 Start now 后 systemui 仍占着焦点、授权根本没落地，于是 `invite` 永远不发。所以 e2e.sh 把两条拆成独立断言（出现弹窗 / invite 已发出），后者用 logcat 重试轮询作真判据，红了就带弹窗文本落盘并直接退出。
+  ⑨ **`ui tap` 的词必须落在 clickable 节点上**：`uiautomator` 按文档顺序返回节点，而说明文字永远排在按钮前面——`接受` 先命中「TA 想和你一起玩手机，接受吗？」的正文，`Start recording` 先命中「Start recording or casting…」的标题。实测正文被当成按钮连点几十秒：来电 30s 到点自动 `decline`，投屏授权永不落地。`scripts/ui.py` 现在优先取 `clickable="true"` 的命中，校验也按同一口径（可点目标消失=可点节点没了）；点完仍在界面上的目标（单选钮）传第 4 个参数 `once` 只点不校验，由业务判据（`invite sent`）证明生效。
+  ⑩ **ICE 在双模拟器上是结构性不可过，不是产品 bug**：每个模拟器的 qemu SLIRP 都把自己报成 `10.0.2.15`，host candidate 互相指着自己，guest↔guest 本就不通；本地 dev server 不设 `TURN_HOST` 时签发的是占位符 `YOUR_SERVER_PUBLIC_IP`（`server/src/index.js:22`），于是 srflx/relay 也都没有。实测 `signal: ice` 正常收发（A 收 2 条、B 收 6 条）但 `ice state: CHECKING->FAILED`(+15s)、零 `viewer-ready`。所以媒体段（同屏/笔迹）先判 ICE：连上了就硬断言；只有「FAILED>0 且零帧」这种环境特征才记 `SKIP(环境)` 并让整层返回 2，其它形态（gathering 卡死、进程被杀、握手没发）一律算真失败。
+  ⑪ **会话退出的判据不能用主页文案**：挂断/对端离开之后，v0.2.51 的电池豁免引导会**再次**弹出盖住主页，实测 `mCurrentFocus` 已是 `MainActivity` 而 dump 里只有「让它随叫随到 / 确定」→ 旧断言「挂断后 B 回到主界面」恒红。改用 `dumpsys window` 的焦点窗（会话页消失 + MainActivity 拿到焦点），它不受弹窗遮挡。
+  ⑫ **环境判定要把 FAILED 也当终态观测**：坑⑩的判定起初只轮询 `CONNECTED`，实测 `capture_ok 20:20:32 → CHECKING->FAILED 20:20:48` 而轮询在 20:20:47 退出，1 秒竞态把"结构性环境失败"误报成"异常需人工"。判据必须同时观测 `CONNECTED` 与 FAILED 转移，谁先到算谁。
+  ⑬ **grep 字符类漏写量词=恒假判据**：坑⑫的修复里我写成 `grep -cE "ice state: [A-Z]->FAILED"`——`[A-Z]` 只吃**一个**字符，真实行是 `ice state: CHECKING->FAILED`，所以这条判据永远返回 0。run5 因此把本该 `SKIP(环境)` 的媒体段报成 FAIL（同一份 logcat 里 `20:28:09` 明明白白有那条 FAILED：旧正则 0 命中、新正则 1 命中）。改回 `[A-Z_]+->FAILED`，并进 t0 静态守卫（harness 里出现 `[A-Z]->` 即红）——这是铁律②"判据必须真能匹配"的正则版本，比"字符串是否存在于源码"更隐蔽，因为它看起来完全合理。
+  ⑭ **`dumpsys window` 的 `mFocusedApp` 会滞后，不能当"页面还在"的判据**：`sess_page` 旧口径统计 `mCurrentFocus|mFocusedApp` 两个键，实测 B 的会话页 20:52:29 已 CLOSE、`mCurrentFocus` 已回落到 `MainActivity`，而 `mFocusedApp` 仍挂着 `SessionActivity` 的 ActivityRecord → 「观看端会话页未退出」恒真，锁屏保活那条 AC-6 判据一直没测到东西。焦点判据只准写 `grep -cE "mCurrentFocus=Window.*SessionActivity"`（e2e.sh 的 T4-6 本来就是这口径，drive-test.sh 抄漏了），进 t0 守卫。
+  ⑮ **负向断言（"零 bye"）的基线必须取在窗口起点**：drive-test.sh 原先在锁屏前才 `endlog` 取基线，而 ICE 失败看门狗早在接通后 ~30s 就发了 bye（实测 20:52:15 FAILED → 20:52:28 `signal: bye` → B CLOSE），基线把这段吞掉 → 增量恒 0 → 恒绿。现在基线在 `signal: accept` 之后立刻取（`EA0/EB0`），锁屏窗口再单独取一份（`E0A/E0B`）；并且 AC-6 整块加了**前置条件**：锁屏瞬间共享服务在跑 + 观看端焦点在会话页，才做四条硬断言，否则显式 `SKIP(环境)` 并让整层返回 2——本机 ICE 连不通时会话根本撑不到锁屏，这时候记 PASS 是撒谎、记 FAIL 是冤枉产品。
+  ⑯ **中文文案里 `$VAR` 紧跟全角括号会当场崩脚本**：`echo "…$APK（设置 APK_PATH）"` 在 UTF-8 下 bash 把 `（` 的首字节算进变量名，`set -u` 直接 `unbound variable`（实测 drive-test.sh:254 整段 AC-6 就这么死掉，白跑一轮 8 分钟）。一律写大括号形式；已进 t0 守卫（扫 `scripts/*.sh` 里变量引用后接非 ASCII 的行）。
+  模拟器只验信令/服务/UI 状态，媒体与手感的结论仍以真机为准。宿主 load 高时两台 qemu 会饿死 app 主线程（实测 `ANR in … Waited 5002ms for FocusEvent` → 系统杀进程），此时 ICE/`viewer-ready` 变红属环境而非产品，drive-test.sh 会把 ANR/杀进程计数打在媒体断言之前。
+  诚实边界：坑⑩里「ICE 连上→媒体硬断言」这条分支本机**从没跑过**（没有可路由的 relay 就没有 CONNECTED）。要让媒体段重新具备判定力，得先在本机起一个真 TURN，并把 dev server 的 `TURN_HOST` 指到模拟器可达的地址（一般是宿主在 SLIRP 里的 `10.0.2.2`，需自行验证）；做不到之前，媒体结论只能来自真机双端。**同理，AC-6 锁屏保活（坑⑮）本机也只验证了"判据不再是空的"，没验证过"锁屏真的不断连"——那要等真机双端。**
+- T4 断言的五条铁律（v0.2.56 复盘：e2e.sh 里曾同时存在**恒真**与**恒假**两种空断言，绿了半年）：
+  ① `scripts/ui.py has` 只打印 YES/NO、**恒返回 0**，所以 `ui has X && OK=YES` 是恒真；只有 `[ "$(ui has …)" = "YES" ]` 才是断言（drive-test.sh 全程用后者）。
+  ② 判据字符串必须先在代码里 grep 得到——`"accept sent"` 从来不存在，用它做接听判据等于恒假，重试和兜底钩子全在白跑。接听的真判据是**主叫端** logcat 的 `signal: accept`（观看端 `accept()` 在 `SessionActivity:596` 发 `"accept"`，主叫 `MainActivity:278` 收到就打印），来电同理用 `signal: incoming`；两者都不占 UI dump 的时间。这条现已机器化进 t0：harness 里每个 `signal: X` 的 X 都必须在 `app/app/src/main/java` 里能找到字面量，找不到就红（坑⑬）。
+  ③ 断言顺序必须符合真实调用顺序：客户端是**先投屏授权、后发邀请**（`MainActivity` 的 `invite` 只在 MediaProjection 回调里发），所以 `一起玩 → Start now → invite sent → 来电 → 接听` 才是唯一可过的顺序。
+  ④ **环境依赖的断言必须自带判定**（v0.2.56 t4 复盘第二条）：判据若在某类机器上永远为假（如坑⑩的双模拟器 ICE），它和恒真断言一样有害——既拦不住回归，又把真信号埋在一串红里。规则：先观测一个可证伪的前置条件（ICE 是否 CONNECTED），过不了就显式记 `SKIP(环境)` 并让整层返回 2，**永远不折算成 PASS**；前置条件之外的失败形态（卡死、没握手、被杀）保留为真失败。
+  ⑤ **状态源必须无滞后、负向断言必须自证窗口起点**（v0.2.56 t4 复盘第三条，run5/drive-run1 各中一枪）：判"页面还在"只看 `mCurrentFocus`（`mFocusedApp` 会停在已 finish 的 record 上，坑⑭）；判"没发生过 X"必须把基线取在窗口起点而不是临检查前（坑⑮，否则基线自己把 X 吞掉）。这轮新进的三条 t0 静态守卫就是这两条铁律的机器版：`[A-Z]->` 单字符类禁令、`signal: X` 的字面量必须存在于源码、`sess_page` 只准统计 `mCurrentFocus=Window`——各自回滚即红（已实测）。
 
 ## 3. 用例放哪、怎么加
 

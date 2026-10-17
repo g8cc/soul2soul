@@ -23,7 +23,9 @@ cleanup() {
     for pid in "${STARTED_PIDS[@]}"; do kill "$pid" 2>/dev/null || true; done
     for pid in "${STARTED_PIDS[@]}"; do wait "$pid" 2>/dev/null || true; done
   fi
-  if [ "$rc" -ne 0 ]; then echo "!! T4 失败，日志/截图保留在: $LOG_DIR" >&2; fi
+  # rc=2 是"信令/UI 全绿、媒体段本机不可判定"（test.sh 记 SKIP），不是失败，别把它打印成"失败"
+  if [ "$rc" = 2 ]; then echo "!! T4 未全判定（媒体段需真机双端），日志/截图保留在: $LOG_DIR" >&2
+  elif [ "$rc" -ne 0 ]; then echo "!! T4 失败，日志/截图保留在: $LOG_DIR" >&2; fi
   exit "$rc"
 }
 trap cleanup EXIT
@@ -32,6 +34,19 @@ ck() { if [ "${2:-0}" = "1" ]; then echo "  PASS $1"; PASS=$((PASS+1)); else ech
 shot() { "$ADB" -s "$1" exec-out screencap -p > "$2"; }
 ui() { ADB_BIN="$ADB" python3 "$UI_PY" "$@"; }
 count_log() { "$ADB" -s "$1" logcat -d 2>/dev/null | grep -cE "$2" || true; }
+has() { # 设备 文本 -> 退出码断言。ui.py 的 has 恒返回 0，只打印 YES/NO；
+        # 直接写 `ui has X && OK=YES` 是恒真空断言（v0.2.56 t4 复盘踩过），必须比字符串。
+  [ "$(ui has "$1" "$2" 2>/dev/null || echo NO)" = "YES" ]
+}
+dismiss_guides() { # 设备 -> 点掉首启/配对后的引导弹窗：它们盖在主页上，不点就永远找不到按钮。
+  # 弹窗延迟出现，要允许漏看一次；但一次 uiautomator dump 就要 ~4s，所以不再额外 sleep。
+  local S="$1" i misses=0
+  for i in 1 2 3 4 5; do
+    if has "$S" "去设置"; then ui tap "$S" "取消" >/dev/null 2>&1 || true; misses=0; continue; fi
+    if has "$S" "让它随叫随到"; then ui tap "$S" "确定" >/dev/null 2>&1 || true; misses=0; continue; fi
+    misses=$((misses + 1)); [ "$misses" -ge 2 ] && return 0
+  done
+}
 
 if [ -z "$ADB" ]; then
   for candidate in "$HOME/Library/Android/sdk/platform-tools/adb" "$HOME/Android/Sdk/platform-tools/adb"; do
@@ -44,7 +59,7 @@ if [ -z "$EMU" ]; then
   done
 fi
 [ -n "$ADB" ] && [ -x "$ADB" ] || { echo "adb 不存在，请设置 ADB_BIN" >&2; exit 2; }
-[ -f "$APK" ] || { echo "APK 不存在: $APK（设置 APK_PATH）" >&2; exit 2; }
+[ -f "$APK" ] || { echo "APK 不存在: ${APK}（设置 APK_PATH）" >&2; exit 2; }
 [ -f "$UI_PY" ] || { echo "UI 脚本不存在: $UI_PY" >&2; exit 2; }
 python3 -c 'from PIL import Image' >/dev/null 2>&1 || { echo "T4 需要 Python Pillow" >&2; exit 2; }
 
@@ -96,20 +111,39 @@ if [ "$I1" != "1" ] || [ "$I2" != "1" ]; then
   echo "!! 安装失败:"; tail -20 "$LOG_DIR/i1.log" "$LOG_DIR/i2.log"; exit 1
 fi
 for S in "$S1" "$S2"; do
+  # swiftshader 无头模式里 systemui 常弹 ANR，会把 uiautomator dump 卡死、点击全落空
+  "$ADB" -s "$S" shell settings put global hide_error_dialogs 1 >/dev/null 2>&1 || true
+  # 自动息屏会在无关阶段制造"锁屏"事件，污染会话判据，这里统一拉长
+  "$ADB" -s "$S" shell settings put system screen_off_timeout 900000 >/dev/null 2>&1 || true
   "$ADB" -s "$S" shell appops set "$PKG" SYSTEM_ALERT_WINDOW allow >/dev/null 2>&1 || true
   "$ADB" -s "$S" shell cmd appops set "$PKG" USE_FULL_SCREEN_INTENT allow >/dev/null 2>&1 || true
   "$ADB" -s "$S" shell pm grant "$PKG" android.permission.RECORD_AUDIO >/dev/null 2>&1 || true
   "$ADB" -s "$S" shell pm grant "$PKG" android.permission.POST_NOTIFICATIONS >/dev/null 2>&1 || true
+  # 上一轮被 Ctrl-C 的残留：投屏授权窗还压在 systemui 上，而 uiautomator 只 dump 顶层窗口，
+  # 于是「一起玩」明明在界面上却查不到（实测配对已成功却被判失败）。开局先归零。
+  # 同类的还有"上一轮崩在锁屏段 → 屏幕是黑的"：实测 drive-test.sh 崩掉后 S1 停在灭屏，
+  # 下一轮第 1 步「A 生成配对码」直接读空。灭屏不是可恢复状态，必须显式唤醒+解钥匙屏。
+  "$ADB" -s "$S" shell input keyevent KEYCODE_WAKEUP >/dev/null 2>&1 || true
+  "$ADB" -s "$S" shell wm dismiss-keyguard >/dev/null 2>&1 || true
+  "$ADB" -s "$S" shell am force-stop "$PKG" >/dev/null 2>&1 || true
+  "$ADB" -s "$S" shell input keyevent KEYCODE_HOME >/dev/null 2>&1 || true
 done
 
 # ---------- T4-1 配对 ----------
 "$ADB" -s "$S1" shell am start -n "$PKG/com.soul2soul.app.MainActivity" >/dev/null
 sleep 6
+# 全新安装（上面刚 uninstall）首启会弹电池豁免引导，压在主页之上，配对按钮永远找不到
+dismiss_guides "$S1"
 "$ADB" -s "$S1" logcat -c 2>/dev/null || true
 "$ADB" -s "$S2" logcat -c 2>/dev/null || true
-ui tap "$S1" "显示我的配对码" >/dev/null 2>&1 || true
-sleep 3
-CODE="$(ui code "$S1" 2>/dev/null || echo NONE)"
+CODE=NONE
+for i in 1 2 3 4; do
+  ui tap "$S1" "显示我的配对码" >/dev/null 2>&1 || true
+  sleep 3
+  CODE="$(ui code "$S1" 2>/dev/null || echo NONE)"
+  [ -n "$CODE" ] && [ "$CODE" != "NONE" ] && break
+  dismiss_guides "$S1"
+done
 ck "A 生成配对码 ($CODE)" $([ -n "$CODE" ] && [ "$CODE" != "NONE" ] && echo 1 || echo 0)
 if [ -z "$CODE" ] || [ "$CODE" = "NONE" ]; then
   echo "!! 未取到配对码，终止" >&2
@@ -119,62 +153,131 @@ fi
 
 "$ADB" -s "$S2" shell am start -n "$PKG/com.soul2soul.app.MainActivity" >/dev/null
 sleep 3
-ui tap "$S2" "输入对方的配对码" >/dev/null 2>&1 || true
-sleep 2
+dismiss_guides "$S2"
+DIALOG=0
+for i in 1 2 3 4; do
+  ui tap "$S2" "输入对方的配对码" >/dev/null 2>&1 || true
+  sleep 2
+  if has "$S2" "确定"; then DIALOG=1; break; fi
+  dismiss_guides "$S2"
+done
+if [ "$DIALOG" != "1" ]; then
+  echo "!! B 端输码对话框打不开，终止" >&2
+  shot "$S2" "$LOG_DIR/e2e_fail_dialog.png" || true
+  exit 1
+fi
 "$ADB" -s "$S2" shell input text "$CODE"
 sleep 1
-ui tap "$S2" "确定" >/dev/null 2>&1 || true
-sleep 3
 PAIRED=NO
-ui has "$S1" "一起玩" && PAIRED=YES || true
+for i in 1 2 3 4; do
+  ui tap "$S2" "确定" >/dev/null 2>&1 || true
+  sleep 3
+  dismiss_guides "$S1"
+  has "$S1" "一起玩" && { PAIRED=YES; break; }
+done
 ck "配对成功，A 出现「一起玩」" $([ "$PAIRED" = "YES" ] && echo 1 || echo 0)
+if [ "$PAIRED" != "YES" ]; then
+  echo "!! 配对未完成，后续断言无意义，终止" >&2
+  shot "$S1" "$LOG_DIR/e2e_fail_pair_done.png" || true
+  shot "$S2" "$LOG_DIR/e2e_fail_pair_done_b.png" || true
+  exit 1
+fi
 
-# ---------- T4-2 呼叫/接听 ----------
-INVITED=0
+# ---------- T4-2 呼叫：客户端是「先投屏授权、后发邀请」（MainActivity 的 invite 只在
+#            MediaProjection 回调里发出），授权不点掉，invite 永远不进信令，B 也永远等不到来电。
+#            所以顺序必须是 点一起玩 → 系统授权 → invite → 来电 → 接听。 ----------
+CONSENT=NO
 for i in 1 2 3; do
   ui tap "$S1" "一起玩" >/dev/null 2>&1 || true
   sleep 3
-  T=$(count_log "$S1" "invite sent")
-  [ "$T" -gt "0" ] && { INVITED=1; break; }
-done
-ck "A 发出呼叫(invite 已发出)" $([ "$INVITED" = "1" ] && echo 1 || echo 0)
-INCOMING=NO
-ui has "$S2" "好想你" && INCOMING=YES || true
-ck "B 收到来电界面" $([ "$INCOMING" = "YES" ] && echo 1 || echo 0)
-# 模拟器高负载下 input tap 偶发被吞: 以 logcat "accept sent" 为准重试, 兜底走测试钩子
-ACCEPTED=0
-for i in $(seq 1 5); do
-  ui tap "$S2" "接受" >/dev/null 2>&1 || true
-  sleep 3
-  T=$(count_log "$S2" "accept sent")
-  if [ "$T" -gt "0" ]; then ACCEPTED=1; break; fi
-done
-if [ "$ACCEPTED" != "1" ]; then
-  echo "  (点击重试失败, 使用 autoAccept 测试钩子兜底)"
-  "$ADB" -s "$S2" shell am start -n "$PKG/com.soul2soul.app.session.SessionActivity" --ez autoAccept true >/dev/null 2>&1 || true
-  sleep 4
-  T=$(count_log "$S2" "accept sent")
-  [ "$T" -gt "0" ] && ACCEPTED=1
-fi
-ck "B 点了接听(accept 已发出)" $([ "$ACCEPTED" = "1" ] && echo 1 || echo 0)
-
-# ---------- T4-3 屏幕录制授权(A 端系统弹窗, 兼容单步/两步, 最长等30s) ----------
-CONSENT=NO
-for i in $(seq 1 10); do
-  if ui has "$S1" "Start now|立即开始|Start recording|开始|entire screen|整个屏幕"; then CONSENT=YES; break; fi
-  sleep 3
+  for j in 1 2 3 4; do
+    # 一次 dump 本身要 ~4s，就是天然的轮询间隔，别再 sleep
+    if has "$S1" "Start now|立即开始|Start recording|开始|entire screen|整个屏幕"; then CONSENT=YES; break 2; fi
+  done
 done
 if [ "$CONSENT" = "YES" ]; then
-  # 两步弹窗先选"整个屏幕"
-  ui tap "$S1" "entire screen|整个屏幕" >/dev/null 2>&1 || true
-  sleep 2
-  ui tap "$S1" "Start now|Start recording|立即开始|开始" >/dev/null 2>&1 || true
+  # 两步弹窗先选"整个屏幕"（once：单选钮点完弹窗仍在，无法用"消失"来校验，
+  # 它真生效由下面的 invite sent 证明）
+  ui tap "$S1" "entire screen|整个屏幕" once >/dev/null 2>&1 || true
   sleep 2
 fi
 sleep 8
 shot "$S1" "$LOG_DIR/e2e_consent.png"
 ui list "$S1" "." > "$LOG_DIR/e2e_consent_ui.txt" 2>/dev/null || true
-ck "A 端出现屏幕授权弹窗并允许" $([ "$CONSENT" = "YES" ] && echo 1 || echo 0)
+ck "A 端出现屏幕授权弹窗" $([ "$CONSENT" = "YES" ] && echo 1 || echo 0)
+
+# 「允许」不是一次点击就能证明的：实测点完 Start now 弹窗仍挂在 systemui 上（授权没落地 →
+# invite 永远不发）。所以这里重试点击，并用 logcat 的 invite sent 作为唯一真判据（不占 dump）。
+INVITED=0
+for i in 1 2 3 4; do
+  ui tap "$S1" "Start now|Start recording|立即开始|开始" >/dev/null 2>&1 || true
+  for j in $(seq 1 8); do
+    [ "$(count_log "$S1" "invite sent")" -gt 0 ] && { INVITED=1; break 2; }
+    sleep 2
+  done
+done
+ck "A 发出呼叫(invite 已发出=授权真落地)" $([ "$INVITED" = "1" ] && echo 1 || echo 0)
+if [ "$INVITED" != "1" ]; then
+  echo "!! T4 卡在投屏授权：A 当前焦点与弹窗文本已存 $LOG_DIR/e2e_consent_ui.txt" >&2
+  exit 1
+fi
+# B 收到来电：用 logcat（MainActivity:278 确实打 signal: incoming），不要用 ui dump。
+# 来电页 30s 自动拒接（SessionActivity:946 INCOMING_TIMEOUT_MS），而一次 dump 在负载高的宿主要 4~15s，
+# v0.2.56 复盘：dump 轮询把窗口吃光 → 主叫只收到 declined，接听判据永远红。
+INCOMING=NO
+for i in $(seq 1 12); do
+  [ "$(count_log "$S2" "signal: incoming")" -gt 0 ] && { INCOMING=YES; break; }
+  sleep 1
+done
+ck "B 收到来电界面(signal: incoming)" $([ "$INCOMING" = "YES" ] && echo 1 || echo 0)
+
+# ---------- T4-3 接听。判据不能用 logcat "accept sent"——代码里根本没有这条日志，
+#            它是恒为 0 的空断言（5 次重试 + autoAccept 兜底全白跑，v0.2.56 t4 复盘）。
+#            真判据：B 的 accept()(SessionActivity:596) 发 signal "accept"，主叫收到后打 "signal: accept"。
+#            autoAccept 兜底也删了：SessionActivity 未 exported，adb(uid 2000) 起不动，
+#            实测 Permission Denial: not exported from uid 10202 —— 第二个永远白跑的兜底。 ----------
+ACCEPTED=0
+for i in 1 2 3 4; do
+  ui tap "$S2" "接受" >/dev/null 2>&1 || true
+  for j in 1 2 3 4 5; do
+    [ "$(count_log "$S1" "signal: accept")" -gt 0 ] && { ACCEPTED=1; break 2; }
+    sleep 1
+  done
+done
+ck "B 点了接听(主叫收到 signal: accept)" $([ "$ACCEPTED" = "1" ] && echo 1 || echo 0)
+
+# ---------- 媒体段前置判定：ICE 到底连不连得上 ----------
+# 依赖画面的断言（同屏、笔迹）必须先看 ICE；否则它们在本机是**结构性恒假**断言（v0.2.56 t4 复盘）：
+# ① 每个模拟器的 qemu SLIRP 都把自己报成 10.0.2.15，host candidate 互指自己，guest↔guest 不可路由；
+# ② 本地 dev server 未设 TURN_HOST 时签发占位符 YOUR_SERVER_PUBLIC_IP（server/src/index.js:22），
+#    于是既没有 srflx 也没有 relay。实测：signal: ice 正常收发，ICE 仍 CHECKING->FAILED(+15s)。
+# 结论只允许两种：连上了就硬断言；没连上就标 SKIP(环境)，绝不折算成 PASS。
+ENV_SKIP=0
+ICE=UNKNOWN
+for i in $(seq 1 20); do
+  # CONNECTED 与 FAILED 都是终态，必须同轮观测：只等 CONNECTED 会在"FAILED 恰好落在轮询结束后"
+  # 时把环境失败误报成异常（实测 20:20:32 capture_ok → 20:20:48 FAILED，而旧轮询 20:20:47 就退出了）
+  C=$(count_log "$S1" "ice state: COMPLETED|ice state: CONNECTED")
+  Fl=$(count_log "$S1" "ice state: [A-Z_]+->FAILED")
+  [ "${C:-0}" -gt 0 ] && { ICE=OK; break; }
+  [ "${Fl:-0}" -gt 0 ] && { ICE=FAILED; break; }
+  sleep 2
+done
+if [ "$ICE" != "OK" ]; then
+  FAILED=$(count_log "$S1" "ice state: [A-Z_]+->FAILED")
+  LIVEB=$(count_log "$S2" "viewer-ready")
+  if [ "$ICE" = "FAILED" ] && [ "${LIVEB:-0}" -eq 0 ]; then
+    # 只有"ICE 确实跑过检查并 FAILED、且一帧都没出"才符合上面①②的结构性环境失败特征
+    echo "  !! 媒体段本机不可判定：ICE 未连通（FAILED=${FAILED} 次），原因见上方注释①②"
+    echo "     媒体/笔迹结论一律以真机双端为准（docs/TESTING.md T4 段），此处按 SKIP 记账，不算通过。"
+    ENV_SKIP=2
+  else
+    echo "  FAIL 媒体段异常：ICE=$ICE FAILED=${FAILED:-0}/viewer-ready=${LIVEB:-0} 不符合" >&2
+    echo "     「模拟器不可路由」的特征（gathering 卡死、进程被杀、握手没发都可能），需人工查日志" >&2
+    FAIL=$((FAIL + 1))
+    ENV_SKIP=1
+  fi
+fi
 
 # ---------- T4-4 屏幕共享验证：A 打开设置页，B 应同步显示相同画面 ----------
 sleep 5
@@ -194,12 +297,16 @@ print(f"{d:.1f}")
 EOF
 ); then :; else echo "截图差异计算失败" >&2; fi
 echo "  两端截图差异(越低越像): $DIST"
-SIMILAR=0
-python3 - "$DIST" <<'EOF' >/dev/null 2>&1 && SIMILAR=1 || true
+if [ "$ICE" = "OK" ]; then
+  SIMILAR=0
+  python3 - "$DIST" <<'EOF' >/dev/null 2>&1 && SIMILAR=1 || true
 import sys
 sys.exit(0 if float(sys.argv[1]) < 60 else 1)
 EOF
-ck "B 看到了 A 的屏幕(设置页画面同步)" "$SIMILAR"
+  ck "B 看到了 A 的屏幕(设置页画面同步)" "$SIMILAR"
+else
+  echo "  SKIP(环境) B 看到了 A 的屏幕(ICE 未连通)"
+fi
 
 # ---------- T4-5 标注：B 上画一笔，A 悬浮层应出现笔迹 ----------
 shot "$S1" "$LOG_DIR/e2e_a_before.png"
@@ -218,15 +325,34 @@ print(cnt)
 EOF
 ); then :; else echo "笔迹差异计算失败" >&2; fi
 echo "  A 截图差异数: $DIFF (笔迹浮现应 > 0)"
-ck "B 的笔迹出现在 A 屏幕" $([ "$DIFF" -gt 5 ] 2>/dev/null && echo 1 || echo 0)
+if [ "$ICE" = "OK" ]; then
+  ck "B 的笔迹出现在 A 屏幕" $([ "$DIFF" -gt 5 ] 2>/dev/null && echo 1 || echo 0)
+else
+  echo "  SKIP(环境) B 的笔迹出现在 A 屏幕(ICE 未连通)"
+fi
 
 # ---------- T4-6 挂断 ----------
 ui tap "$S2" "结束" >/dev/null 2>&1 || true
 sleep 3
+# 判据用 mCurrentFocus，不用「一起玩」：会话结束后 v0.2.51 的电池豁免引导会再次盖住主页，
+# 实测 mCurrentFocus 已经是 MainActivity，但 dump 里只有「让它随叫随到/确定」→ 旧判据把
+# "已回到主页"误判成失败（第 5 个坑的会话版）。焦点窗是 dumpsys 的硬事实，不受弹窗遮挡。
+# 诚实边界：ICE=OK 之外，这一条测的是"会话最终退出"，不是"点挂断生效"——媒体没通时
+# ICE 看门狗会先一步结束会话，点击只是碰巧落在已经退出的界面上。
 ENDED=0
-ui has "$S2" "一起玩" && ENDED=1 || true
-ck "挂断后 B 回到主界面" "$ENDED"
+for i in 1 2 3 4 5; do
+  INSESS=$("$ADB" -s "$S2" shell dumpsys window 2>/dev/null | grep -cE "mCurrentFocus=Window.*SessionActivity" || true)
+  HOME=$("$ADB" -s "$S2" shell dumpsys window 2>/dev/null | grep -cE "mCurrentFocus=Window.*$PKG.*MainActivity" || true)
+  if [ "${INSESS:-0}" -eq 0 ] && [ "${HOME:-0}" -gt 0 ]; then ENDED=1; break; fi
+  sleep 2
+done
+ck "挂断后 B 焦点回到 MainActivity(会话页已退出)" "$ENDED"
 
-echo "== E2E: PASS=$PASS FAIL=$FAIL =="
+echo "== E2E: PASS=$PASS FAIL=$FAIL SKIP_ENV=$ENV_SKIP =="
 if [ "$FAIL" -gt 0 ]; then exit 1; fi
+# 媒体段被环境挡住时整层记 SKIP(2)，test.sh 不会把它写成 PASS；发版说明必须如实写"媒体未本机验证"。
+if [ "$ENV_SKIP" -gt 0 ]; then
+  echo "!! T4 信令/UI 段全绿，媒体段本机不可判定（需真机双端）" >&2
+  exit 2
+fi
 exit 0
