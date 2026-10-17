@@ -56,6 +56,7 @@
 | 扫码 | ⬜ 同 #43 | 同左 | N-A | N-A |
 | 解绑 unpaired | N-A | PASS 清 paired/token/InboxStore（PresenceService handleSignal） | — | 同左 |
 | 进程重启/断线 | ⬜ 自启动+电池豁免在真机 ROM 下存活率（同 §4） | — | — | PASS 重连指数退避 3→30s 上限（onState 路径） |
+| 配对成功即换 token 重连 | N-A | N-A | N-A | ⬜ **实测有抖动**：双模拟器 18:34:10.244 `paired` → .262/.492 服务器对两端各广播一次 `peer.gone`（旧 socket 关闭，2ms 后新 socket registered）→ 对端状态胶囊会闪一下"对方离线"。服务器加宽限期（peer.gone 延后 2~3s 且期间同 deviceId 重连则不发）属高风险区，需用户批准；先在真机确认肉眼可见与否 |
 
 ## 4. 权限引导（通知/麦克风/悬浮窗/无障碍）
 
