@@ -171,6 +171,28 @@ class WebRtcClient(
         remoteScreenPaused = paused
         if (!paused) viewerZeroFpsStreak = 0
     }
+
+    /**
+     * 本端渲染面（surface）是否活着。观看端自己锁屏时 surface 被销毁、解码必然停帧，
+     * 这与"对方断流"是两回事——0.2.55 双真机日志里每次 viewer_resumed 后 0.2s 内必报一条
+     * video_stall，就是把本端锁屏误记成了黑屏故障，把 G 的真信号埋掉（v0.2.57）。
+     */
+    @Volatile private var localRenderPaused = false
+    @Volatile private var resumedSurfaceAtMs = 0L
+
+    /**
+     * surfaceCreated/surfaceDestroyed 的唯一写入口（成对，不给漏配的机会）：
+     * 恢复侧清 streak 并开一个"等第一帧"窗口，由轮询确认真的出帧后再报 video_resumed。
+     */
+    fun setLocalRenderPaused(paused: Boolean) {
+        localRenderPaused = paused
+        if (paused) {
+            resumedSurfaceAtMs = 0L
+        } else {
+            viewerZeroFpsStreak = 0
+            resumedSurfaceAtMs = System.currentTimeMillis()
+        }
+    }
     private val endedNotified = java.util.concurrent.atomic.AtomicBoolean(false)
     @Volatile private var remoteDescriptionSet = false
     private val pendingRemoteIce = mutableListOf<IceCandidate>()
@@ -904,7 +926,10 @@ class WebRtcClient(
                         // 说明断的是共享端的采集/编码，不是网络（服务器看不见媒体，只能自报）。
                         // 对方锁屏期间零帧是设计行为（画面暂停·语音继续），排除在外。
                         if (!isSharer && established && !remoteScreenPaused) {
-                            if (inboundVideoFps <= 0.0) {
+                            if (localRenderPaused) {
+                                // 本端 surface 没了，停帧是自己造成的，与对端无关
+                                viewerZeroFpsStreak = 0
+                            } else if (inboundVideoFps <= 0.0) {
                                 viewerZeroFpsStreak++
                                 if (viewerZeroFpsStreak == VIEWER_STALL_POLLS) {
                                     com.soul2soul.app.util.SelfCheck.reportEvent(
@@ -913,6 +938,16 @@ class WebRtcClient(
                                     )
                                 }
                             } else {
+                                val since = resumedSurfaceAtMs
+                                if (since > 0L) {
+                                    resumedSurfaceAtMs = 0L
+                                    // G 的判定证据：surface 重建后到底有没有帧回来。
+                                    // 只有 video_stall 没有它，就分不清"流停了"和"渲染链没重挂"。
+                                    com.soul2soul.app.util.SelfCheck.reportEvent(
+                                        context, "viewer", "video_resumed", latestIceState,
+                                        "afterMs=${System.currentTimeMillis() - since}",
+                                    )
+                                }
                                 viewerZeroFpsStreak = 0
                             }
                         }

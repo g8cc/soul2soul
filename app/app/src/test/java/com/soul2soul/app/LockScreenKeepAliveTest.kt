@@ -82,4 +82,28 @@ class LockScreenKeepAliveTest {
             window(session(), "SignalRouter.DataAction.HideBanner -> {", 8)
                 .any { it.contains("setRemoteScreenPaused(false)") })
     }
+
+    // L5：观看端**自己**锁屏时 surface 被销毁，解码必然停帧——这不是对端断流。
+    // 0.2.55 双真机日志（10-17 17:43~18:02）里每次 viewer_resumed 之后 0.2s 内都紧跟一条
+    // video_stall（18:01:00.218->00.405、18:01:11.363->…），就是这个误报把"解锁后黑屏"的真
+    // 信号埋掉了，G 到现在无法判定。门控必须挂在 surface 生命周期上而不是 onPause——
+    // PiP 不销毁 surface，用 onPause 会把小窗期间的真卡死也一起放过。
+    @Test
+    fun `local surface pause gates the viewer stall detector`() {
+        val w = webrtc()
+        assertTrue("本端暂停位必须有唯一写入口",
+            w.any { it.contains("fun setLocalRenderPaused(paused: Boolean)") })
+        assertTrue("本端 surface 停摆期间不得累计零帧 streak",
+            window(w, "if (localRenderPaused) {", 4).any { it.contains("viewerZeroFpsStreak = 0") })
+        // 恢复对称性：destroy→置位 与 create→复位 必须成对挂在同一个 SurfaceHolder.Callback 上
+        val cb = window(session(), "renderer.holder.addCallback(", 24)
+        assertTrue("surfaceDestroyed 必须置位本端暂停",
+            cb.any { it.contains("setLocalRenderPaused(true)") })
+        assertTrue("surfaceCreated 必须复位（否则解锁后再也不会判卡死）",
+            cb.any { it.contains("setLocalRenderPaused(false)") })
+        assertTrue("surface 重建后必须报正面证据 video_resumed：只有 stall 分不清「流停了」与「帧回来了但没渲染」",
+            w.any { it.contains("\"video_resumed\"") })
+        assertTrue("恢复窗口必须在出帧时关闭，不能每次有帧都重复上报",
+            window(w, "if (since > 0L) {", 6).any { it.contains("resumedSurfaceAtMs = 0L") })
+    }
 }

@@ -166,8 +166,14 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
         renderer.setScalingType(org.webrtc.RendererCommon.ScalingType.SCALE_ASPECT_FIT)
         // 黑屏排查：锁屏/解锁会销毁重建 surface，若 surface 死了而 sink 没重挂，
         // 对方画面就永远停在黑屏（媒体仍在收）。这里只报事实，不改行为。
+        // 同时它也是"本端能不能渲染"的唯一权威信号：PiP 不销毁 surface，所以按 surface 而非
+        // onPause 门控停帧告警（v0.2.57：观看端自己锁屏曾被记成 video_stall，污染 G 的判据）。
         renderer.holder.addCallback(object : android.view.SurfaceHolder.Callback {
-            override fun surfaceCreated(holder: android.view.SurfaceHolder) = viewerEvent("surface_created")
+            override fun surfaceCreated(holder: android.view.SurfaceHolder) {
+                client?.setLocalRenderPaused(false)
+                viewerEvent("surface_created")
+            }
+
             override fun surfaceChanged(
                 holder: android.view.SurfaceHolder,
                 format: Int,
@@ -175,8 +181,10 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
                 height: Int,
             ) = viewerEvent("surface_size", "${width}x$height")
 
-            override fun surfaceDestroyed(holder: android.view.SurfaceHolder) =
+            override fun surfaceDestroyed(holder: android.view.SurfaceHolder) {
+                client?.setLocalRenderPaused(true)
                 viewerEvent("surface_destroyed")
+            }
         })
         // 首帧尺寸事件约 1~2 秒后才到，之前 View 保持 match_parent 会被合成层铺满拉伸裁底；
         // 开场先按上次会话缓存的远端尺寸套用等比布局，事件到达后再校正
