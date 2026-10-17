@@ -33,6 +33,21 @@ const PAIR_REQUEST_MIN_INTERVAL_MS = 5000;
 const INVITE_MIN_INTERVAL_MS = 2000;
 const MAX_MESSAGE_BYTES = 256 * 1024; // SDP offer 最大约 50KB，256KB 封顶（巨包在传输层即断连，不进业务代码）
 
+// ---- 统一日志出口：每行前缀本地时间 HH:MM:SS.mmm ----
+// 断连排查要把双端事件按毫秒对齐（谁先掉、掉之前最后一次协商、心跳有没有断），
+// 旧日志没有时间戳，只能靠相邻行顺序猜。这里只加前缀，不改任何行为与调用点。
+const __logTs = () => {
+  const d = new Date();
+  const p2 = (n) => String(n).padStart(2, '0');
+  return `${p2(d.getHours())}:${p2(d.getMinutes())}:${p2(d.getSeconds())}` +
+    `.${String(d.getMilliseconds()).padStart(3, '0')}`;
+};
+for (const level of ['log', 'warn', 'error']) {
+  const raw = console[level].bind(console);
+  console[level] = (...args) => raw(`[${__logTs()}]`, ...args);
+}
+
+
 // ---------- 配对关系持久化 ----------
 // pairings[deviceId] = { peer: 对端deviceId, token: 配对令牌 }
 let pairings = {};
@@ -211,7 +226,9 @@ function send(ws, obj) {
   if (ws && ws.readyState === WebSocket.OPEN) {
     if (obj.type !== undefined) {
       // 留言正文不落日志（隐私）：与 sdp/ice 同样只记类型
+      // incoming/accepted 携带 TURN 时限凭证（username/credential），同样只记类型
       const quiet = obj.type === 'sdp' || obj.type === 'ice' ||
+        obj.type === 'incoming' || obj.type === 'accepted' ||
         obj.type === 'msg.post' || obj.type === 'msg.new' || obj.type === 'msg.inbox';
       console.log(`[relay] ${ws.deviceId || '?'} <- ${obj.type}` +
         (quiet ? '' : ` ${JSON.stringify(obj).slice(0, 120)}`));
@@ -227,6 +244,19 @@ function send(ws, obj) {
   }
   return false;
 }
+
+// ---- 断连排查用的日志安全取值：枚举名/标量可以落盘，自由文本一律过滤 ----
+const safeTag = (v, max) => String(v ?? '?').replace(/[^\w.-]/g, '_').slice(0, max);
+const safeNum = (v) => (Number.isFinite(Number(v)) ? Math.round(Number(v)) : -1);
+const safeBool = (v) => (v === true ? 'true' : v === false ? 'false' : '?');
+// ICE 候选只记类型（host/srflx/relay）：是否退化到 TURN 中转是断连排查的关键分叉，
+// 但候选行含内网/公网地址与端口，不落盘。
+function iceCandidateType(c) {
+  const line = String((c && c.candidate) || c || '');
+  const m = line.match(/\btyp\s+([A-Za-z]+)/);
+  return m ? m[1] : '?';
+}
+
 function iceServers() {
   // 纯逻辑在 turn.js（单测覆盖）：reverse-proxy 限时凭证 + stun/turn udp+tcp 三 urls
   return buildIceServers({
@@ -313,6 +343,9 @@ wss.on('connection', (ws) => {
   ws.deviceId = null;
   ws.authed = false;      // hello 令牌校验通过 / 刚完成配对
   ws.pairAttempts = 0;
+  ws.connectedAt = Date.now();  // 排查用：连接存活时长
+  ws.iceSeen = 0;               // 排查用：本连接转发过的 ICE 候选数
+  ws.sessionAt = 0;             // 排查用：本连接最后一次 offer 时间
 
   // ws 层协议错误（含巨包拒收 1009）默认以 'error' 事件抛出——无人监听会崩进程
   ws.on('error', (err) => {
@@ -342,7 +375,12 @@ wss.on('connection', (ws) => {
       }
       ws.authed = true;
       const old = online.get(ws.deviceId);
-      if (old && old !== ws) old.close();
+      if (old && old !== ws) {
+        // 同 deviceId 新连接顶掉旧连接：旧会话的媒体会随之失去信令，必须留痕
+        console.log(`[ws] ${ws.deviceId} replaced old connection ` +
+          `(oldAliveFor=${Date.now() - (old.connectedAt || Date.now())}ms)`);
+        old.close();
+      }
       online.set(ws.deviceId, ws);
       const peer = peerDeviceId(ws.deviceId);
       send(ws, {
@@ -567,9 +605,42 @@ wss.on('connection', (ws) => {
       case 'bye': {
         if (!ws.authed) break;
         const peer = peerDeviceId(ws.deviceId);
+        // 断连排查：协商/挂断按到达时序留痕，只记标量（kind、候选类型、计数），
+        // 不含 SDP 正文与候选地址。peerOnline=false 时消息会静默丢弃，必须有痕迹。
+        if (type === 'ice') ws.iceSeen = (ws.iceSeen || 0) + 1;
+        if (type === 'sdp' && msg.sdp && msg.sdp.type === 'offer') ws.sessionAt = Date.now();
+        const detail = type === 'sdp'
+          ? `kind=${safeTag(msg.sdp && msg.sdp.type, 8)} len=${String((msg.sdp && msg.sdp.sdp) || '').length}`
+          : type === 'ice'
+            ? `#${ws.iceSeen} typ=${iceCandidateType(msg.candidate)}`
+            : `sessionMs=${ws.sessionAt ? Date.now() - ws.sessionAt : -1} iceSeen=${ws.iceSeen || 0}`;
+        console.log(`[call] ${type} ${ws.deviceId} -> ${peer || '-'} ${detail} ` +
+          `peerOnline=${peer ? online.has(peer) : false}`);
         if (peer) send(online.get(peer), msg);
         break;
       }
+      // ---- 客户端自诊断上报（远程排查断连：服务器看不到 WebRTC 媒体，只能靠双端自报）----
+      // 只认已鉴权连接，只记枚举名与标量，不落任何业务内容；未知字段忽略。
+      case 'diag.session': {
+        if (!ws.authed) break;
+        console.log(`[diag.session] ${ws.deviceId} role=${safeTag(msg.role, 16)} ` +
+          `reason=${safeTag(msg.reason, 32)} ice=${safeTag(msg.ice, 16)} ` +
+          `path=${safeTag(msg.path, 16)} setupMs=${safeNum(msg.setupMs)} ` +
+          `liveMs=${safeNum(msg.liveMs)} fg=${safeBool(msg.fg)} ` +
+          `screenOn=${safeBool(msg.screenOn)} proj=${safeTag(msg.proj, 24)} ` +
+          `app=${safeTag(msg.app, 16)}`);
+        break;
+      }
+      case 'diag.event': {
+        if (!ws.authed) break;
+        console.log(`[diag.event] ${ws.deviceId} role=${safeTag(msg.role, 16)} ` +
+          `event=${safeTag(msg.event, 32)} ice=${safeTag(msg.ice, 16)} ` +
+          `fg=${safeBool(msg.fg)} screenOn=${safeBool(msg.screenOn)} ` +
+          `liveMs=${safeNum(msg.liveMs)} detail=${safeTag(msg.detail, 64)} ` +
+          `app=${safeTag(msg.app, 16)}`);
+        break;
+      }
+
       case 'app.version': {
         console.log(`[diag.version] ${ws.deviceId} code=${msg.localCode} name=${msg.localName} remote=${msg.remoteCode}/${msg.remoteName} update=${msg.hasUpdate}`);
         break;
@@ -583,7 +654,12 @@ wss.on('connection', (ws) => {
     }
   });
 
-  ws.on('close', () => {
+  ws.on('close', (code, reason) => {
+    // 区分三种死法：客户端主动关(1000/1001)、心跳超时被 terminate(1006)、被新连接顶掉
+    console.log(`[ws] ${ws.deviceId || '?'} close code=${code} ` +
+      `reason=${String(reason || '').slice(0, 24) || '-'} ` +
+      `aliveFor=${Date.now() - (ws.connectedAt || Date.now())}ms ` +
+      `iceSeen=${ws.iceSeen} sessionMs=${ws.sessionAt ? Date.now() - ws.sessionAt : -1}`);
     if (ws.deviceId && online.get(ws.deviceId) === ws) {
       online.delete(ws.deviceId);
       pairBook.forgetDevice(ws.deviceId);
@@ -593,7 +669,10 @@ wss.on('connection', (ws) => {
         send(online.get(initiator), { type: 'pair.recall_failed', reason: 'peer_offline' });
       }
       const peer = peerDeviceId(ws.deviceId);
-      if (peer) send(online.get(peer), { type: 'peer.gone' });
+      if (peer) {
+        console.log(`[call] peer.gone ${ws.deviceId} -> ${peer}（信令断开，观看/共享端会收到对方离线）`);
+        send(online.get(peer), { type: 'peer.gone' });
+      }
     }
   });
 });
@@ -601,7 +680,12 @@ wss.on('connection', (ws) => {
 // 心跳: 清理假死连接
 setInterval(() => {
   wss.clients.forEach((ws) => {
-    if (ws.isAlive === false) { ws.terminate(); return; }
+    if (ws.isAlive === false) {
+      // 30s 内没回 pong：链路已假死（Doze/切网/被 ROM 冻结），服务器主动断
+      console.log(`[ws] ${ws.deviceId || '?'} pong 超时 terminate（假死）`);
+      ws.terminate();
+      return;
+    }
     ws.isAlive = false;
     ws.ping();
   });
