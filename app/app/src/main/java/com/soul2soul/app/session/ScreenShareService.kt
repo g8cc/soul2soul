@@ -189,7 +189,17 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
                             dispatchSignal(client, json)
                         }
                     }
-                    "bye", "peer.gone" -> stopSession(sendBye = false)
+                    "bye", "peer.gone" -> {
+                        // 秒断判定：peer.gone 只代表**信令**断了（服务器 30s pong 超时就会广播一次），
+                        // P2P 媒体可能完全正常。必须在拆会话**之前**记下到达瞬间的 ICE 态——
+                        // stopSession 之后 ice 只会是 CLOSED，「谁把会话关掉的」就永远读不出来了。
+                        com.soul2soul.app.util.SelfCheck.reportEvent(
+                            this@ScreenShareService, "sharer", "peer_signal",
+                            webRtc?.iceStateName ?: "-",
+                            "sig=" + if (json.optString("type") == "peer.gone") "gone" else "bye",
+                        )
+                        stopSession(sendBye = false)
+                    }
                 }
             }
         }

@@ -623,6 +623,13 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
             SignalRouter.SignalAction.DispatchMedia -> dispatchToClient(json)
             is SignalRouter.SignalAction.PeerEnded -> {
                 endedRemotely = true
+                // 与共享端同一条判据：先记 ICE 实况再拆页面。peer.gone 只是对端**信令**掉线
+                // （HyperOS 冻结后台套接字 → 服务器 pong 超时广播），ICE=CONNECTED 的 peer_signal
+                // 就等于「会话被信令假死拆掉」，是"米15 发起后几秒即断"的头号候选。
+                viewerEvent(
+                    "peer_signal",
+                    if (action.noticeRes == R.string.peer_lost) "sig=gone" else "sig=bye",
+                )
                 finishWithCleanup(sendBye = false, notice = action.noticeRes)
             }
             SignalRouter.SignalAction.CallerCanceledBeforeAccept -> {
