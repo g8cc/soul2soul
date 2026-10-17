@@ -36,6 +36,9 @@
 | 进程被杀 START_STICKY | ⬜ intent=null 重建路径（同 §1 孤儿球，一并真机核） | — | — | — | — |
 | 息屏待命保活（Presence 长连接） | PASS v0.2.51：配对期持 PARTIAL_WAKE_LOCK（acquire 带 6h 超时+5h 自续期，onCreate 排在 startForeground 后，onDestroy/unpaired 成对释放，AuditRound2WiringTest 锁三对偶）；FGS 类型 dataSync→specialUse（Android14 dataSync 有每日时长上限会定时停服）；服务器30s ping/OkHttp20s ping 不变 | N-A 会话期保活归上面"息屏/锁屏"行 | N-A | N-A | N-A |
 | 息屏待命真机复验 | ⬜ 双真机配对→静置锁屏≥5min→唤醒互呼直达、logcat 无 terminate/重连风暴（wakelock+豁免的实际效果只能真机证） | — | — | — | — |
+| 终止原因可追溯（diag.*，v0.2.55） | PASS 未真正起流（connectStartedAtMs≤0）不发帧，不产噪声 | PASS reason=connect_TIMEOUT/sdp_* + fg 位（Android14+ 后台起采集被拒时可辨） | PASS 所有本地收尾汇流 close()→diag.session（reason/ice/setupMs/liveMs/fg/screenOn）；SessionEndDiagTest D1/D2/D4 锁 | PASS 锁屏事件先走 DataChannel（服务器看不见），另发 diag.event screen_off + 超时结束带 screen_off_timeout；D3 锁 | PASS local_stop/user_hangup/remote_bye 三分叉（first-wins，上游真因不被覆盖） |
+| 观看端本端锁屏→解锁（黑屏排查，v0.2.55） | N-A | ⬜ 握手中锁屏是否丢首帧渲染，待真机 | PASS 观测面补齐：surface_created/size/destroyed + sink_attached + 连续 3 个诊断窗口零帧报 video_stall + viewer_paused/resumed（D5 锁）。**只加判据、不改行为**——真实修法等双端日志回来 | — | N-A |
+| 观看端入口球（小铅笔）拖动（v0.2.55） | N-A | N-A 球未显 | PASS 可拖到画面任意角落：slop 内仍算点击（performClick 保住菜单展开+无障碍），拖出由 clampBallIntoParent 钳回；父容器重布局（转屏/系统栏）时重新钳制；ViewerBallDragTest B1–B3 锁 | — | N-A |
 
 ## 3. 配对三通道（找回/互摇/扫码）
 

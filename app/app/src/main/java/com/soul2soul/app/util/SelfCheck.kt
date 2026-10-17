@@ -5,6 +5,7 @@ import android.content.pm.PackageManager
 import android.os.Build
 import android.provider.Settings
 import android.util.Log
+import com.soul2soul.app.App
 import com.soul2soul.app.BuildConfig
 import com.soul2soul.app.session.Presence
 import com.soul2soul.app.session.RemoteControlService
@@ -54,4 +55,57 @@ object SelfCheck {
         val pm = ctx.getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
         return runCatching { pm.isIgnoringBatteryOptimizations(ctx.packageName) }.getOrDefault(false)
     }
+
+    /**
+     * 会话结束自报。服务器看不到 WebRTC 媒体，"谁把这条会话关掉的、为什么"只能靠双端自报；
+     * 没有它，对方手机不在手边时断连就只能猜（v0.2.54 后 Mi15 发起 4~6 秒即断，就是卡在这一步）。
+     * 只报枚举名与标量，不含任何用户内容。
+     */
+    fun reportSession(
+        ctx: Context,
+        role: String,
+        reason: String,
+        ice: String,
+        setupMs: Long,
+        liveMs: Long,
+    ) = sendDiag(
+        ctx, "diag.session", JSONObject()
+            .put("role", role).put("reason", reason).put("ice", ice)
+            .put("setupMs", setupMs).put("liveMs", liveMs)
+            .put("fg", foreground(ctx)).put("screenOn", screenOn(ctx))
+            .put("app", BuildConfig.VERSION_NAME)
+    )
+
+    /** 会话中途的关键事件（锁屏、采集成败、画面卡死、surface 重建）：与 reportSession 同一通道 */
+    fun reportEvent(
+        ctx: Context, role: String, event: String, ice: String, detail: String? = null
+    ) = sendDiag(
+        ctx, "diag.event", JSONObject()
+            .put("role", role).put("event", event).put("ice", ice)
+            .put("detail", (detail ?: "-").take(64))
+            .put("fg", foreground(ctx)).put("screenOn", screenOn(ctx))
+            .put("app", BuildConfig.VERSION_NAME)
+    )
+
+    private fun sendDiag(ctx: Context, type: String, body: JSONObject) {
+        Log.d("S2S-Diag", "$type $body")
+        runCatching {
+            // 会话结束时信令可能已经断了：断线期间不上报，避免在关闭路径里排队重连
+            if (Presence.client.isConnected) {
+                Presence.client.send(type) {
+                    body.keys().forEach { k -> put(k, body.get(k)) }
+                }
+            }
+        }
+    }
+
+    /** 本 App 是否有 Activity 在前台：Android 14+ 后台起屏幕采集会被系统拒绝，这是断连排查的分叉点 */
+    fun foreground(ctx: Context): Boolean = runCatching {
+        App.instance.resumedActivities > 0
+    }.getOrDefault(false)
+
+    private fun screenOn(ctx: Context): Boolean =
+        runCatching {
+            (ctx.getSystemService(Context.POWER_SERVICE) as android.os.PowerManager).isInteractive
+        }.getOrDefault(true)
 }

@@ -61,11 +61,23 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
                     // 否则对方只会以为操控坏了（这正是"退出了还能操控/退出后不能操控"困惑的来源）
                     dispatchConsent(consent.revokeOnScreenOff())
                     sendScreenStatus("screenoff")
+                    // 锁屏只在 DataChannel 上通知对方，服务器看不见：自报一份，
+                    // 否则"被控端锁屏→15 秒会话结束"在服务器日志里就是无因断连
+                    com.soul2soul.app.util.SelfCheck.reportEvent(
+                        this@ScreenShareService, "sharer", "screen_off",
+                        webRtc?.iceStateName ?: "-",
+                        "timeoutMs=$SCREEN_OFF_TIMEOUT_MS",
+                    )
                     watchdog.postDelayed(screenOffStop, SCREEN_OFF_TIMEOUT_MS)
                 }
                 android.content.Intent.ACTION_SCREEN_ON -> {
                     watchdog.removeCallbacks(screenOffStop)
                     sendScreenStatus("screenon")
+                    com.soul2soul.app.util.SelfCheck.reportEvent(
+                        this@ScreenShareService, "sharer", "screen_on",
+                        webRtc?.iceStateName ?: "-",
+                        if (live) "rescued" else "already_ended",
+                    )
                 }
             }
         }
@@ -79,7 +91,10 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
         runCatching { webRtc?.sendControl(json) }
     }
     private val screenOffStop = Runnable {
-        if (live) stopSession(sendBye = true)
+        if (live) {
+            webRtc?.noteEnd("screen_off_timeout")
+            stopSession(sendBye = true)
+        }
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -417,6 +432,8 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
         // 静音是发送轨属性，随 AudioSource 销毁而复位，无需再全局恢复系统麦克风
         com.soul2soul.app.util.WifiKeeper.release()
         if (sendBye) Presence.client.send("bye")
+        // 没有任何上游终止原因时才落到 local_stop：用户点停止/锁屏超时会先 noteEnd
+        if (sendBye) webRtc?.noteEnd("local_stop")
         val client = webRtc
         webRtc = null
         client?.close()

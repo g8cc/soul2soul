@@ -156,6 +156,7 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
         btnBall = findViewById(R.id.btnBall)
         // 统一入口：与被控端同款球，点球=展开/收起整套菜单（与轻点画面同逻辑）
         btnBall.setOnClickListener { toggleControls() }
+        setupBallDrag()
 
         renderer.init(App.instance.eglBase.eglBaseContext, null)
         // 让 SurfaceView 在合成层完成缩放，减少高分辨率视频在 UI 线程上的额外重采样。
@@ -163,6 +164,20 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
         renderer.setEnableHardwareScaler(true)
         // 缩放模式必须与 DrawingOverlayView.videoRect() 的 letterbox 假设一致（SPEC §5）
         renderer.setScalingType(org.webrtc.RendererCommon.ScalingType.SCALE_ASPECT_FIT)
+        // 黑屏排查：锁屏/解锁会销毁重建 surface，若 surface 死了而 sink 没重挂，
+        // 对方画面就永远停在黑屏（媒体仍在收）。这里只报事实，不改行为。
+        renderer.holder.addCallback(object : android.view.SurfaceHolder.Callback {
+            override fun surfaceCreated(holder: android.view.SurfaceHolder) = viewerEvent("surface_created")
+            override fun surfaceChanged(
+                holder: android.view.SurfaceHolder,
+                format: Int,
+                width: Int,
+                height: Int,
+            ) = viewerEvent("surface_size", "${width}x$height")
+
+            override fun surfaceDestroyed(holder: android.view.SurfaceHolder) =
+                viewerEvent("surface_destroyed")
+        })
         // 首帧尺寸事件约 1~2 秒后才到，之前 View 保持 match_parent 会被合成层铺满拉伸裁底；
         // 开场先按上次会话缓存的远端尺寸套用等比布局，事件到达后再校正
         com.soul2soul.app.util.Prefs.lastVideoSize(this)?.let { (w, h) ->
@@ -173,6 +188,7 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
         // 系统栏收起/唤回会改变根容器高度（约 ± 状态栏+导航栏），等比矩形必须跟着重算，
         // 否则沉浸态下视频按旧高度居中会偏上/偏下
         (renderer.parent as? View)?.addOnLayoutChangeListener { _, l, t, r, b, ol, ot, or, ob ->
+            clampBallIntoParent()
             if (live && (r - l != or - ol || b - t != ob - ot)) {
                 applyRendererFitLayout(overlay.videoWidth, overlay.videoHeight)
             }
@@ -306,6 +322,59 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
     }
 
     // ---------- 控件显隐 ----------
+
+    /**
+     * 入口球拖动：她反馈"右下角小铅笔拖不动"——这颗球此前只挂了点击，画面里的字幕/笔迹
+     * 一旦被它挡住就挪不开。位移不足 touchSlop 时仍按点击处理（展开/收起菜单），超过才进拖动。
+     */
+    private fun setupBallDrag() {
+        val slop = android.view.ViewConfiguration.get(this).scaledTouchSlop
+        var downX = 0f
+        var downY = 0f
+        var startTx = 0f
+        var startTy = 0f
+        var dragging = false
+        btnBall.setOnTouchListener { _, ev ->
+            when (ev.actionMasked) {
+                android.view.MotionEvent.ACTION_DOWN -> {
+                    downX = ev.rawX
+                    downY = ev.rawY
+                    startTx = btnBall.translationX
+                    startTy = btnBall.translationY
+                    dragging = false
+                    true
+                }
+                android.view.MotionEvent.ACTION_MOVE -> {
+                    val dx = ev.rawX - downX
+                    val dy = ev.rawY - downY
+                    if (!dragging && kotlin.math.hypot(dx.toDouble(), dy.toDouble()) < slop) return@setOnTouchListener true
+                    dragging = true
+                    btnBall.translationX = startTx + dx
+                    btnBall.translationY = startTy + dy
+                    clampBallIntoParent()
+                    true
+                }
+                android.view.MotionEvent.ACTION_UP ->
+                    if (dragging) true else btnBall.performClick()
+                else -> true
+            }
+        }
+    }
+
+    /** 球始终留在父容器内：转屏/系统栏收起会让父尺寸变化，那时也要把它拉回来 */
+    private fun clampBallIntoParent() {
+        if (!::btnBall.isInitialized) return
+        val parent = btnBall.parent as? View ?: return
+        if (parent.width == 0 || parent.height == 0) return
+        btnBall.translationX = btnBall.translationX.coerceIn(
+            -btnBall.left.toFloat(),
+            (parent.width - btnBall.left - btnBall.width).toFloat().coerceAtLeast(-btnBall.left.toFloat()),
+        )
+        btnBall.translationY = btnBall.translationY.coerceIn(
+            -btnBall.top.toFloat(),
+            (parent.height - btnBall.top - btnBall.height).toFloat().coerceAtLeast(-btnBall.top.toFloat()),
+        )
+    }
 
     private fun toggleControls() {
         setControlsVisible(boxLive.visibility != View.VISIBLE)
@@ -576,6 +645,7 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
             remoteVideoTrack?.removeSink(renderer)
             remoteVideoTrack = track
             track.addSink(renderer)
+            viewerEvent("sink_attached")
             Log.d("S2S-Session", "remote video attached")
         }
     }
@@ -763,7 +833,27 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
             byeSent = true
             Presence.client.send("bye")
         }
+        // 本端收尾也要有名字：否则服务器只看到一个没有原因的 local_close
+        client?.noteEnd(if (sendBye) "user_hangup" else "remote_bye")
         finish()
+    }
+
+    /** 观看端事件自报（服务器看不见媒体与界面生命周期，黑屏/卡死只能靠这里） */
+    private fun viewerEvent(event: String, detail: String? = null) {
+        if (callInvalidated) return
+        com.soul2soul.app.util.SelfCheck.reportEvent(
+            this, "viewer", event, client?.iceStateName ?: "-", detail
+        )
+    }
+
+    override fun onResume() {
+        super.onResume()
+        viewerEvent("viewer_resumed")
+    }
+
+    override fun onPause() {
+        viewerEvent("viewer_paused")
+        super.onPause()
     }
 
     /** 离开全屏时自动进入画中画，继续陪看（观看端核心体验） */

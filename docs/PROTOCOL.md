@@ -34,6 +34,8 @@
 | `msg.recall` | `id`(UUID) | 已鉴权 | 撤回自己发出、**5 分钟内**的留言：未读的从对方信箱摘除（语音文件同删），成功双方各收 `msg.recalled`，被拒收 `msg.recall_failed`。 |
 | `app.diag` | 见 2.3 | 已 hello | 服务端只落日志 `[diag.selfcheck]`，不转发。 |
 | `app.version` | 见 2.3 | 已 hello | 服务端只落日志 `[diag.version]`，不转发。 |
+| `diag.session` | 见 2.3 | 已鉴权 | 会话结束自报终止原因/末次 ICE 态/前后摇耗时。服务端只落日志 `[diag.session]`，不转发。 |
+| `diag.event` | 见 2.3 | 已鉴权 | 会话中途事件自报（锁屏、采集成败、ICE 闪断与恢复、观看端零帧卡死、surface 生命周期）。服务端只落日志 `[diag.event]`，不转发。 |
 
 未 hello 之前的一切消息被忽略；未鉴权（`authed=false`）时 `invite` 回 `peer.offline:not_authed`，其余媒体/呼叫类消息静默丢弃。
 
@@ -74,6 +76,12 @@
 - `iceServers` 由服务端签发（`server/src/turn.js#buildIceServers`）：`username = floor(now/1000)+ttlSec`（默认 ttl 3600s），`credential = base64(HMAC-SHA1(secret, username))`（reverse-proxy 限时凭证）。含 1 条 `stun:` + 2 条 `turn:`（udp/tcp）。
 - `app.diag` 字段：`role`(viewer/sharer), `model`, `brand`, `os`, `sdk`, `rom`, `app`, `notif`, `overlay`, `acc`, `accConnected`, `accGestureCap`, `mic`, `battery`，外加扩展位（观看端 `ctlSupported`、共享端 `ctlAllowed`）。服务端只落诊断日志、不转发。
 - `app.version` 字段：`localCode`, `localName`, `remoteCode`, `remoteName`, `hasUpdate`。
+- `diag.session` 字段（**会话终止原因**，v0.2.55）：`role`(sharer/viewer), `reason`(`connect_TIMEOUT` / `ice_DISCONNECTED_TIMEOUT` / `ice_FAILED` / `capture_START_FAILED` / `projection_stopped` / `sdp_*` / `screen_off_timeout` / `local_stop` / `user_hangup` / `remote_bye` / `local_close` …), `ice`(末次 ICE 态), `setupMs`(发起→连通), `liveMs`(连通→结束), `fg`(本端是否有 Activity 在前台), `screenOn`, `app`(版本名)。服务端只落 `[diag.session]`、不转发。
+  为什么需要：WebRTC 是媒体直连，服务器只转发 `sdp/ice`，看不见采集失败、锁屏看门狗、谁按的挂断。此前"米15 发起 4~6 秒即断"在服务器日志里只能看到一对没有原因的 bye。
+- `diag.event` 字段：`role`, `event`(`screen_off`/`screen_on`/`capture_ok`/`capture_fail`/`ice_outage`/`ice_recovered`/`video_stall`/`viewer_paused`/`viewer_resumed`/`surface_created`/`surface_size`/`surface_destroyed`/`sink_attached`), `ice`, `detail`(≤64字符), `fg`, `screenOn`, `app`。服务端只落 `[diag.event]`、不转发。
+  `fg` + `capture_fail` 是 Android 14+/HyperOS "后台起屏幕采集被拒"的判据；`sink_attached` 对 `surface_destroyed` 是观看端黑屏的判据。
+- 以上三类均**只在连接活着时发送**（`Presence.client.isConnected` 前置判定）：本端进程被杀时来不及自报，此时以服务端 `[ws] … close code=…` 为准。`diag.*` 只允许标量与枚举名，禁止携带任何业务内容（SDP/ICE 正文、文字、坐标）。
+- 服务端日志行统一带 `HH:MM:SS.mmm` 本地时间前缀；呼叫与连接生命周期另有 `[call] kind=sdp|ice|bye …`、`[ws] … close code=… aliveFor=… iceSeen=… sessionMs=…`、`[ws] … pong 超时 terminate（假死）`，用于区分"主动挂断 / 假死被踢 / 被新连接顶掉"三种死法。
 
 ### 2.4 语音留言文件（HTTP，与信令同端口）
 

@@ -153,6 +153,8 @@ bash scripts/test.sh --coverage
 - 呼叫出口全清（v0.2.52）→ AuditRound2WiringTest L6：declined/bye/call.canceled/unpaired/local.sessionEnded/local.sessionLive 各 case 臂必含 endOutgoing()；accepted 臂必含 ringback 清理+phase=NONE；endOutgoing 必含 callTimeout+ringback 双 removeCallbacks；媒体超时臂含 `gen == callGen` 守卫
 - 连接状态胶囊（v0.2.53）→ ConnStatusChipTest L1：Presence.onState 两分支都落 connState 且广播 local.connState；L2：MainActivity handleSignal 有 `"local.connState" -> updateUi()`；L3：connChip/connDot 取色各一处且都在 updateUi 内（单点收口，散写即红）；L4：conn_connecting/offline/connected_unpaired/online/offline 五态文案全引用
 - 操控启动无感化（v0.2.54）→ SeamlessControlStartTest S1：PresenceService accepted 分支体不得出现 startActivity（加回强拉主页即红）；S2：同分支必保留 ScreenShareService.start + MainActivity.acceptedReceived=true（起流不能随跳页一起删）；S3：MainActivity onResume 窗口内必用 ScreenShareService.isLive() 兜底并 endOutgoing（防无感后回前台卡"呼叫中"）
+- 断连不可解释（v0.2.55）→ SessionEndDiagTest D1：WebRtcClient.close() 必调 reportSessionEnd() 且走 SelfCheck.reportSession；D2：notifyEnded 必 noteEnd(reason)（first-wins，否则只剩 local_close）；D3：被控端 ACTION_SCREEN_OFF 分支必报 screen_off 事件、screenOffStop 必带 screen_off_timeout（screenoff 只走 DataChannel，服务器看不见）；D4：finishWithCleanup 必按 sendBye 分注 user_hangup/remote_bye；D5：renderer 必挂 SurfaceHolder.Callback 报 surface_created/destroyed + addSink 处报 sink_attached + 观看端连续零帧报 video_stall；D6：sendDiag 必判 isConnected 且 detail 必截断（禁止把业务内容带进诊断帧）
+- 观看端入口球拖不动（v0.2.55）→ ViewerBallDragTest B1：btnBall 点击旁必装 setupBallDrag()/setOnTouchListener；B2：必须用 scaledTouchSlop 分点击与拖动且未拖动时 performClick()（保无障碍点击）；B3：clampBallIntoParent 必钳制 translationX/Y 且父未测量时跳过，父 layout 变化回调里必须重新钳制（转屏后球不能留在屏外）
 
 Service 窗口接线这类 JVM 跑不了的代码，锁定用例的形态是**源码扫描测试/t0 grep 守卫**（把修复
 回滚用例必须变红才算锁定）。审计流程本身的规范（状态机矩阵、5 维度清单、gate 登记制）见

@@ -151,12 +151,18 @@ class WebRtcClient(
     private val iceRestartBudget = IceRestartBudget()
     @Volatile private var established = false
     @Volatile private var latestIceState = PeerConnection.IceConnectionState.NEW.name
+
+    /** 诊断上报用的当前 ICE 态（服务/Activity 侧报事件时带上，服务器才能对齐时间线） */
+    val iceStateName: String get() = latestIceState
     @Volatile private var connectedSinceMs = 0L
     @Volatile private var outageStartedAtMs = 0L
     @Volatile private var recoveryCount = 0
     @Volatile private var connectStartedAtMs = 0L
     @Volatile private var renegoInFlight = false
     @Volatile private var restartRequested = false
+    @Volatile private var endReason = ""
+    private val role = if (isSharer) "sharer" else "viewer"
+    private var viewerZeroFpsStreak = 0
     private val endedNotified = java.util.concurrent.atomic.AtomicBoolean(false)
     @Volatile private var remoteDescriptionSet = false
     private val pendingRemoteIce = mutableListOf<IceCandidate>()
@@ -254,6 +260,12 @@ class WebRtcClient(
         val observingCapturer = object : CapturerObserver {
             override fun onCapturerStarted(success: Boolean) {
                 upstream.onCapturerStarted(success)
+                com.soul2soul.app.util.SelfCheck.reportEvent(
+                    context, "sharer",
+                    if (success) "capture_ok" else "capture_fail",
+                    latestIceState,
+                    "${captureWidth}x${captureHeight}",
+                )
                 if (!success) notifyEnded("capture_START_FAILED")
             }
 
@@ -635,6 +647,10 @@ class WebRtcClient(
                         "ICE_RECOVERED count=$recoveryCount outageMs=${now - outageStartedAtMs} " +
                             "restarts=${iceRestartBudget.usedAttempts}",
                     )
+                    com.soul2soul.app.util.SelfCheck.reportEvent(
+                        context, role, "ice_recovered", state.name,
+                        "outageMs=${now - outageStartedAtMs} restarts=${iceRestartBudget.usedAttempts}",
+                    )
                     outageStartedAtMs = 0L
                 }
                 if (firstConnection) {
@@ -656,6 +672,10 @@ class WebRtcClient(
                 if (outageStartedAtMs == 0L) {
                     outageStartedAtMs = android.os.SystemClock.elapsedRealtime()
                     Log.w(TAG, "ICE_OUTAGE_STARTED state=$state")
+                    com.soul2soul.app.util.SelfCheck.reportEvent(
+                        context, role, "ice_outage", state.name,
+                        "established=$established restarts=${iceRestartBudget.usedAttempts}",
+                    )
                 }
                 iceHandler.removeCallbacks(disconnectTimeoutRunner)
                 iceHandler.postDelayed(disconnectTimeoutRunner, DISCONNECT_TIMEOUT_MS)
@@ -872,6 +892,21 @@ class WebRtcClient(
                                 "audioJitterMs=${formatMetric(audioWindow.jitterMs)} " +
                                 "audioConcealedMs=${formatMetric(audioWindow.concealedMs)}",
                         )
+                        // 观看端"黑屏"的直接证据：ICE 仍 CONNECTED 但收流帧率连续为 0，
+                        // 说明断的是共享端的采集/编码，不是网络（服务器看不见媒体，只能自报）
+                        if (!isSharer && established) {
+                            if (inboundVideoFps <= 0.0) {
+                                viewerZeroFpsStreak++
+                                if (viewerZeroFpsStreak == VIEWER_STALL_POLLS) {
+                                    com.soul2soul.app.util.SelfCheck.reportEvent(
+                                        context, "viewer", "video_stall", latestIceState,
+                                        "rttMs=$best path=$selectedPath",
+                                    )
+                                }
+                            } else {
+                                viewerZeroFpsStreak = 0
+                            }
+                        }
                     }
 
                     // 共享端按 RTT + 远端丢包 + 可用上行带宽自动调画质。
@@ -1049,6 +1084,7 @@ class WebRtcClient(
     fun close() {
         if (closed) return
         closed = true
+        reportSessionEnd()
         synchronized(qualityLock) { pendingQualityEdge = null }
         iceHandler.removeCallbacksAndMessages(null)
         stopRttPolling()
@@ -1109,6 +1145,7 @@ class WebRtcClient(
 
     private fun notifyEnded(reason: String) {
         if (closed || !endedNotified.compareAndSet(false, true)) return
+        noteEnd(reason)
         iceHandler.removeCallbacks(connectTimeoutRunner)
         iceHandler.removeCallbacks(disconnectTimeoutRunner)
         iceHandler.removeCallbacks(iceRestartRunner)
@@ -1119,6 +1156,33 @@ class WebRtcClient(
                 "restartAttempts=${iceRestartBudget.usedAttempts} outageMs=${outageDurationMs()}",
         )
         listener.onEnded(reason)
+    }
+
+    /**
+     * 记录"谁先关的这条会话"。first-wins：真·终止原因（超时/采集失败/对端 bye）总是先于
+     * 它引发的收尾 close() 到达，因此本地主动结束只在没有任何上游原因时才落地为 local_close。
+     */
+    fun noteEnd(reason: String) {
+        if (endReason.isEmpty()) endReason = reason
+    }
+
+    /** 会话终态自报：服务器只看得见信令帧，媒体侧"为什么结束"必须双端自己说 */
+    private fun reportSessionEnd() {
+        if (connectStartedAtMs <= 0L) return
+        val now = android.os.SystemClock.elapsedRealtime()
+        val setupMs = if (connectedSinceMs > 0L && connectStartedAtMs > 0L) {
+            connectedSinceMs - connectStartedAtMs
+        } else {
+            now - connectStartedAtMs
+        }
+        com.soul2soul.app.util.SelfCheck.reportSession(
+            context,
+            role = role,
+            reason = endReason.ifEmpty { "local_close" },
+            ice = latestIceState,
+            setupMs = setupMs.coerceAtLeast(0L),
+            liveMs = if (connectedSinceMs > 0L) now - connectedSinceMs else 0L,
+        )
     }
 
     private fun sendSdp(desc: SessionDescription) {
@@ -1174,5 +1238,7 @@ class WebRtcClient(
         private const val DISCONNECT_TIMEOUT_MS = 15_000L
         private const val ICE_RESTART_AFTER_MS = 6000L
         private const val ICE_RESTART_RETRY_MS = 1000L
+        // 连续 3 个诊断窗口（约 30 秒）零帧才算画面卡死：单窗口 0 帧可能只是静态画面没触发编码
+        private const val VIEWER_STALL_POLLS = 3
     }
 }
