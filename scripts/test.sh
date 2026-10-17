@@ -238,6 +238,12 @@ PY
     echo "静态检查: repro-capture.sh 的 check 缺 state 缺行守卫（缺一路日志会被打成 READY）" >&2
     fail=1
   fi
+  # 复现日常把米10 和 Mi5 开发机同时插着：pick_serial 只在恰好一台真机时才猜，多台时脚本必须
+  # 把"该给哪个 SERIAL"摊到人面前（含候选行），否则 start 静默不采客户端侧、人却去查线。
+  if ! grep -q 'SERIAL=<' "$ROOT/scripts/repro-capture.sh" 2>/dev/null; then
+    echo "静态检查: repro-capture.sh 多台真机时不给 SERIAL 候选（客户端日志会静默不采，等于白跑一轮）" >&2
+    fail=1
+  fi
   [ "$fail" -eq 0 ]
 }
 

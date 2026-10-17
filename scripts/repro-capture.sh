@@ -78,7 +78,13 @@ start() {
     printf 'device\t%s\t%s\n' "$!" "$RUN_DIR/device-$serial.log" >> "$STATE"
   else
     printf 'device\t-\t\n' >> "$STATE"
-    echo "⚠ 未接真机（没有非模拟器设备且未指定 SERIAL）：服务器侧仍在采，客户端侧没有。" >&2
+    local n; n=$(real_devices | grep -c . || true)
+    if [ "${n:-0}" -gt 1 ]; then
+      echo "⚠ 在场真机 ${n} 台，采集认不出该采哪台，客户端侧已放弃：用 SERIAL=<序列号> 重跑 start（复现那台必须显式指定，否则整轮只有服务器日志）。" >&2
+      real_devices | sed 's/^/    SERIAL=/' >&2
+    else
+      echo "⚠ 未接真机（没有非模拟器设备且未指定 SERIAL）：服务器侧仍在采，客户端侧没有。" >&2
+    fi
   fi
 
   echo "采集目录：$RUN_DIR"
@@ -104,7 +110,7 @@ check() {
       rundir) rundir=$pid ;;
       server) saw_srv=1; srv=$file
               [ "$pid" != "-" ] && kill -0 "$pid" 2>/dev/null || { echo "  FAIL server 采集进程已退出"; ok=0; } ;;
-      device) saw_dev=1; [ "$pid" = "-" ] && { echo "  FAIL 客户端 logcat 未启动（真机没接）"; ok=0; } \
+      device) saw_dev=1; [ "$pid" = "-" ] && { echo "  FAIL 客户端 logcat 未启动（真机没接，或多台在场未指定 SERIAL——看 start 的提示）"; ok=0; } \
               || { dev=$file; serial=$(basename "$file"); serial=${serial#device-}; serial=${serial%.log}
                    kill -0 "$pid" 2>/dev/null || { echo "  FAIL device logcat 进程已退出"; ok=0; }; } ;;
     esac

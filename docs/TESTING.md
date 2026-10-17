@@ -65,6 +65,7 @@ bash scripts/test.sh --e2e
   ⑯ **中文文案里 `$VAR` 紧跟全角括号会当场崩脚本**：`echo "…$APK（设置 APK_PATH）"` 在 UTF-8 下 bash 把 `（` 的首字节算进变量名，`set -u` 直接 `unbound variable`（实测 drive-test.sh:254 整段 AC-6 就这么死掉，白跑一轮 8 分钟）。一律写大括号形式；已进 t0 守卫（扫 `scripts/*.sh` 里变量引用后接非 ASCII 的行）。
   ⑰ **采集进程"活着"不等于在采集**：v0.2.56 那一轮 adb 传输掉线后，`adb -s 7c6a9986 logcat` 停在 `- waiting for device -`，ps 里进程还在、输出文件从 19:35 起一个字节没写，整轮 0.2.56 客户端日志白丢。复现期采集改为 `scripts/repro-capture.sh`（`start` 起 ssh `tail -F` 自愈重连 + 真机 logcat，`check` 只做三件事：ssh/adb 各打一次哑铃探传输、state 里两路日志的行必须都在、文件字节数是否在涨），**复现开始前必须 check 到 READY 才让人动手**。
     反向实测：故意写一份缺 `device` 行的 state → `check` 必须 rc=2；第一版没有这两条 `saw_*` 守卫时，它因为变量为空整段跳过设备分支、照样打 READY（=⑰ 本身的坑，已进 t0 守卫）。无人操作时"零增长"只报 WARN 不判死——静默不是断链，拿它当 FAIL 会让体检变成天天喊狼来了。
+    复现日的真机歧义（同一条死法的变体）：本机除米10 外还常插着 Mi5 开发机，`pick_serial` 只在**恰好一台**真机时才自动选，两台在场它原本返回空、`start` 却把原因说成"未接真机"，人就去查线、其实线好好的。现在 `start` 在这种情况列出 `SERIAL=<序列号>` 候选并明写"客户端侧已放弃"，`check` 紧跟 rc=2（用假 adb 塞两个序列号实测过这两条输出）。**复现前固定写死 `SERIAL=7c6a9986 bash scripts/repro-capture.sh start`，别让它猜。**
   模拟器只验信令/服务/UI 状态，媒体与手感的结论仍以真机为准。宿主 load 高时两台 qemu 会饿死 app 主线程（实测 `ANR in … Waited 5002ms for FocusEvent` → 系统杀进程），此时 ICE/`viewer-ready` 变红属环境而非产品，drive-test.sh 会把 ANR/杀进程计数打在媒体断言之前。
   诚实边界：坑⑩里「ICE 连上→媒体硬断言」这条分支本机**从没跑过**（没有可路由的 relay 就没有 CONNECTED）。要让媒体段重新具备判定力，得先在本机起一个真 TURN，并把 dev server 的 `TURN_HOST` 指到模拟器可达的地址（一般是宿主在 SLIRP 里的 `10.0.2.2`，需自行验证）；做不到之前，媒体结论只能来自真机双端。**同理，AC-6 锁屏保活（坑⑮）本机也只验证了"判据不再是空的"，没验证过"锁屏真的不断连"——那要等真机双端。**
 - T4 断言的五条铁律（v0.2.56 复盘：e2e.sh 里曾同时存在**恒真**与**恒假**两种空断言，绿了半年）：
