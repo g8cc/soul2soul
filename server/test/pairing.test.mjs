@@ -114,3 +114,25 @@ test('输码归一化：全角数字 + 首尾空白仍能命中（2026-09-29 线
   const fullwidth = code.replace(/\d/g, (d) => String.fromCharCode(d.charCodeAt(0) + 0xFEE0));
   assert.equal(book.enter({ pairAttempts: 0 }, 'devB', ` ${fullwidth} `).out, 'paired');
 });
+
+test('随机码碰撞不会覆盖另一设备仍在展示的有效码', () => {
+  const values = [123456, 123456, 654321];
+  const { book } = makeBook({ randomInt: () => values.shift() });
+  const a = book.request('devA');
+  const b = book.request('devB');
+  assert.equal(a.code, '123456');
+  assert.equal(b.code, '654321');
+  assert.equal(book.enter({ pairAttempts: 0 }, 'devC', a.code).out, 'paired');
+  assert.equal(book.enter({ pairAttempts: 0 }, 'devD', b.code).out, 'paired');
+});
+
+test('已有配对关系时旧配对码不被消费，也不覆盖关系', () => {
+  let paired = true;
+  const { book } = makeBook({ isPaired: () => paired });
+  const code = book.request('devA').code;
+  const conn = { pairAttempts: 0 };
+  assert.deepEqual(book.enter(conn, 'devB', code), { out: 'failed', reason: 'already_paired' });
+  assert.equal(book.codes.has(code), true);
+  paired = false;
+  assert.equal(book.enter({ pairAttempts: 0 }, 'devB', code).out, 'paired');
+});
