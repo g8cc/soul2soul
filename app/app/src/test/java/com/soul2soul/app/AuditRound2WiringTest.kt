@@ -111,6 +111,20 @@ class AuditRound2WiringTest {
     }
 
     @Test
+    fun `send success collapses emoji panel like wechat`() {
+        // 微信实锤行为：表情墙开着发完消息，面板必须收掉；但只能在 send() 成功之后收
+        // （断网/失败路径先 return，草稿和面板都留着）
+        val lines = source("app/src/main/java/com/soul2soul/app/msg/MessageActivity.kt")
+        val i = lines.indexOfFirst { it.contains("private fun sendText") }
+        assertTrue("找不到 sendText", i >= 0)
+        val body = lines.drop(i).take(35)
+        val sentFail = body.indexOfFirst { it.contains("if (!sent)") }
+        val close = body.indexOfFirst { it.contains("setEmojiPanel(false)") }
+        assertTrue("发送成功必须收表情墙（v0.2.50）", close >= 0)
+        assertTrue("必须在校验 send() 成功之后才收面板", sentFail in 0 until close)
+    }
+
+    @Test
     fun `opening emoji panel must drop input focus before hiding IME`() {
         // Mi5/Android7 真机实锤（v0.2.49）：键盘开着时点 😊，只调 hideSoftInputFromWindow
         // 会被系统弹回（EditText 仍有焦点），面板开在键盘背后——用户看到"点了没反应"

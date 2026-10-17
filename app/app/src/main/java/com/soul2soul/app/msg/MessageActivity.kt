@@ -221,6 +221,8 @@ class MessageActivity : AppCompatActivity() {
             return
         }
         etInput.setText("")
+        // 微信同款：发送成功即收表情墙（失败/断网路径在上面已 return，草稿原样留着）
+        setEmojiPanel(false)
         InboxStore.add(Msg(
             id = id,
             from = Prefs.deviceId(this),
