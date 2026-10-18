@@ -63,6 +63,14 @@
     - ⚠️ **采集管道的独立缺陷（10-18 抓到，与部署无关）**：远端 `grep` 没加 `--line-buffered`，输出接管道时是 4KB 块缓冲——线上本地副本停在 `10:28:05`，之后 24 分钟内服务器新增的 10 条（含 10:50 重启行与两次握手行）**一条都没落地**，而 `check` 因为"6 秒窗口"只给了 WARN。含义很重：**断连瞬间最新的那几条正好卡在缓冲区**，`stop` 一杀就永久丢。已改两处 grep 加 `--line-buffered`，并用一次真实握手实测端到端 1s 到达；t0 守卫升级为"两处 `--line-buffered` 都要在"（已实测抽掉即红）。
     - ⬜ **待办：`check` 的"零增长"应该从 WARN 升级为有条件 FAIL**（比如"距上次落行 > 5min 且服务器日志 mtime 在动"才算真停），否则这类静默停摆还会被当成"没人操作"。
 
+12. **10-18 11:42–11:43 复盘你们那通 14 秒会话（米15 发起共享 → 米10 观看 → 她手动挂断）**，采集副本 `~/s2s-repro/20261018-105323/server.log`：
+    - **版本门开了**（`#59` 的前置条件满足）：`11:39:02 [diag.version] deba9443… code=58 name=0.2.58 remote=58/0.2.58 update=false`，两端自检都是 `app=0.2.58_58_`（米15=`Xiaomi_24129PN74C` os=16/sdk36，米10=`Xiaomi_Mi_10` os=12/sdk31）。
+    - **会话本体是干净的**：`capture_ok ice=NEW 718x1598` → offer/answer 与 20+18 条 ICE 在 300ms 内跑完 → 首条 `ice=CONNECTED` 出现在 `11:42:58.868`；`11:43:12.483 [call] bye deba9443 -> 106db351 sessionMs=14462 iceSeen=20`，两端终态互相对上：sharer `reason=local_stop`、viewer `reason=remote_bye`。**没有** stall 假告警、**没有**自因看门狗（15s 那条已删）、观看端 surface 重建（`viewer_resumed/surface_created/surface_size`）都在起流之前。
+    - **`SessionTiming` 拿到第一条真机读数**（AUDIT-MATRIX §"终止原因可追溯"因此可从 ⬜ 转 PASS）：viewer `ice=DISCONNECTED … setupMs=748 liveMs=14195`、sharer `setupMs=443 liveMs=14074`——ICE 在挂断瞬间已 DISCONNECTED 而 liveMs 仍是正的 14 秒。同文件 0.2.55 的对照读数 `setupMs=1135965 liveMs=0`（§A.7 ③ 的坏读数形态）证明这个修正在真机上确实改变了结论。
+    - **`DiagBacklog` 仍是零采样，且这次零得更有信息量**：全文件 `detail=at_` 命中 0 条。会话期没掉线→0 条属预期；但同日 **11:40:46（pong 超时，aliveFor=104317ms）与 11:42:11（裸 1006，aliveFor=17356ms）两次已确认的米15 standby 掉线，也是 0 条**。根因不是通路坏，而是**那两次根本没有可排队的事件**：`screen_off/screen_on` 只在 `ScreenShareService.kt:69/76` 里发，是会话期事件；待机锁屏时客户端一句话都不说。→ "待机期补一条心跳事件"值不值得进 0.2.59，这就是依据（仍未点头）。
+    - **快 1006 在 0.2.58 上没消失**：米15 全天 16 次 `[ws] close` 全是 code=1006，`aliveFor` 从 1.8s 到 104s 都有，每次向对端广播 `peer.gone`。所以 `#51/#55` 的主线不变：**信令抖动与媒体无关，能治的是客户端收到 `peer.gone` 先探 ICE 再拆**，升级版本不解决它。
+    - **⬜ 新缺陷（比 #55 好治，但仍需你点头才动代码）**：`diag.session` 的 `path` 与 `proj` **恒为 `_`**——`SelfCheck.reportSession()` 从未 put 这两个键，而服务器照打（`index.js:635-643`）。含义：这通会话到底走了 P2P 还是 TURN 转发，**日志里读不出来**（候选里确实有 relay 型，但选中哪条没记）。选路其实早就算好了：`WebRtcClient.kt:795-835` 的 `selectedPath` 只写进 logcat（`:931`/`:952`），而米15 无 adb=logcat 对它不存在。最小修法=把 `path`（顺带 `proj`=MediaProjection 当时在不在）透传进 `reportSession`，纯客户端、服务器零改动。
+
 ## B. 你已经拍板的（不再变）
 
 | 决策点 | 结论 |
