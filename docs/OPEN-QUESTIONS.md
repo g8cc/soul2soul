@@ -41,9 +41,10 @@
 
 8. **UI 语言**：全中文，OK？
 
-9. **【新·需要你点头】配对凭证在生产日志里是明文**：`[relay] … <- paired {"token":"<32hex>"}` 落了 16 条，`pair.code` 的六位配对码落了 12 条。`send()` 的 quiet 名单（`server/src/index.js:230`）里有 sdp/ice/incoming/accepted/msg.*，唯独漏了这两个。token 是**长期重连凭证**（拿到即可冒充该设备收呼叫与留言元数据），而这份文件还会被 `repro-capture.sh` 的 `\[relay\]` 过滤器原样抄到我的笔记本（现有 3 个采集目录恰好 0 条——最近没发生配对动作；复现时只要重新配对就会落本地）。改法是把 `paired` / `pair.code` 加进 quiet（或只记 `token=sha8`），属服务器改动，**等你确认再动**（禁止 naive 部署）。
+9. ~~【新·需要你点头】配对凭证在生产日志里是明文~~ → **✅ 已修并已于 10-18 10:50 上线**（`paired`/`pair.code` 进 `QUIET_TYPES`，另有 `redactSecrets` 字段级兜底；线上实测部署后的日志 0 条明文，且远端模块直接调用返回 `token":"<redacted:32>"`）。历史事实保留：修之前 `[relay] … <- paired {"token":"<32hex>"}` 落了 16 条、六位配对码 12 条，且 `token` 是**长期重连凭证**。老日志文件里那 16 条明文仍在磁盘上（未清理，`server.log` 现在会被 logrotate 压缩保留 6 份）——要不要连历史一起抹掉等你说。
 
 10. **日志采集没有开关（10-18 实况勘查，回答"修完能不能关、以后能不能安全再开"）**：
+    - ✅ **本条前三点已于 10-18 10:50 随服务器上线全部解决**（开关＝`.env` 里加 `S2S_LOG=minimal` 重启即生效，默认 `diag`；轮转＝`/etc/logrotate.d/soul2soul` 已装；日期＝日志前缀已是 `YYYY-MM-DD HH:MM:SS.mmm`）。下面四条勘查结论保留作依据，**第四条（结构性盲点）里只剩 ③④ 未被 0.2.58 覆盖**。
     - 无开关：`server/src/index.js` 的 19 处 `console.log` 全部无条件；线上进程 env 只有 `PORT/PAIR_CODE_TTL_MS/PAIR_ENTER_MAX_ATTEMPTS/TURN_*`，没有任何 `LOG*` 变量。今天想静音只能改代码+部署。
     - 无轮转：`start.sh` 是 `nohup node >> server.log`，`/etc/logrotate.d/` 无 soul2soul 条目。当前 367KB/4332 行（跨 6 次重启），量还小，但**主机根分区已用 90%、剩 3.8G**，无上限追加在这块盘上迟早撞。
     - 时间戳只有 `HH:MM:SS.mmm` 没有日期 → 跨天对不上表（本轮分析被迫按"秒数倒退 30s 以上即 +1 天"推断）。
@@ -56,7 +57,11 @@
     - 服务器（仅 repo）：隐私名单收进 `server/src/logpolicy.js`（`paired`/`pair.code` 进 quiet + 字段级兜底脱敏，t2 新增 5 条单测）；`S2S_LOG=minimal` 抑制 `[relay]` 与 `[call] sdp|ice` 逐帧行（默认 `diag` = 现行详细度；隐私线不随档位放开）；日志前缀补日期；`[diag.version]`/`[diag.selfcheck]` 的客户端字符串全部过 `safeTag`（此前裸插——一个含换行的 `model` 就能伪造任意日志行）。轮转以 `server/ops/logrotate-soul2soul` 待装文件入库，**未安装**。
     - 采集侧（不依赖部署，今天生效）：`repro-capture.sh` 在远端把 `token/code/credential/username` 替换成 `<redacted>` 再落笔记本。**实测踩坑**：GNU sed 的 `-l` 需要带字节数参数，会把后面的 `-E` 吞掉 → 模式退化成 BRE、括号不再分组 → **脱敏静默不生效而看起来一切正常**（我用真实 token 行验出来）。已改 `-u -E` 并加 t0 双守卫（`sed -u -E` + `<redacted>`）。
     - ⬜ **58 装到米15 之后先验的是"通道本身"**（一次操作都不做也算数）：静置 3–5min 让它掉一次线，再打开 App 重连，然后 grep `ssh guo "grep -a 'detail=at_' /opt/soul2soul/server/server.log | tail -20"`。**有这类行=补报通路成立**，之后才谈得上用它定位秒断；一条都没有=先查通路（多半是 hello 未过鉴权或 flush 没触发），别急着改业务代码。
-    - ⚠️ **上线阻塞点（比原以为的"常量漂移"严重）**：线上 `/opt/soul2soul/server/src/index.js` 是 594 行，repo 那份 704 行；多出的 133 行含 `saveJsonAtomic` 落盘失败回滚、`pair()` 已配对即拒绝、孤儿语音清理等**未经线上验证的行为**（还有你尚未点头部署的留言撤回）。所以"加个日志开关就上线"不成立——覆盖部署会把这 133 行一起带上去。两条路等你选：**A** 先逐段评审这 133 行再整体上线；**B** 把本轮日志改动做成只碰 4 处的小 patch 打在线上那份上（漂移继续存在）。
+    - ✅ **10-18 10:50 服务器已上线（你改口径："我们没有生产服务，云服务器是开发环境，一切为了修复bug为优先级"）**：部署的是 4 个文件（`index.js` + 新增 `logpolicy.js` + `pairing.js` + `messages.js`，后两个必须同批——repo 的 `index.js` 往 `PairCodeBook` 注入了 `isPaired`，只换 index.js 会让 `already_paired` 判定静默失效）。上线前逐段读过 200 行差异；`node --check` 四个文件全过才重启。**回滚**：线上留有 `src/index.js.bak-20261018-104744`（`kill $(cat server.pid)` → 覆盖回去 → `bash start.sh`）。
+    - 上线后实测：新时间戳 `[2026-10-18 10:50:45.972]` 生效；`PAIR_CODE_TTL_MS=1800000`/`PAIR_ENTER_MAX_ATTEMPTS=10` 仍由 `.env` 提供（**没被 repo 的 10min/5 默认值顶掉**，这是当初最担心的那条）；`wss://…` 握手回 `registered`；米10 重连并报 `code=58`；部署后重启的日志里明文 token/code = 0 条（远端 `logpolicy.js` 直接验：`redactSecrets` 输出 `{"type":"paired","token":"<redacted:32>","code":"<redacted:6>"}`）；轮转 `/etc/logrotate.d/soul2soul` 已安装（dry-run 解析通过、当前未达 20M 阈值，根分区 90%/剩 3.8G 不再无上限追加）。
+    - ⚠️ **上线带来的新行为，复现时会被撞到**：`bindPair` 现在"任一端已配对即拒绝"。米15 若**卸载重装**（deviceId 会变）→ 新设备码输入时，因为米10 还挂着与旧 deviceId 的关系，会得到 `pair.failed reason=server_storage`（这个 reason 对"已配对"是**错的归因**），找回路径也会以 `peer_busy` 拒绝。规避＝重装后先在米10 上解绑一次再重配；**覆盖安装（`install -r`，签名一致）不换 deviceId，不受影响**。是否要把它改成"离线陈旧关系可对称覆盖、仅在线真搭档才拒绝"，等这轮断连定位完再定，别在取证中途动配对逻辑。
+    - ⚠️ **采集管道的独立缺陷（10-18 抓到，与部署无关）**：远端 `grep` 没加 `--line-buffered`，输出接管道时是 4KB 块缓冲——线上本地副本停在 `10:28:05`，之后 24 分钟内服务器新增的 10 条（含 10:50 重启行与两次握手行）**一条都没落地**，而 `check` 因为"6 秒窗口"只给了 WARN。含义很重：**断连瞬间最新的那几条正好卡在缓冲区**，`stop` 一杀就永久丢。已改两处 grep 加 `--line-buffered`，并用一次真实握手实测端到端 1s 到达；t0 守卫升级为"两处 `--line-buffered` 都要在"（已实测抽掉即红）。
+    - ⬜ **待办：`check` 的"零增长"应该从 WARN 升级为有条件 FAIL**（比如"距上次落行 > 5min 且服务器日志 mtime 在动"才算真停），否则这类静默停摆还会被当成"没人操作"。
 
 ## B. 你已经拍板的（不再变）
 
@@ -65,6 +70,7 @@
 | 交互边界 | 观看方**不能**操作共享方手机，只能画笔标注 + 语音 |
 | 发布方式 | 不上架商店，两台手机侧载 APK |
 | 网络 | 双方都在国内；自建 WebRTC；用你自己的云服务器 |
+| 服务器定位（10-18） | **「我们没有生产服务，云服务器是开发环境，一切为了修复 bug 为优先级」**——服务器改动不再逐次等审批，改成 AGENTS.md 里那套机械四步（备份 → 读完 diff 并核对 env 常量 → `node --check` → 重启后验证）。`data/pairings.json` 仍是活数据，测试不得触碰这条不变 |
 | 技术栈 | 原生 Kotlin；语音通话第一版就带上 |
 
 ## C. 我替你做的技术决定（可否决，默认执行）

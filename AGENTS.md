@@ -53,11 +53,17 @@ v0.2.44 悬浮球丢失后立的规矩——多轮"稳定性审计"仍漏了一�
 发版前：`scripts/test.sh` 全绿 + 同步 bump `app/app/build.gradle.kts` 的 versionCode/versionName。
 已安装的 App 下次打开自动检查更新；本机真机可直接 `adb install -r`。
 
-## 服务器（高风险区）
+## 服务器（开发环境，10-18 用户重新定性）
 
-- **生产跑的是 hotfix 漂移常量**：`PAIR_CODE_TTL=30min`、`pair.enter 上限=10`；repo 默认 `10min / 5`。
-  单测锁定的是 repo 行为。**禁止 naive 部署**：任何服务器改动上线前必须人工比对线上 env/常量，改动与部署均需用户明确确认。
-- 线上：`https://soul.lumi666.cloud`（wss 反代 → :8080）；TURN 3478 + 49160-49200/UDP。
+- **定性**：用户 10-18 明确「我们没有生产服务，云服务器是开发环境，一切为了修复 bug 为优先级」。
+  所以服务器改动**不再需要逐次上线审批**——但"naive"仍然禁止，流程改成机械四步，缺一步就不许重启：
+  ① 备份在位（`src/index.js.bak-YYYYMMDD-HHMMSS`）；② `diff` 线上 vs repo 并**读完**行为差，
+  重点核对 env 注入的常量（线上 `.env` 给的是 `PAIR_CODE_TTL_MS=1800000`/`PAIR_ENTER_MAX_ATTEMPTS=10`，
+  repo 默认 `10min/5`，**必须确认这些值来自 env 而不是被 repo 默认值顶掉**）；③ 远端 `node --check` 每个改动文件；
+  ④ 重启后验证（新日志格式、`wss://` 握手回 `registered`、明文凭证 0 条、在场设备重连）。
+  依赖文件必须同批上传（例：repo `index.js` 往 `PairCodeBook` 注入 `isPaired`，只传 index.js 会让 `already_paired` 判定静默失效）。
+- 线上：`https://soul.lumi666.cloud`（wss 反代 → :8080）；TURN 见 `.env`（当前 `TURN_HOST=49.232.173.115`、`TURN_PORT=3479`；本条曾写 3478，以 `.env` 为准）+ 49160-49200/UDP。
+- 重启会踢掉在场设备的信令连接（客户端 3s 内自动重连），**并且会踢掉采集里的 adb logcat 传输**——`adb install -r` 与服务器重启之后都要重跑 `repro-capture.sh stop && start`，否则 `check` 会报 `FAIL device logcat 进程已退出`。
 - 配对数据 `server/data/pairings.json` 原子写（tmp+rename），线上文件是活数据，测试不得触碰。
 - 协议以 `docs/PROTOCOL.md` 为准（`docs/SPEC.md` §3 为过时设计稿，已加勘误指针）。
 
