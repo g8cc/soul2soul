@@ -234,11 +234,14 @@ class PresenceService : Service() {
                 SignalBus.events.collect { handleSignal(it) }
             }
             connect()
-            // wakelock 必须在 startForeground 之后才允许持有（服务真正前台，防 FGS 起失败漏锁）
-            updateWakeLock(Prefs.paired(this))
             // 待机遥测：未配对期 diag.* 会被服务器在未鉴权 socket 上直接丢弃，所以只在配对期开
             // （不是"埋了坏了"——10-18 复核过这条口径，读日志时未配对期必然为空）
+            // 顺序是硬要求：先开探针再拿锁。反过来，首次 acquire 落在 running=false 上，
+            // `wake_ok` 就在结构上永远发不出去（10-18 全部日志 0 条就是这样发现的），
+            // 而"锁到底拿到没有"正是待机断连要查的第一件事
             if (Prefs.paired(this)) com.soul2soul.app.util.StandbyProbe.start(this)
+            // wakelock 必须在 startForeground 之后才允许持有（服务真正前台，防 FGS 起失败漏锁）
+            updateWakeLock(Prefs.paired(this))
         }
     }
 
@@ -327,9 +330,10 @@ class PresenceService : Service() {
                     Prefs.setPairToken(this, it)
                     Presence.client.setPairToken(it)
                 }
-                updateWakeLock(true)
-                // 配对成功即打开待机遥测（start 幂等）：从此"锁屏静置"这一段不再是无因黑箱
+                // 配对成功即打开待机遥测（start 幂等）：从此"锁屏静置"这一段不再是无因黑箱。
+                // 必须先 start 后拿锁，否则首次 acquire 的 `wake_ok` 永远发不出
                 com.soul2soul.app.util.StandbyProbe.start(this)
+                updateWakeLock(true)
             }
             "unpaired" -> {
                 // 对端解绑（或自己发起后服务端确认）：清除本地配对与令牌
@@ -338,10 +342,12 @@ class PresenceService : Service() {
                 Presence.client.setPairToken(null)
                 com.soul2soul.app.msg.InboxStore.clear()
                 com.soul2soul.app.util.SelfCheck.reportEvent(this, "standby", "app_exit", "-", "why=unpair")
+                // 释放锁必须在 stop 之前：探针停了之后 `wake_off` 就发不出去，
+                // "解绑后锁到底放没放"会重新变成一格空白
+                updateWakeLock(false) // 解除配对即无呼叫需求，息屏保活锁同步释放
                 // stop 是 start 的对偶出口：解绑后没有呼叫需求，心跳与传感器必须一起关掉，
                 // 否则未配对期会攒出一堆发不出去的排队事件（还占补报队列配额）
                 com.soul2soul.app.util.StandbyProbe.stop(this)
-                updateWakeLock(false) // 解除配对即无呼叫需求，息屏保活锁同步释放
             }
             "pair.recall_ask" -> {
                 // 老搭档找回请求：主页可能压根不在（SharedFlow 无 replay），

@@ -197,4 +197,35 @@ class StandbyTelemetryTest {
         assertTrue("补报入队不许覆盖调用方已带的事件时刻",
             backlog().any { it.contains("if (!copy.has(\"at\"))") })
     }
+
+    // S8：保活锁探针必须"先武装、后拿锁"。10-18 之前的顺序是反的，结果 `wake_ok` 在所有日志里
+    // 一条都没有——不是通路坏，是首次 acquire 落在 running=false 上，结构上永远发不出去。
+    // 而"待机时锁到底拿到没有"正是待机断连要查的第一件事，这条不许再被顺序吃回来。
+    @Test
+    fun `wake lock probe is armed before the lock is taken`() {
+        fun indexOf(lines: List<String>, anchor: String, from: List<String>, label: String): Int {
+            val i = from.indexOfFirst { it.contains(anchor) }
+            assertTrue("$label 里找不到锚点 $anchor", i >= 0)
+            return i + lines.indexOf(from.first())
+        }
+        val created = between(presence(), "override fun onCreate()", "override fun onStartCommand")
+        assertTrue("onCreate：探针必须在首次 updateWakeLock 之前起（否则首个 wake_ok 永久发不出）",
+            indexOf(presence(), "StandbyProbe.start(this)", created, "onCreate") <
+                indexOf(presence(), "updateWakeLock(Prefs.paired(this))", created, "onCreate"))
+        val paired = between(presence(), "\"paired\" -> {", "\"unpaired\" -> {")
+        assertTrue("配对当场：先起探针再拿锁",
+            indexOf(presence(), "StandbyProbe.start(this)", paired, "paired") <
+                indexOf(presence(), "updateWakeLock(true)", paired, "paired"))
+        val unpaired = between(presence(), "\"unpaired\" -> {", "\"pair.recall_ask\" -> {")
+        assertTrue("解绑：先放锁再停探针（停完再释放就没人报 wake_off）",
+            indexOf(presence(), "updateWakeLock(false)", unpaired, "unpaired") <
+                indexOf(presence(), "StandbyProbe.stop(this)", unpaired, "unpaired"))
+        // 回报点本身也不许被删：acquire 成/败两条路都要喂给探针
+        val updater = window(presence(), "private fun updateWakeLock(", 18)
+        assertTrue("updateWakeLock 必须把结果回报给探针",
+            updater.count { it.contains("StandbyProbe.onWakeLock(") } >= 2)
+        assertTrue("翻转必须真的发事件，且失败优先于去重（异常每次都报）",
+            between(probe(), "fun onWakeLock(", "private fun isIdle(")
+                .any { it.contains("emit(if (held) \"wake_ok\" else \"wake_off\"") })
+    }
 }
