@@ -76,6 +76,11 @@ v0.2.44 悬浮球丢失后立的规矩——多轮"稳定性审计"仍漏了一�
 ## 真机联调速记
 
 - 测试机：用户的 Mi5（Android 7，`adb devices` 序列 be2552f6）；对方手机是 Mi15（不在本机，走 App 内更新通道拿新版）。
+- **日志里的 deviceId ≠ adb 序列号**，认领机器前先对这张表（10-18 差点把 Mi10 的真机读数认成米15）：
+  线上生产 `soul.lumi666.cloud` 只有两台——`106db351-fec1-…` = 本机 Mi10（adb `7c6a9986`，HyperOS/Android 12），
+  `deba9443-74ff-…` = 米15（接不了 adb，版本只能看 `app=`）。
+  两台模拟器连的是本机 dev server（`/tmp/s2s-emu-run/server.log`），它们的读数**不会**出现在生产日志里，
+  反过来生产日志里出现的每一条都能落到这两台真机之一。
 - `scripts/e2e.sh` 需 ≥2 台已 boot 设备，探测不到时 test.sh 报 SKIP——**SKIP 不等于通过**，发版说明里要如实写。
 - MIUI/HyperOS 坑集中在：FGS 通知折叠（授权要另设对话框入口）、后台电池优化（电池豁免引导）、FLAG_SECURE 采集黑块（禁用）。
 
