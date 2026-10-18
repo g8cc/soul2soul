@@ -214,6 +214,16 @@ PY
     echo "静态检查: docs/PROTOCOL.md 的补报 grep 口径必须是 detail=at_（safeTag 会磨平等号），且保留 safeTag 警示"
     fail=1
   fi
+  # 同上锁住 v0.2.59 新增的两个 detail 键：代码发的是 `k=` / `q=`（逗号分隔），
+  # 而 safeTag 把等号与逗号一起磨成 `_`，所以文档必须同时给出日志侧对形（`k_123456…` / `q_29_h-s…`），
+  # 否则复现时按带等号的写法 grep 必然 0 命中 → 又被读成"埋点坏了"。
+  # `beat=` 是实现前计划稿里的名字，代码里从来没有过；文档一旦写它就是第三套假口径。
+  if grep -qF '`beat=`' "$ROOT/docs/PROTOCOL.md" "$ROOT/docs/AUDIT-MATRIX.md" "$ROOT/AGENTS.md" 2>/dev/null ||
+     ! grep -qF 'k_123456' "$ROOT/docs/PROTOCOL.md" 2>/dev/null ||
+     ! grep -qF 'q_29_h-s' "$ROOT/docs/PROTOCOL.md" 2>/dev/null; then
+    echo "静态检查: 心跳锚点键名只能是 k=（代码里没有 beat=），且 docs/PROTOCOL.md 必须保留日志侧对形 k_123456… / q_29_h-s…" >&2
+    fail=1
+  fi
   # 审计矩阵：GAP 是确认存在的问题，必须失败；⬜ 是尚未验证的欠债，
   # 日常模式告警，严格审计/发版模式失败。只在矩阵文件内统计，避免把
   # AUDIT.md 的说明文字误当成状态。
