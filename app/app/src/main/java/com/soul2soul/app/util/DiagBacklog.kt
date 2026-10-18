@@ -120,7 +120,9 @@ object DiagBacklog {
     private fun withAt(body: JSONObject): JSONObject {
         val copy = JSONObject()
         body.keys().forEach { k -> copy.put(k, body.get(k)) }
-        copy.put("at", System.currentTimeMillis())
+        // 调用方已带 `at` 时不许覆盖：重放缓存里的条目必须保持"事件发生时刻"，
+        // 否则一次断连补报出去的 12 条会全贴上复活那一毫秒，因果顺序就没了。
+        if (!copy.has("at")) copy.put("at", System.currentTimeMillis())
         return copy
     }
 

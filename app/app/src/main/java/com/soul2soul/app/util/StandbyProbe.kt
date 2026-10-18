@@ -17,6 +17,7 @@ import android.os.SystemClock
 import androidx.core.content.ContextCompat
 import com.soul2soul.app.session.Presence
 import com.soul2soul.app.session.ScreenShareService
+import org.json.JSONObject
 
 /**
  * 待机遥测探针（v0.2.59）：把传感器从会话生命周期里搬出来。
@@ -40,6 +41,13 @@ object StandbyProbe {
     /** bucket 降级是待机断网最直接的自证，60s 轮一次够定位到分钟级 */
     private const val BUCKET_POLL_MS = 60_000L
 
+    /**
+     * 死亡窗口重放缓存（判据在 `StandbyPolicy.shouldReplay`）：条数上限与时间窗。
+     * 12 条 ≈ 待机期最坏情况下的连续翻转现场，再多就是几分钟前的无关读数。
+     */
+    private const val SUSPECT_MAX = 12
+    private const val SUSPECT_WINDOW_MS = 180_000L
+
     @Volatile private var running = false
 
     private var app: Context? = null
@@ -57,6 +65,10 @@ object StandbyProbe {
     private var screenReceiverRegistered = false
     private var dozeReceiverRegistered = false
     private var netCallbackRegistered = false
+
+    /** 乐观发送过的待机读数；访问一律走 `ringLock`。Pair 的 first 是入环时刻的 elapsedRealtime */
+    private val ringLock = Any()
+    private val suspects = ArrayDeque<Pair<Long, JSONObject>>()
 
     /** 由 `PresenceService` 在配对期间调用；重复调用安全（running 门） */
     fun start(ctx: Context) {
@@ -109,6 +121,7 @@ object StandbyProbe {
         dozeReceiverRegistered = false
         netCallbackRegistered = false
         handler.removeCallbacksAndMessages(null)
+        synchronized(ringLock) { suspects.clear() }
         lastNet = "?"
         lastDoze = null
         lastBucket = -1
@@ -296,6 +309,34 @@ object StandbyProbe {
     private fun emit(event: String, detail: String) {
         val application = app ?: return
         // 待机期没有 WebRTC，ice 恒 "-"：这一格不是没埋，是本来就没有
-        runCatching { SelfCheck.reportEvent(application, "standby", event, "-", detail) }
+        val body = runCatching {
+            SelfCheck.reportEvent(application, "standby", event, "-", detail)
+        }.getOrNull()
+        // 报完之后 socket 仍"以为连着"⇒ 这一条是乐观发送：帧进了缓冲就返回 true，没有 ack，
+        // 断网瞬间会静默消失（实测见 StandbyPolicy.shouldReplay）。留一份副本，
+        // 等断连被确认那一刻补进队列。isConnected 已为假的不用留——sendDiag 那侧已经入过队，
+        // 再留一次就是同一事件两条补报。
+        if (body != null && runCatching { Presence.client.isConnected }.getOrDefault(false)) {
+            runCatching { body.put("at", System.currentTimeMillis()) }
+            synchronized(ringLock) {
+                suspects.addLast(SystemClock.elapsedRealtime() to body)
+                while (suspects.size > SUSPECT_MAX) suspects.removeFirst()
+            }
+        }
+    }
+
+    /**
+     * 断连被确认那一刻（`PresenceService` 的 down 沿）调用：把死亡窗口里"以为发成功了"的
+     * 待机读数补进队列，复活时按各自的事件时刻（`at=`）排出真实顺序。
+     */
+    fun replaySuspects(ctx: Context) {
+        val application = ctx.applicationContext
+        val now = SystemClock.elapsedRealtime()
+        val picked = synchronized(ringLock) {
+            val keep = suspects.filter { StandbyPolicy.shouldReplay(now, it.first, SUSPECT_WINDOW_MS) }
+            suspects.clear()
+            keep
+        }
+        for (s in picked) runCatching { SelfCheck.queueEvent(application, s.second) }
     }
 }

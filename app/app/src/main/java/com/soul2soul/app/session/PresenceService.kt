@@ -9,6 +9,7 @@ import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.os.PowerManager
+import android.os.SystemClock
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.soul2soul.app.MainActivity
@@ -82,7 +83,7 @@ class PresenceService : Service() {
     private var started = false
     private var reconnectAttempt = 0
     // 会话期信令断口的起点，复活时把 downMs 带给服务器（signaling_down 本身发不出去）
-    @Volatile private var signalingDownSinceMs = 0L
+    @Volatile private var signalingDownSinceMonoMs = 0L
 
     private val reconnectRunner = object : Runnable {
         override fun run() {
@@ -106,16 +107,19 @@ class PresenceService : Service() {
     }
 
     /**
-     * 信令掉线/复活的自报。downStartMs>0 才是"从断口复活"；首连不许报 downMs=0 这种假长度。
+     * 信令掉线/复活的自报。downStartMonoMs>0 才是"从断口复活"；首连不许报 downMs=0 这种假长度。
      *
      * detail 预算：补报会加 `at=<13位毫秒> ` 前缀，服务器再过 `safeTag` **静默**截到 64
      * ⇒ 可用只有 ~47。所以 reconnectAttempt 封顶两位数、downMs 封顶 7 位，省下的位数给
      * 网络/Doze 快照：一次复活同时看到"断了多久"和"当时是不是在 Doze"，比第 105 次重连这个数字有用得多。
+     *
+     * `downMs` 必须用单调钟相减：复活那一刻正是系统重新同步时钟的时刻，wall-clock 相减会把
+     * "断了 4 分钟"读成"断了 -3.8 小时"或反之（AGENTS 口径：设备时钟不可信，Mi5 实测慢 ~10.5h）。
      */
-    private fun reportSignaling(event: String, attempt: Int, downStartMs: Long, role: String) {
+    private fun reportSignaling(event: String, attempt: Int, downStartMonoMs: Long, role: String) {
         val detail = "reconnectAttempt=${attempt.coerceAtMost(99)}" +
-            (if (downStartMs > 0L)
-                " downMs=${(System.currentTimeMillis() - downStartMs).coerceAtMost(9_999_999L)}" else "") +
+            (if (downStartMonoMs > 0L)
+                " downMs=${(SystemClock.elapsedRealtime() - downStartMonoMs).coerceIn(0L, 9_999_999L)}" else "") +
             com.soul2soul.app.util.StandbyProbe.signalingFlags()
         com.soul2soul.app.util.SelfCheck.reportEvent(
             this,
@@ -200,8 +204,8 @@ class PresenceService : Service() {
                     // 至今是一格空白（10-18 那 9 次 pong 超时全部只能从服务端日志反推）。
                     // 现在两条路都报，但待机期只报翻转：Doze 里每 30s 一次退避重连不能刷成噪声。
                     if (connected) {
-                        val down = signalingDownSinceMs
-                        signalingDownSinceMs = 0L
+                        val down = signalingDownSinceMonoMs
+                        signalingDownSinceMonoMs = 0L
                         if (Presence.sessionBusy) {
                             reportSignaling("signaling_up", reconnectAttempt, down, signalRole())
                         } else if (standbySigDown) {
@@ -210,8 +214,11 @@ class PresenceService : Service() {
                         }
                         // 待机首连不发：那是每次冷启动都会有的常量事件，heartbeat 已覆盖"活着"
                     } else {
-                        if (signalingDownSinceMs == 0L) {
-                            signalingDownSinceMs = System.currentTimeMillis()
+                        if (signalingDownSinceMonoMs == 0L) {
+                            signalingDownSinceMonoMs = SystemClock.elapsedRealtime()
+                            // 断连被确认的这一刻是重放死线：再晚，死亡窗口里那些"以为发成功了"
+                            // 的待机读数（net_down/doze_on/bucket_*）就已经永久丢了
+                            com.soul2soul.app.util.StandbyProbe.replaySuspects(this@PresenceService)
                         }
                         if (Presence.sessionBusy) {
                             reportSignaling("signaling_down", reconnectAttempt, 0L, signalRole())

@@ -90,17 +90,31 @@ object SelfCheck {
      * 与 reportSession 同一通道，v0.2.59 起 `role` 允许第三个值 `standby`——待机期
      * 既不是 sharer 也不是 viewer，此前 `reportSignaling` 把它报成 `viewer`，
      * 于是"待机掉线"在日志里长得和"观看端掉线"一模一样。
+     *
+     * 返回实际发出的报文体，调用方（StandbyProbe）据此留副本重放——`send()` 返回 true
+     * 只代表帧写进了内核缓冲，不代表对方收到（见 sendDiag）。
      */
     fun reportEvent(
         ctx: Context, role: String, event: String, ice: String, detail: String? = null
-    ) = sendDiag(
-        ctx, "diag.event", JSONObject()
+    ): JSONObject {
+        val body = JSONObject()
             .put("role", role).put("event", event).put("ice", ice)
             .put("detail", (detail ?: "-").take(64))
             .put("fg", foreground(ctx)).put("screenOn", screenOn(ctx))
             .put("app", BuildConfig.VERSION_NAME)
-    )
+        sendDiag(ctx, "diag.event", body)
+        return body
+    }
 
+    /** 把一条已经构造好的事件体直接塞进补报队列（不再碰 socket），供死亡窗口重放用 */
+    fun queueEvent(ctx: Context, body: JSONObject) = DiagBacklog.enqueue(ctx, "diag.event", body)
+
+    /**
+     * 投递的判定口径：`isConnected` 为真时走"乐观发送"，帧写进 socket 缓冲就算发出去了，
+     * **没有 ack、不会回失败**。所以"网络刚断、TCP 还没判死"那几十秒里发的事件会静默消失
+     * （10-18 双模拟器实测：客户端 logcat 有 net_down，服务器 0 条，且没进补报队列）。
+     * 只有 `isConnected` 为假或发送抛异常时才会入队——StandbyProbe 的重放缓存补的正是这段盲区。
+     */
     private fun sendDiag(ctx: Context, type: String, body: JSONObject) {
         Log.d("S2S-Diag", "$type $body")
         val sent = runCatching {

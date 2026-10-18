@@ -53,15 +53,29 @@ class StandbyPolicyTest {
 
     @Test
     fun `bucket names match the framework constants`() {
-        // 10/20/30/40/50 = ACTIVE/WORKING_SET/FREQUENT/RARE/RESTRICTED
-        // 单测跑在 mockable android.jar 上，那里的 STANDBY_BUCKET_* 全被置 0，
-        // 所以策略层用字面量映射；这里锁的是映射本身
+        // 档位值不许凭记忆写：t0 有一条守卫直接拿 javap 读编译 SDK 的
+        // `UsageStatsManager.STANDBY_BUCKET_*` 与这里的字面量对齐（RESTRICTED 曾被误写成 50，
+        // 而 50 在平台上根本不存在——真机掉进 restricted 会被读成"未知档"，正是这次改动的原因）。
+        // 单测跑在 mockable android.jar 上，那里的 STANDBY_BUCKET_* 全被置 0，所以这里只能锁映射本身。
         assertEquals("act", StandbyPolicy.bucketName(10))
         assertEquals("wset", StandbyPolicy.bucketName(20))
         assertEquals("freq", StandbyPolicy.bucketName(30))
         assertEquals("rare", StandbyPolicy.bucketName(40))
-        assertEquals("rst", StandbyPolicy.bucketName(50))
+        assertEquals("rst", StandbyPolicy.bucketName(45))
         assertEquals("x0", StandbyPolicy.bucketName(0))
-        assertEquals("bucket_rst", "bucket_" + StandbyPolicy.bucketName(50))
+        assertEquals("bucket_rst", "bucket_" + StandbyPolicy.bucketName(45))
+        assertEquals("平台没有 50 这一档，ROM 给出的未知值不许被命名成任何一个已知档位",
+            "x50", StandbyPolicy.bucketName(50))
+    }
+
+    @Test
+    fun `replay window keeps only death-window copies`() {
+        val w = 180_000L
+        assertTrue(StandbyPolicy.shouldReplay(1_000_000L, 1_000_000L, w))
+        assertTrue(StandbyPolicy.shouldReplay(1_000_000L, 820_000L, w))
+        assertFalse("窗口是闭区间，恰好越过一毫秒就不许补——环里留着的是更早的正常读数，与这次断连无关",
+            StandbyPolicy.shouldReplay(1_000_000L, 819_999L, w))
+        assertFalse("elapsedRealtime 倒退=另起进程，不许把新进程的缓存当成死亡现场补出去",
+            StandbyPolicy.shouldReplay(900_000L, 1_000_000L, w))
     }
 }

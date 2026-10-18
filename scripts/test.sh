@@ -335,6 +335,38 @@ PY
     echo "静态检查: repro-capture.sh 的 summary 必须读 docs/PROTOCOL.md 的 DIAG-EVENT-NAMES（禁止写死清单）、必须挂进 case、补报口径只能是 detail=at_" >&2
     fail=1
   fi
+  # 「乐观发送盲区」是这一版补报成立的前提，文档必须先承认它：send() 写进缓冲就返回 true，
+  # 所以 net_down 这类"断网瞬间"的事件会静默消失，靠 down 沿重放副本才补得回来。
+  # 谁把这条从 PROTOCOL 里删掉，读日志的人就会把"没补到"读成"没发生"。
+  if ! grep -q '乐观发送' "$ROOT/docs/PROTOCOL.md" 2>/dev/null; then
+    echo "静态检查: docs/PROTOCOL.md 缺「乐观发送」盲区口径（补报只覆盖 socket 已判死后的事件，死亡窗口靠重放副本）" >&2
+    fail=1
+  fi
+  # StandbyPolicy.bucketName 的字面量表是照记忆写的，v0.2.59 第一版就把 RESTRICTED 记成 50
+  # （平台 android-34/35/36 实测是 45，50 不存在）⇒ 真机掉进 restricted 会被读成"未知档"，
+  # 而这正是米15 待机断网最想要的那一格。这里直接拿编译 SDK 的 android.jar 对表，凭记忆改立刻红。
+  local jar javap_bin bucket_src declared got missing extra
+  javap_bin="${JAVA_HOME:+$JAVA_HOME/bin/javap}"; [ -x "${javap_bin:-}" ] || javap_bin=$(command -v javap 2>/dev/null || true)
+  jar="${ANDROID_HOME:-$HOME/Library/Android/sdk}/platforms/$(grep -oE 'compileSdk = [0-9]+' "$ROOT/app/app/build.gradle.kts" | grep -oE '[0-9]+' | sed 's/^/android-/')/android.jar"
+  bucket_src="$ROOT/app/app/src/main/java/com/soul2soul/app/util/StandbyPolicy.kt"
+  if [ -n "$javap_bin" ] && [ -f "$jar" ]; then
+    declared=$("$javap_bin" -constants -cp "$jar" android.app.usage.UsageStatsManager 2>/dev/null |
+               { grep -oE 'STANDBY_BUCKET_[A-Z_]+ = [0-9]+' || true; } | awk '{print $NF}' | sort -un)
+    got=$(grep -oE '^[[:space:]]+[0-9]+ -> ' "$bucket_src" 2>/dev/null | tr -cd '0-9 \n' | tr ' ' '\n' | grep -E '^[0-9]+$' | sort -un)
+    if [ -z "$declared" ]; then
+      echo "静态检查: javap 没能从 $jar 读出 STANDBY_BUCKET_*（bucket 档位表这轮没校验上，不算通过）" >&2
+      fail=1
+    else
+      missing=$(comm -23 <(printf '%s\n' "$declared") <(printf '%s\n' "$got"))
+      extra=$(comm -13 <(printf '%s\n' "$declared") <(printf '%s\n' "$got"))
+      if [ -n "$missing" ] || [ -n "$extra" ]; then
+        echo "静态检查: StandbyPolicy.bucketName 与平台常量不一致 缺=$(echo $missing) 多=$(echo $extra)（档位名撒谎=待机断网判据直接读错）" >&2
+        fail=1
+      fi
+    fi
+  else
+    echo "静态检查: SKIP bucket 档位表校验（缺 javap 或 ${jar}；SKIP 不等于通过）"
+  fi
   [ "$fail" -eq 0 ]
 }
 

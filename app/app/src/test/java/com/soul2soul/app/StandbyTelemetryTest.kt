@@ -161,4 +161,40 @@ class StandbyTelemetryTest {
         assertTrue("上一轮死因只能在信令连通时读（ socket 没通发了也发不出去）",
             window(presence(), "if (connected) {", 8).any { it.contains("StandbyProbe.reportPreviousExit") })
     }
+
+    // S7：乐观发送盲区（v0.2.59 双模拟器实测补的洞）——net_down 这类事件在"socket 还没被判死"时
+    // 会静默消失，唯一的救赎是断连确认那一刻把副本补进队列。这条锁的是"补报的补报"，
+    // 抽掉它就回到"客户端 logcat 有、服务器 0 条"的假绿。
+    @Test
+    fun `death window is replayed exactly once per outage`() {
+        val down = between(presence(), "if (signalingDownSinceMonoMs == 0L) {", "先建立总线订阅")
+        assertTrue("断连确认的第一刻必须重放死亡窗口（挪到别处=每次退避重连都刷一遍）",
+            down.any { it.contains("StandbyProbe.replaySuspects(this@PresenceService)") })
+        assertTrue("断连起点必须用单调钟记录，wall-clock 相减会被复活时的时钟同步打穿",
+            down.any { it.contains("signalingDownSinceMonoMs = SystemClock.elapsedRealtime()") })
+        val report = between(presence(), "private fun reportSignaling(", "/** 会话期/待机期都算不出")
+        assertTrue("downMs 必须由 elapsedRealtime 相减得出",
+            report.any { it.contains("SystemClock.elapsedRealtime() - downStartMonoMs") })
+        assertTrue("downMs 不许退回 currentTimeMillis 相减（AGENTS：设备时钟不可信）",
+            code(report).none { it.contains("System.currentTimeMillis() - downStart") })
+
+        // 副本只收"当时以为连着"的：isConnected 为假的那些 sendDiag 已经入过队，再收就是两条补报
+        val emit = between(probe(), "private fun emit(event: String, detail: String)", "fun replaySuspects")
+        assertTrue("入环前必须确认 socket 仍处于已连接判定（否则与 sendDiag 的入队重复）",
+            emit.any { it.contains("Presence.client.isConnected") })
+        assertTrue("副本必须带事件时刻 at（否则补出去全是复活那一毫秒，因果顺序就没了）",
+            emit.any { it.contains("body.put(\"at\"") })
+        assertTrue("环形缓存必须封顶，断连风暴不许无界吃内存",
+            emit.any { it.contains("while (suspects.size > SUSPECT_MAX)") })
+        val body = window(probe(), "fun replaySuspects(ctx: Context)", 14)
+        assertTrue("重放必须按窗口过滤（几分钟前的正常心跳不是死亡现场）",
+            body.any { it.contains("StandbyPolicy.shouldReplay(") })
+        assertTrue("重放后必须清空，同一批副本不许补两次",
+            body.any { it.contains("suspects.clear()") })
+        assertTrue("stop 也要清空（解绑后的环里不许留着上一次的读数）",
+            between(probe(), "fun stop(ctx: Context)", "fun isRunning()").any { it.contains("suspects.clear()") })
+
+        assertTrue("补报入队不许覆盖调用方已带的事件时刻",
+            backlog().any { it.contains("if (!copy.has(\"at\"))") })
+    }
 }
