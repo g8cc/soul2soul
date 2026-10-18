@@ -152,6 +152,27 @@ PY
     echo "静态检查: 通知动作按钮禁 icon=0（折叠态不可见），用 res/drawable/ic_notif_* 真实图标"
     fail=1
   fi
+  # v0.2.57 生产日志复盘实锤：[relay] 把 paired.token（长期重连凭证，16 条）与
+  # pair.code（六位配对码，12 条）原样落盘。隐私名单收在 logpolicy.js，
+  # index.js 必须走它——把 send() 改回内联 quiet 判定就是拆线，必须红。
+  if ! grep -q "QUIET_TYPES.has(obj.type)" "$ROOT/server/src/index.js" 2>/dev/null; then
+    echo "静态检查: server/src/index.js 的 relay 日志必须走 logpolicy.QUIET_TYPES（禁止内联 quiet 判定）"
+    fail=1
+  fi
+  # 日志行裸插客户端字段 = 一个含换行的 model 就能伪造任意日志行（diag 行全部要过 safe*）
+  if grep -q '${msg\.' "$ROOT/server/src/index.js" 2>/dev/null; then
+    echo "静态检查: 日志行禁止裸插 \${msg.x}，必须走 safeTag/safeNum/safeBool（防日志伪造）"
+    fail=1
+  fi
+  # 判据必须能在真日志里 grep 到：safeTag 把 detail 里的 `=` 和空格全磨成 `_`
+  # （生产实测 `detail=established_true_restarts_0`），所以文档里"补报口径"只能写
+  # `detail=at_`。谁把它改回 `detail=at=`，复现时就会按一个不存在的键 grep → 误判"没上报"。
+  if grep -q 'detail=at=' "$ROOT/docs/PROTOCOL.md" 2>/dev/null ||
+     ! grep -q 'detail=at_' "$ROOT/docs/PROTOCOL.md" 2>/dev/null ||
+     ! grep -q 'safeTag' "$ROOT/docs/PROTOCOL.md" 2>/dev/null; then
+    echo "静态检查: docs/PROTOCOL.md 的补报 grep 口径必须是 detail=at_（safeTag 会磨平等号），且保留 safeTag 警示"
+    fail=1
+  fi
   # 审计矩阵：GAP 是确认存在的问题，必须失败；⬜ 是尚未验证的欠债，
   # 日常模式告警，严格审计/发版模式失败。只在矩阵文件内统计，避免把
   # AUDIT.md 的说明文字误当成状态。
@@ -242,6 +263,14 @@ PY
   # 把"该给哪个 SERIAL"摊到人面前（含候选行），否则 start 静默不采客户端侧、人却去查线。
   if ! grep -q 'SERIAL=<' "$ROOT/scripts/repro-capture.sh" 2>/dev/null; then
     echo "静态检查: repro-capture.sh 多台真机时不给 SERIAL 候选（客户端日志会静默不采，等于白跑一轮）" >&2
+    fail=1
+  fi
+  # 线上那版 send() 的 quiet 名单还没有 paired/pair.code：[relay] 行带长期重连凭证。
+  # 采集侧的脱敏是本地副本唯一的线，去掉它等于把 token 抄进笔记本（实测 sed -l 会吞掉 -E，
+  # 静默不生效且看起来像在工作，所以连 -u 一起锁）。
+  if ! grep -q 'sed -u -E' "$ROOT/scripts/repro-capture.sh" 2>/dev/null ||
+     ! grep -q '<redacted>' "$ROOT/scripts/repro-capture.sh" 2>/dev/null; then
+    echo "静态检查: repro-capture.sh 缺服务器日志脱敏（sed -u -E + <redacted>），token 会原样落本机" >&2
     fail=1
   fi
   [ "$fail" -eq 0 ]

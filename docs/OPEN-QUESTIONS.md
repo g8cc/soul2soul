@@ -43,6 +43,19 @@
 
 9. **【新·需要你点头】配对凭证在生产日志里是明文**：`[relay] … <- paired {"token":"<32hex>"}` 落了 16 条，`pair.code` 的六位配对码落了 12 条。`send()` 的 quiet 名单（`server/src/index.js:230`）里有 sdp/ice/incoming/accepted/msg.*，唯独漏了这两个。token 是**长期重连凭证**（拿到即可冒充该设备收呼叫与留言元数据），而这份文件还会被 `repro-capture.sh` 的 `\[relay\]` 过滤器原样抄到我的笔记本（现有 3 个采集目录恰好 0 条——最近没发生配对动作；复现时只要重新配对就会落本地）。改法是把 `paired` / `pair.code` 加进 quiet（或只记 `token=sha8`），属服务器改动，**等你确认再动**（禁止 naive 部署）。
 
+10. **日志采集没有开关（10-18 实况勘查，回答"修完能不能关、以后能不能安全再开"）**：
+    - 无开关：`server/src/index.js` 的 19 处 `console.log` 全部无条件；线上进程 env 只有 `PORT/PAIR_CODE_TTL_MS/PAIR_ENTER_MAX_ATTEMPTS/TURN_*`，没有任何 `LOG*` 变量。今天想静音只能改代码+部署。
+    - 无轮转：`start.sh` 是 `nohup node >> server.log`，`/etc/logrotate.d/` 无 soul2soul 条目。当前 367KB/4332 行（跨 6 次重启），量还小，但**主机根分区已用 90%、剩 3.8G**，无上限追加在这块盘上迟早撞。
+    - 时间戳只有 `HH:MM:SS.mmm` 没有日期 → 跨天对不上表（本轮分析被迫按"秒数倒退 30s 以上即 +1 天"推断）。
+    - 四个结构性盲点不是"多打几行"能补的：①媒体走 P2P，服务器永远看不见，只有客户端自报；②`sendDiag` 只在信令活着时发得出，恰好瞎在断连那一瞬；③服务器广播 `peer.gone` 时不知道对方 ICE 实况（0.2.57 的 `peer_signal` 探针补的就是这条）；④`sessionMs` 只在收到 offer 的一端有值，观看端恒为 `-1`，会话期断连在服务器日志上分不清角色。
+    - 因此"关→安全再开"的最小三件事（均属服务器改动，等你确认）：**打码常开**（与开关无关，就是上面第 9 条）→ **加 `S2S_LOG=minimal|diag|full`**（改 env 重启即开即关，不动代码不动数据）→ **加日期字段 + 轮转**。顺序不能反：先开开关再打码，等于把泄漏做成了可复现动作。
+
+11. **10-18 已按上面 9/10 把改动写进 repo（未发版、未部署；t0–t3 全绿，41 ⬜ / 0 GAP）**：
+    - 客户端（0.2.58 候选）：`SessionTiming` 把"当前是否连着"与"何时连上的"拆开——`liveMs` 停在失去连通那一刻、`setupMs=-1` 表示从未连通（t1 新增 5 条单测 + D7/D8 源码锁）；`DiagBacklog` 把断连期发不出的 diag 事件写进本机文件、信令复活后以 `diag.event` 补报（`detail` 以 `at=<epochMs>` 开头，会话终态降级成 `event=session_end` 带 `why/dur`）。**复用线上已认识的通道，服务器零改动**——这是米15 接不了 adb 时唯一能把"它自己那一侧发生了什么"送到服务器的通路。
+    - 服务器（仅 repo）：隐私名单收进 `server/src/logpolicy.js`（`paired`/`pair.code` 进 quiet + 字段级兜底脱敏，t2 新增 5 条单测）；`S2S_LOG=minimal` 抑制 `[relay]` 与 `[call] sdp|ice` 逐帧行（默认 `diag` = 现行详细度；隐私线不随档位放开）；日志前缀补日期；`[diag.version]`/`[diag.selfcheck]` 的客户端字符串全部过 `safeTag`（此前裸插——一个含换行的 `model` 就能伪造任意日志行）。轮转以 `server/ops/logrotate-soul2soul` 待装文件入库，**未安装**。
+    - 采集侧（不依赖部署，今天生效）：`repro-capture.sh` 在远端把 `token/code/credential/username` 替换成 `<redacted>` 再落笔记本。**实测踩坑**：GNU sed 的 `-l` 需要带字节数参数，会把后面的 `-E` 吞掉 → 模式退化成 BRE、括号不再分组 → **脱敏静默不生效而看起来一切正常**（我用真实 token 行验出来）。已改 `-u -E` 并加 t0 双守卫（`sed -u -E` + `<redacted>`）。
+    - ⚠️ **上线阻塞点（比原以为的"常量漂移"严重）**：线上 `/opt/soul2soul/server/src/index.js` 是 594 行，repo 那份 704 行；多出的 133 行含 `saveJsonAtomic` 落盘失败回滚、`pair()` 已配对即拒绝、孤儿语音清理等**未经线上验证的行为**（还有你尚未点头部署的留言撤回）。所以"加个日志开关就上线"不成立——覆盖部署会把这 133 行一起带上去。两条路等你选：**A** 先逐段评审这 133 行再整体上线；**B** 把本轮日志改动做成只碰 4 处的小 patch 打在线上那份上（漂移继续存在）。
+
 ## B. 你已经拍板的（不再变）
 
 | 决策点 | 结论 |
