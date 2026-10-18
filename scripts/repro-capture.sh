@@ -62,10 +62,13 @@ start() {
   #    [relay] 行会把长期重连凭证与六位配对码原样抄进本地副本（服务器侧修好前先在采集侧堵）。
   #    脱敏必须在远端做：本机这条管道只有一个后台 pid（$!），再多接一段 sed/perl
   #    就会把 ssh 变成 stop 杀不掉的孤儿（采集静默继续写，check 还显示在跑）。
+  #    两处 grep 必须 --line-buffered：grep 的输出接到管道时是 4KB 块缓冲，
+  #    实测线上副本停在 10:28:05、之后 24 分钟零行——最新事件（正是断连那几条）
+  #    一直卡在远端缓冲区，stop 一杀就永久丢掉。sed 的 -u 只解决了自己那一段。
   ssh -o ServerAliveInterval=15 -o ServerAliveCountMax=4 "$HOST_ALIAS" \
     "MASK='s/\"(token|code|credential|username)\":\"[^\"]*\"/\"<redacted>\"/g'; \
-     tail -n 200 '$REMOTE_LOG' 2>/dev/null | grep -aE '$REMOTE_FILTER' | sed -u -E \"\$MASK\"; \
-     while true; do tail -F -n 0 '$REMOTE_LOG' 2>/dev/null | grep -aE '$REMOTE_FILTER' | sed -u -E \"\$MASK\"; sleep 3; done" \
+     tail -n 200 '$REMOTE_LOG' 2>/dev/null | grep -a --line-buffered -E '$REMOTE_FILTER' | sed -u -E \"\$MASK\"; \
+     while true; do tail -F -n 0 '$REMOTE_LOG' 2>/dev/null | grep -a --line-buffered -E '$REMOTE_FILTER' | sed -u -E \"\$MASK\"; sleep 3; done" \
     > "$RUN_DIR/server.log" 2> "$RUN_DIR/server.err" &
   printf 'server\t%s\t%s\n' "$!" "$RUN_DIR/server.log" >> "$STATE"
 

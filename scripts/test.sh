@@ -269,8 +269,9 @@ PY
   # 采集侧的脱敏是本地副本唯一的线，去掉它等于把 token 抄进笔记本（实测 sed -l 会吞掉 -E，
   # 静默不生效且看起来像在工作，所以连 -u 一起锁）。
   if ! grep -q 'sed -u -E' "$ROOT/scripts/repro-capture.sh" 2>/dev/null ||
-     ! grep -q '<redacted>' "$ROOT/scripts/repro-capture.sh" 2>/dev/null; then
-    echo "静态检查: repro-capture.sh 缺服务器日志脱敏（sed -u -E + <redacted>），token 会原样落本机" >&2
+     ! grep -q '<redacted>' "$ROOT/scripts/repro-capture.sh" 2>/dev/null ||
+     [ "$(grep -c -- '--line-buffered' "$ROOT/scripts/repro-capture.sh" 2>/dev/null)" -lt 2 ]; then
+    echo "静态检查: repro-capture.sh 缺服务器日志脱敏（sed -u -E + <redacted>）或远端 grep 缺 --line-buffered（两处都要），token 会原样落本机 / 最新断连行会卡在 4KB 缓冲区被丢" >&2
     fail=1
   fi
   [ "$fail" -eq 0 ]
