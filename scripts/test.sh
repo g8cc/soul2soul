@@ -152,6 +152,47 @@ PY
     echo "静态检查: 通知动作按钮禁 icon=0（折叠态不可见），用 res/drawable/ic_notif_* 真实图标"
     fail=1
   fi
+  # v0.2.59 待机遥测的注册对称性：StandbyProbe 是本项目第一处"非会话期"系统广播监听，
+  # 漏一条 unregister 就是解绑后仍在收 SCREEN_OFF/网络回调（耗电 + 攒发不出去的事件）。
+  # 形状照上面 wm.addView/removeView 那条：按文件配对，不按行号。
+  local orphaned kf
+  orphaned=""
+  for kf in $(grep -rl --include='*.kt' "\.registerReceiver(" "$ROOT/app/app/src/main/java" 2>/dev/null); do
+    grep -q "unregisterReceiver(" "$kf" || orphaned="$orphaned $kf"
+  done
+  if [ -n "$orphaned" ]; then
+    echo "静态检查: registerReceiver 缺配对 unregisterReceiver:$orphaned"
+    fail=1
+  fi
+  orphaned=""
+  for kf in $(grep -rl --include='*.kt' "registerDefaultNetworkCallback(" "$ROOT/app/app/src/main/java" 2>/dev/null); do
+    grep -q "unregisterNetworkCallback(" "$kf" || orphaned="$orphaned $kf"
+  done
+  if [ -n "$orphaned" ]; then
+    echo "静态检查: registerDefaultNetworkCallback 缺配对 unregisterNetworkCallback:$orphaned"
+    fail=1
+  fi
+  # diag.session 的这两列服务器印了两天全是 `_`（字段在服务端一直存在，客户端从没 put 过）
+  for kf in path proj; do
+    grep -q "put(\"$kf\"" "$ROOT/app/app/src/main/java/com/soul2soul/app/util/SelfCheck.kt" || {
+      echo "静态检查: SelfCheck.kt 必须 put(\"$kf\")（缺了它 diag.session 该列永远打印不出 P2P/TURN 之别）"
+      fail=1
+    }
+  done
+  # 补报队列的分级淘汰与有界 flush：回滚成 takeLast(200)/单批 20 条就是"在最需要证据的时刻把证据扔了"
+  grep -q "BacklogTiers.trim(" "$ROOT/app/app/src/main/java/com/soul2soul/app/util/DiagBacklog.kt" || {
+    echo "静态检查: DiagBacklog 必须经 BacklogTiers.trim 分级淘汰（takeLast 保最新会先挤掉死亡瞬间的最旧几条）"
+    fail=1
+  }
+  grep -q "val head = lines.take(FLUSH_MAX)" "$ROOT/app/app/src/main/java/com/soul2soul/app/util/DiagBacklog.kt" || {
+    echo "静态检查: DiagBacklog.drain 必须一次取 FLUSH_MAX 而不是 FLUSH_BATCH（退回单批 20 条时，抖动期每 17~104s 才重连一次，200 条积压要十次才排空）"
+    fail=1
+  }
+  # 只 grep 常量名会被"名字留着、值改成 1"绕过（10-18 实测这么改 t0 照样绿），所以值也要卡
+  grep -qE "FLUSH_MAX_BATCHES = ([2-9]|[1-9][0-9])" "$ROOT/app/app/src/main/java/com/soul2soul/app/util/DiagBacklog.kt" || {
+    echo "静态检查: FLUSH_MAX_BATCHES 必须 ≥2（=1 就等于没有有界多批，只剩一个会骗人的名字）"
+    fail=1
+  }
   # v0.2.57 生产日志复盘实锤：[relay] 把 paired.token（长期重连凭证，16 条）与
   # pair.code（六位配对码，12 条）原样落盘。隐私名单收在 logpolicy.js，
   # index.js 必须走它——把 send() 改回内联 quiet 判定就是拆线，必须红。
@@ -290,7 +331,10 @@ t1_android_unit() {
     echo "Android SDK 不存在（设置 ANDROID_HOME 后可启用 T1）"
     return 2
   fi
-  local args=(-p "$ROOT/app" :app:testProdDebugUnitTest -q)
+  # --rerun：源码扫描类用例（DiagEventRegistryTest 等）会读模块外的 docs/，而 Gradle 的
+  # up-to-date 检查只看声明输入 ⇒ 只改文档时这一层会被缓存成"绿"，锁就形同虚设（10-18 实测：
+  # 往注册表里塞一个假名字，不加 --rerun 时 BUILD SUCCESSFUL）
+  local args=(-p "$ROOT/app" :app:testProdDebugUnitTest --rerun -q)
   local tasks=(":app:testProdDebugUnitTest")
   if [ "$COVERAGE" = 1 ]; then
     args+=("-Pcoverage" ":app:testProdDebugUnitTestCoverageReport")
