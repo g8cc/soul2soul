@@ -98,9 +98,12 @@ object DiagDetail {
      * 上一次进程死因（`ApplicationExitInfo`，API 30+）：只报枚举号与相对年龄。
      * `description`/`status` 是自由文本（可能含路径），按隐私线一律不读；
      * `subReason` 在 compileSdk 34 的 android.jar 里没有，不假装能报。
+     *
+     * `a` 负数报 `x` 而不是夹成 0：AEI 只有绝对时间戳，死 later 系统校正过时钟就会算出负年龄，
+     * 夹成 0 等于把它伪装成"刚刚死的"，而"什么时候死的"正是这条事件唯一的目的。
      */
     fun exit(reason: Int, importance: Int, ageMin: Long): String =
-        "r=$reason i=$importance a=${ageMin.coerceIn(0, 99999)}"
+        "r=$reason i=$importance a=${if (ageMin < 0L) "x" else ageMin.coerceAtMost(99999L)}"
 
     /**
      * 待机心跳：`k` 单调秒锚点（elapsedRealtime/1000）、`g` 与上一条心跳的间隔秒（`x`=本进程首条）、

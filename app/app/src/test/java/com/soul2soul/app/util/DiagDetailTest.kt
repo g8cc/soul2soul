@@ -77,8 +77,10 @@ class DiagDetailTest {
 
     @Test
     fun `exit report carries only enums and age`() {
-        val d = DiagDetail.exit(reason = 13, importance = 4, ageMin = -5)
-        assertEquals("r=13 i=4 a=0", d)
+        // 负年龄报 `a=x` 而不是夹成 `a=0`：AEI 只有绝对时间戳，算出负数说明死 later 系统校正过时钟，
+        // 夹成 0 就是把"不知道多久以前"伪装成"刚刚死的"（10-18 双模拟器真实读数 r=16 i=125 a=0=刚重装）
+        assertEquals("r=16 i=125 a=x", DiagDetail.exit(reason = 16, importance = 125, ageMin = -5))
+        assertEquals("r=0 i=1000 a=0", DiagDetail.exit(0, 1000, 0))
         assertFits(DiagDetail.exit(13, 4, 999_999), "死因")
         assertEquals("r=13 i=4 a=99999", DiagDetail.exit(13, 4, 999_999))
     }

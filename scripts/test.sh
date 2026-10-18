@@ -273,9 +273,9 @@ PY
   fi
   # 中文文案里"变量引用紧跟全角括号"会被 bash 把多字节字符吞进变量名，set -u 下当场 unbound
   # 崩掉整段（实测 drive-test.sh AC-6 的 SKIP 打印就是这么死的）。必须用大括号形式。
-  # ⚠️ 这里的字符类以前只有 `[A-Z_]`：小写变量（`$jar`/`$devices` 这一类）全部漏网，
-  # 10-18 加待机守卫时踩到——检测器绿着、脚本当场 "unbound variable" 崩在半路。
-  # 名字大小写不是安全边界，两条都要查。
+  # ⚠️ 这里的字符类以前只有 `[A-Z_]`：小写变量（`$jar`/`$devices`/`$aei_bad`）全部漏网，
+  # 10-18 加 aexit 号—名表守卫时踩到——检测器绿着、脚本当场 "unbound variable" 崩在半路，
+  # 而 t0 的"PASS"是上一轮缓存的错觉。名字大小写不是安全边界，两条都要查。
   local fullwidth
   fullwidth=$(python3 - "$ROOT/scripts" <<'PY'
 import glob, re, sys
@@ -369,6 +369,50 @@ PY
     fi
   else
     echo "静态检查: SKIP bucket 档位表校验（缺 javap 或 ${jar}；SKIP 不等于通过）"
+  fi
+  # aexit 的号—名表是文档里唯一"照记忆写枚举号"的地方，v0.2.59 第一版就把 REASON_OTHER(13) 说成
+  # 低内存、REASON_FREEZER(14) 说成用户手动停止——这两格恰恰是"她是被 ROM 杀了还是自己睡死"的判据，
+  # 号读反了整轮取证方向就反。与 bucket 同一处理：拿 android.jar 对表。
+  # REASON_* 查双向（漏一档=以后读到这个号只能猜）；IMPORTANCE_* 只查正向
+  # （IMPORTANCE_CACHED 与 IMPORTANCE_BACKGROUND 同为 400，反向会误报缺档）。
+  local aei_doc_r aei_doc_i aei_declared aei_bad="" aei_pair
+  aei_doc_r=$(grep -oE '[0-9]+=REASON_[A-Z_]+' "$ROOT/docs/PROTOCOL.md" 2>/dev/null || true)
+  aei_doc_i=$(grep -oE '[0-9]+=IMPORTANCE_[A-Z_]+' "$ROOT/docs/PROTOCOL.md" 2>/dev/null || true)
+  if [ -z "$aei_doc_r" ] || [ -z "$aei_doc_i" ]; then
+    echo "静态检查: docs/PROTOCOL.md 缺 AEI-REASONS / AEI-IMPORTANCE 对照行（aexit 的号没人能对表）" >&2
+    fail=1
+  elif [ -n "$javap_bin" ] && [ -f "$jar" ]; then
+    aei_declared=$("$javap_bin" -constants -cp "$jar" android.app.ApplicationExitInfo 2>/dev/null |
+                   { grep -oE 'REASON_[A-Z_]+ = [0-9]+' || true; } |
+                   { sed -E 's/([A-Z_]+) = ([0-9]+)/\2=\1/'; } | sort -u)
+    if [ -z "$aei_declared" ]; then
+      echo "静态检查: javap 没能从 $jar 读出 REASON_*（aexit 号—名表这轮没校验上，不算通过）" >&2
+      fail=1
+    else
+      for aei_pair in $aei_doc_r; do
+        printf '%s\n' "$aei_declared" | grep -qxF "$aei_pair" || aei_bad="$aei_bad 假号:$aei_pair"
+      done
+      for aei_pair in $aei_declared; do
+        printf '%s\n' "$aei_doc_r" | grep -qxF "$aei_pair" || aei_bad="$aei_bad 缺档:$aei_pair"
+      done
+    fi
+    aei_declared=$("$javap_bin" -constants -cp "$jar" 'android.app.ActivityManager$RunningAppProcessInfo' 2>/dev/null |
+                   { grep -oE 'IMPORTANCE_[A-Z_]+ = [0-9]+' || true; } |
+                   { sed -E 's/([A-Z_]+) = ([0-9]+)/\2=\1/'; } | sort -u)
+    if [ -z "$aei_declared" ]; then
+      echo "静态检查: javap 没能从 $jar 读出 IMPORTANCE_*（importance 半张表这轮没校验上，不算通过）" >&2
+      fail=1
+    else
+      for aei_pair in $aei_doc_i; do
+        printf '%s\n' "$aei_declared" | grep -qxF "$aei_pair" || aei_bad="$aei_bad 假importance:$aei_pair"
+      done
+    fi
+    if [ -n "$aei_bad" ]; then
+      echo "静态检查: docs/PROTOCOL.md 的 aexit 号—名表与 android.jar 不一致 →${aei_bad}（号读反=死因判据整个反向）" >&2
+      fail=1
+    fi
+  else
+    echo "静态检查: SKIP aexit 号—名表校验（缺 javap 或 ${jar}；SKIP 不等于通过）"
   fi
   [ "$fail" -eq 0 ]
 }
