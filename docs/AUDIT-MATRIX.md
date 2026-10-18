@@ -121,7 +121,10 @@
 10-18 起本机 dev server + 双模拟器（API34）已把**通路**那一半填掉：凡标 `PASS(模)` 的都是模拟器真出过数，
 **它只证明"埋点会出数"，不证明"米15 上也是这样"**——所以米15/HyperOS 特有的判据（自然掉档、真 Doze、
 被 ROM 杀、锁屏掉线的 `detail=at_`）一律保持 `⬜` 并写清缺哪一次采样，复现后用 `scripts/repro-capture.sh summary` 一次性对照。
-0.2.59 尚未装机（发版待用户点头），`PASS(模)` 的列都注明了是怎么造出来的（强制手段不等于真机行为）。
+0.2.59 已于 10-19 06:52:41 发到更新通道（`versionCode=59`，APK sha256 `a6aed2ff…`，
+`curl -sI https://soul.lumi666.cloud/apk/soul2soul-latest.apk` → 200），`PASS(模)` 的列都注明了是怎么造出来的（强制手段不等于真机行为）。
+**但通道上有包 ≠ 装了**：米15 最后一次上报仍是 `code=58`（10-18 22:10:09，`update=false`），
+她打开 App 才会检查更新，所以本表里所有依赖米15 的格子在 `diag.version code=59` 出现之前**不许**改成 PASS。
 **`PASS(真)` = Mi10 真机（HyperOS / Android 12 / API31，adb `7c6a9986`，线上生产 server）18:24 起实际出过数**，
 比 `PASS(模)` 高一级但**仍不等于米15**：Mi10 在 deep-Doze 白名单里（`dumpsys deviceidle whitelist` → `user,com.soul2soul.app,10442`），
 AOSP 的 Doze 网络限制对它根本不生效，所以凡涉及"真 Doze 行为"的格子，Mi10 出不了数也不能反证米15 没问题。
