@@ -90,6 +90,11 @@ v0.2.44 悬浮球丢失后立的规矩——多轮"稳定性审计"仍漏了一�
   新增事件名不写进那一行，t1 的 `DiagEventRegistryTest` 直接红。
 - **`heartbeat` 的缺口本身就是判据**：连续两条 `k=`（elapsedRealtime 秒，单调锚点）读数差 > 2×300s 说明进程被冻或被杀，
   不需要额外事件；日志侧这一格渲染成 `k_…`（safeTag 磨平等号与逗号）。设备墙钟不可信（实测 Mi5 慢 ~10.5h），任何"间隔"都不许用 wall-clock 相减。
+- **模拟器出数只算"通路证据"，不算"真机验证"**：`docs/AUDIT-MATRIX.md` §8 里 `PASS(模)` 是故意留的记号——
+  它证明"这个埋点会出数、格式对"，不证明"HyperOS 上也会出数"。强制手段（`cmd deviceidle enter`、
+  `am set-standby-bucket`、`svc wifi/data disable`）造出来的是**可达性测试**，ROM 的自然行为仍属未采样，
+  对应格子必须保持 `⬜`。同理 `path`/`proj` 的 `-` 是"发了但当时无值"（如 `ice=FAILED` 的会话从没选路），
+  只有 `_` 才是"没发"——读日志时把这两种混为一谈会得出完全相反的结论。
 
 ## 其他约定
 
