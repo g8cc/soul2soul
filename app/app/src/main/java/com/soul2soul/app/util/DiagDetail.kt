@@ -50,6 +50,24 @@ object DiagDetail {
         return "${typeCode(local)}-${typeCode(remote)}"
     }
 
+    /**
+     * `candidate.sdp` 里的 `typ <kind>` → 计数下标（0=host 1=srflx 2=relay 3=prflx）。
+     * 只认这四种子串，认不出返回 -1 让调用方丢弃：宁缺一条计数，也不把未知类型塞进 relay 里，
+     * 那会把"TURN 分配失败"这个结论伪造出来。
+     */
+    fun candidateIndex(sdp: String): Int = when {
+        sdp.contains("typ host") -> 0
+        sdp.contains("typ srflx") -> 1
+        sdp.contains("typ relay") -> 2
+        sdp.contains("typ prflx") -> 3
+        else -> -1
+    }
+
+    /** ICE 收集完成时的本地 candidate 类型分布：`h2s1r0p0`，`r0` = TURN 一个中继都没拿到 */
+    fun gather(host: Int, srflx: Int, relay: Int, prflx: Int): String =
+        "h=${host.coerceAtMost(99)} s=${srflx.coerceAtMost(99)} " +
+            "r=${relay.coerceAtMost(99)} p=${prflx.coerceAtMost(99)}"
+
     private fun typeCode(t: String) = when (t.lowercase()) {
         "host" -> "h"
         "srflx" -> "s"
@@ -60,15 +78,18 @@ object DiagDetail {
     private fun kbps(v: Long): String = if (v < 0) "x" else v.coerceAtMost(99999).toString()
 
     /** 丢包率放大 10 倍保一位小数；-1/NaN 表示这一格没读数（不许拿 0 冒充"没有丢包"） */
-    private fun pctX10(v: Double): String =
+    fun pctTenths(v: Double): String =
         if (!v.isFinite() || v < 0) "x" else (v * 10).toInt().coerceAtMost(1000).toString()
+
+    private fun pctX10(v: Double): String = pctTenths(v)
 
     private fun ms(v: Double): String =
         if (!v.isFinite() || v < 0) "x" else v.toInt().coerceAtMost(999).toString()
 
-    /** 整数读数（rtt 这类本来就是 ms 整数）与 Double 版同规则：负数=没读数，不许渲染成 "-1" */
-    private fun ms(v: Long): String =
-        if (v < 0) "x" else v.coerceAtMost(999).toString()
+    /** 整数毫秒读数（rtt 这类本来就是整数）：负数=没读数，不许渲染成 "-1"（`-` 会被磨成 `_`） */
+    fun msCap(v: Long): String = if (v < 0) "x" else v.coerceAtMost(999).toString()
+
+    private fun ms(v: Long): String = msCap(v)
 
     private fun fps(v: Double): String =
         if (!v.isFinite() || v < 0) "x" else v.toInt().coerceAtMost(999).toString()

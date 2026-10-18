@@ -211,6 +211,20 @@ class WebRtcClient(
     private var previousAudioQualityCounters: RtpQualityWindow.Counters? = null
     private var previousVideoQualityCounters: RtpQualityWindow.Counters? = null
 
+    /**
+     * 最近一个 10s 诊断窗口的读数与选路（v0.2.59）。
+     * 这些数字此前只存在于 `S2S_QOS` 那行 logcat，而每个值都是轮询里的局部变量 ⇒
+     * 对那台接不了 adb 的手机（米15）等于从来没算过。留住它们，会话结束时才能随
+     * `diag.session` 的 path/proj 两列一起出去（服务器已经印了两天，一直是 `_`）。
+     */
+    @Volatile private var lastQos: com.soul2soul.app.util.DiagDetail.Qos? = null
+    @Volatile private var lastSelectedPath = "unknown"
+
+    /** 采集侧状态：viewer 没有投影 ⇒ "-"，不许用 "off" 冒充"知道它没开" */
+    @Volatile private var projectionState = "-"
+    private val candidateTally = java.util.concurrent.atomic.AtomicIntegerArray(4) // host/srflx/relay/prflx
+    @Volatile private var gatherReported = false
+
     private val connectTimeoutRunner = Runnable {
         if (!closed && !established) notifyEnded("connect_TIMEOUT")
     }
@@ -268,6 +282,7 @@ class WebRtcClient(
 
     /** 共享端入口。projectionData 为系统屏幕录制授权返回的 Intent */
     fun startSharer(projectionData: Intent) {
+        projectionState = "starting"
         val pc = createPeerConnection()
         this.pc = pc
         startConnectTimeout()
@@ -277,10 +292,14 @@ class WebRtcClient(
             object : android.media.projection.MediaProjection.Callback() {
                 // 用户在系统隐私提示里"停止"录屏：授权被撤销，会话必须体面结束而非黑屏挂着
                 override fun onStop() {
+                    // 只记状态、不另发事件：这条路径已经通过 onEnded("projection_stopped") 变成
+                    // diag.session.reason 了，再发一条就是同一件事两个真值来源
+                    projectionState = "stopped"
                     if (!closed) listener.onEnded("projection_stopped")
                 }
             },
         )
+        projectionState = "live"
         this.capturer = capturer
         val source = factory.createVideoSource(true) // isScreencast: 启用内容编码模式
         videoSource = source
@@ -641,6 +660,11 @@ class WebRtcClient(
 
     override fun onIceCandidate(candidate: IceCandidate) {
         if (closed || endedNotified.get()) return
+        // 类型计数就在已有的候选回调里做（不额外 getStats）：TURN 分配失败 = relay 恒 0，
+        // 这条判据此前完全不存在，"是不是必须走中继"只能靠猜
+        com.soul2soul.app.util.DiagDetail.candidateIndex(candidate.sdp)
+            .takeIf { it >= 0 }
+            ?.let { candidateTally.incrementAndGet(it) }
         listener.onSignalOut(
             JSONObject()
                 .put("type", "ice")
@@ -733,6 +757,13 @@ class WebRtcClient(
                     outageStartedAtMs = android.os.SystemClock.elapsedRealtime()
                     Log.w(TAG, "ICE_OUTAGE_STARTED state=$state")
                 }
+                // DISCONNECTED/CONNECTED 都有自报，FAILED 此前偏偏只打 logcat：
+                // "真断"（打洞彻底失败/中继也没拿到）与"闪断"（后面会 ice_recovered）在服务器日志里因此分不开
+                com.soul2soul.app.util.SelfCheck.reportEvent(
+                    context, role, "ice_failed", state.name,
+                    "established=$established restarts=${iceRestartBudget.usedAttempts} " +
+                        "path=${com.soul2soul.app.util.DiagDetail.pathCode(lastSelectedPath)}",
+                )
                 val recovery = IceRecoveryPolicy.onFailed(established, isSharer)
                 if (recovery.armRecoveryTimeout) {
                     iceHandler.removeCallbacks(disconnectTimeoutRunner)
@@ -880,6 +911,7 @@ class WebRtcClient(
                     best = if (selectedRtt >= 0) selectedRtt else fallbackRtt
                     availableOutgoingBps =
                         if (selectedAvailable >= 0) selectedAvailable else fallbackAvailable
+                    lastSelectedPath = selectedPath
                     if (best >= 0) listener.onRtt(best)
 
                     // 统计仍每 2 秒用于自适应；详细媒体诊断每 10 秒记录一次。
@@ -937,6 +969,41 @@ class WebRtcClient(
                                 "audioJitterMs=${formatMetric(audioWindow.jitterMs)} " +
                                 "audioConcealedMs=${formatMetric(audioWindow.concealedMs)}",
                         )
+                        // 同一批读数必须离开 logcat：这行 S2S_QOS 的每个值都是上面那些每 tick 局部变量，
+                        // 出循环即销毁，而唯一出口是 listener.onRtt(best) ⇒ 米15（无 adb）等于从没算过。
+                        // 每 10s 一条 qos_tick 是背景，异常当场插一条 qos_bad 才是现场。
+                        val sample = com.soul2soul.app.util.DiagDetail.Qos(
+                            rttMs = best,
+                            path = selectedPath,
+                            availableKbps =
+                                if (availableOutgoingBps >= 0) availableOutgoingBps / 1000 else -1L,
+                            edge = captureLongEdge.toLong(),
+                            videoLossPct = videoWindow.packetLossPercent,
+                            videoJitterMs = videoWindow.jitterMs,
+                            videoFps = videoFps,
+                            audioLossPct = audioWindow.packetLossPercent,
+                            audioJitterMs = audioWindow.jitterMs,
+                            audioConcealedMs = audioWindow.concealedMs,
+                        )
+                        val prevQos = lastQos
+                        lastQos = sample
+                        if (established) {
+                            com.soul2soul.app.util.SelfCheck.reportEvent(
+                                context, role, "qos_tick", latestIceState,
+                                com.soul2soul.app.util.DiagDetail.qos(sample),
+                            )
+                            QosAnomaly.pick(
+                                prev = prevQos, cur = sample,
+                                // 本机锁屏期间采集不出帧是 0.2.56 的设计语义（画面暂停·语音继续），
+                                // 本端 surface 没了停帧也是自己的事——两种都不许报成"卡死"
+                                framesBlockedByUs = localRenderPaused || !localScreenOn(),
+                                peerPaused = remoteScreenPaused,
+                            )?.let { bad ->
+                                com.soul2soul.app.util.SelfCheck.reportEvent(
+                                    context, role, "qos_bad", latestIceState, bad,
+                                )
+                            }
+                        }
                         // 观看端"黑屏"的直接证据：ICE 仍 CONNECTED 但收流帧率连续为 0，
                         // 说明断的是共享端的采集/编码，不是网络（服务器看不见媒体，只能自报）。
                         // 对方锁屏期间零帧是设计行为（画面暂停·语音继续），排除在外。
@@ -1088,7 +1155,20 @@ class WebRtcClient(
         }
     }
     override fun onIceConnectionReceivingChange(receiving: Boolean) {}
-    override fun onIceGatheringChange(state: PeerConnection.IceGatheringState) {}
+    override fun onIceGatheringChange(state: PeerConnection.IceGatheringState) {
+        // 收集完成那一刻报一次类型分布（每会话一条，不重复）：r=0 就是 TURN 一个中继都没拿到，
+        // 这是"P2P 打洞失败"唯一的远程自证——此前只能从服务器日志反推有没有分配过 relay
+        if (state != PeerConnection.IceGatheringState.COMPLETE || gatherReported) return
+        gatherReported = true
+        if (closed || endedNotified.get()) return
+        com.soul2soul.app.util.SelfCheck.reportEvent(
+            context, role, "gather_done", latestIceState,
+            com.soul2soul.app.util.DiagDetail.gather(
+                candidateTally.get(0), candidateTally.get(1),
+                candidateTally.get(2), candidateTally.get(3),
+            ),
+        )
+    }
     override fun onIceCandidatesRemoved(candidates: Array<out IceCandidate>) {}
     override fun onAddTrack(receiver: RtpReceiver, streams: Array<out MediaStream>) {}
     override fun onRemoveStream(stream: MediaStream) {}
@@ -1241,8 +1321,20 @@ class WebRtcClient(
             ice = latestIceState,
             setupMs = setupMs,
             liveMs = SessionTiming.liveMs(mediaConnectedAtMs, mediaLostAtMs, now),
+            // 最后一次的选路/投影状态：服务器这两列已经印了两天全是 `_`，P2P 与 TURN 转发
+            // 至今分不出来。取不到读数就留默认 "-"（空格），不许编一条
+            path = lastQos?.let { com.soul2soul.app.util.DiagDetail.pathCode(it.path) } ?: "-",
+            proj = projectionState,
         )
     }
+
+    /**
+     * 本机屏幕是否亮着：锁屏期间共享端不出帧是 0.2.56 的设计语义（画面暂停·语音继续），
+     * 拿它当"卡死"报就会每 10s 制造一条假异常（旧的 video_stall 假告警正是这类坑）。
+     */
+    private fun localScreenOn(): Boolean = runCatching {
+        (context.getSystemService(Context.POWER_SERVICE) as android.os.PowerManager).isInteractive
+    }.getOrDefault(true)
 
     private fun sendSdp(desc: SessionDescription) {
         if (closed || endedNotified.get()) return

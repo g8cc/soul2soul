@@ -82,4 +82,26 @@ class DiagDetailTest {
         assertFits(DiagDetail.exit(13, 4, 999_999), "死因")
         assertEquals("r=13 i=4 a=99999", DiagDetail.exit(13, 4, 999_999))
     }
+
+    @Test
+    fun `candidate counting only trusts the four known kinds`() {
+        // 真实 candidate 行形状：candidate:1:1:2:ip:...:typ host 192.168...:31000
+        assertEquals(0, DiagDetail.candidateIndex("candidate:1:1:2:ip 10.0.0.1 5000 typ host"))
+        assertEquals(1, DiagDetail.candidateIndex("candidate:2:1:2:ip 1.2.3.4 5000 typ srflx"))
+        assertEquals(2, DiagDetail.candidateIndex("candidate:3:1:2:ip 1.2.3.4 5000 typ relay"))
+        assertEquals(3, DiagDetail.candidateIndex("candidate:4:1:2:ip 1.2.3.4 5000 typ prflx"))
+        // 认不出的一律丢弃：把未知类型塞进 relay 会伪造出"TURN 拿到了"这个结论
+        assertEquals(-1, DiagDetail.candidateIndex("candidate:5:1:2:ip 1.2.3.4 5000 typ unknown"))
+        assertEquals(-1, DiagDetail.candidateIndex(""))
+        // 每个地址端口都带 "typ "，只有四种都试一遍才算数
+        assertEquals(-1, DiagDetail.candidateIndex("candidate:6:1:2:ip 1.2.3.4 5000 typ rtp"))
+    }
+
+    @Test
+    fun `gather line reports relay zero without padding`() {
+        assertEquals("h=2 s=1 r=0 p=0", DiagDetail.gather(2, 1, 0, 0))
+        val d = DiagDetail.gather(999, 999, 999, 999)
+        assertEquals("h=99 s=99 r=99 p=99", d)
+        assertFits(d, "gather")
+    }
 }
