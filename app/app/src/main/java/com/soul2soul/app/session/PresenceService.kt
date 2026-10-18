@@ -160,6 +160,8 @@ class PresenceService : Service() {
                     SignalBus.emit(org.json.JSONObject().put("type", "local.connState").put("connected", connected))
                     if (connected) {
                         reconnectAttempt = 0
+                        // 断连期间攒下的埋点在复活后补报（hello 已先发，服务器按到达顺序处理，authed 成立）
+                        com.soul2soul.app.util.DiagBacklog.flush(this@PresenceService)
                     } else {
                         // 指数退避: 3s, 6s, 12s ... 上限 30s，避免服务端故障时打爆
                         val delay = (RECONNECT_BASE_MS shl reconnectAttempt.coerceAtMost(4))

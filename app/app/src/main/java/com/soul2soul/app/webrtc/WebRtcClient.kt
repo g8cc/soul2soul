@@ -155,6 +155,13 @@ class WebRtcClient(
     /** 诊断上报用的当前 ICE 态（服务/Activity 侧报事件时带上，服务器才能对齐时间线） */
     val iceStateName: String get() = latestIceState
     @Volatile private var connectedSinceMs = 0L
+    /**
+     * 首次连通时刻（elapsedRealtime），会话内永不清零。
+     * connectedSinceMs 会被 ICE 闪断清零，不能拿它算时长——上报必须用这个（见 SessionTiming）。
+     */
+    @Volatile private var mediaConnectedAtMs = 0L
+    /** 连通之后最近一次失去连通的时刻；重新连通即清零，0 表示截至上报仍连着 */
+    @Volatile private var mediaLostAtMs = 0L
     @Volatile private var outageStartedAtMs = 0L
     @Volatile private var recoveryCount = 0
     @Volatile private var connectStartedAtMs = 0L
@@ -667,6 +674,8 @@ class WebRtcClient(
                 renegoInFlight = false
                 if (!wasConnected) {
                     connectedSinceMs = now
+                    if (mediaConnectedAtMs == 0L) mediaConnectedAtMs = now
+                    mediaLostAtMs = 0L
                     iceHandler.removeCallbacks(iceStableRunner)
                     iceHandler.postDelayed(iceStableRunner, IceRestartBudget.STABLE_RESET_MS)
                 }
@@ -699,6 +708,9 @@ class WebRtcClient(
                 }
                 iceHandler.removeCallbacks(iceStableRunner)
                 connectedSinceMs = 0L
+                if (mediaConnectedAtMs > 0L && mediaLostAtMs == 0L) {
+                    mediaLostAtMs = android.os.SystemClock.elapsedRealtime()
+                }
                 if (outageStartedAtMs == 0L) {
                     outageStartedAtMs = android.os.SystemClock.elapsedRealtime()
                     Log.w(TAG, "ICE_OUTAGE_STARTED state=$state")
@@ -714,6 +726,9 @@ class WebRtcClient(
                 iceHandler.removeCallbacks(iceRestartRunner)
                 iceHandler.removeCallbacks(iceStableRunner)
                 connectedSinceMs = 0L
+                if (mediaConnectedAtMs > 0L && mediaLostAtMs == 0L) {
+                    mediaLostAtMs = android.os.SystemClock.elapsedRealtime()
+                }
                 if (outageStartedAtMs == 0L) {
                     outageStartedAtMs = android.os.SystemClock.elapsedRealtime()
                     Log.w(TAG, "ICE_OUTAGE_STARTED state=$state")
@@ -1171,6 +1186,8 @@ class WebRtcClient(
 
     private fun startConnectTimeout() {
         connectStartedAtMs = android.os.SystemClock.elapsedRealtime()
+        mediaConnectedAtMs = 0L
+        mediaLostAtMs = 0L
         iceHandler.removeCallbacks(connectTimeoutRunner)
         iceHandler.postDelayed(connectTimeoutRunner, CONNECT_TIMEOUT_MS)
     }
@@ -1214,18 +1231,16 @@ class WebRtcClient(
     private fun reportSessionEnd() {
         if (connectStartedAtMs <= 0L) return
         val now = android.os.SystemClock.elapsedRealtime()
-        val setupMs = if (connectedSinceMs > 0L && connectStartedAtMs > 0L) {
-            connectedSinceMs - connectStartedAtMs
-        } else {
-            now - connectStartedAtMs
-        }
+        // 时长一律走 SessionTiming：connectedSinceMs 会被 ICE 闪断清零，
+        // 用它算就会把"聊了 18 分钟被拆"和"根本没连上"报成同一个数。
+        val setupMs = SessionTiming.setupMs(connectStartedAtMs, mediaConnectedAtMs)
         com.soul2soul.app.util.SelfCheck.reportSession(
             context,
             role = role,
             reason = endReason.ifEmpty { "local_close" },
             ice = latestIceState,
-            setupMs = setupMs.coerceAtLeast(0L),
-            liveMs = if (connectedSinceMs > 0L) now - connectedSinceMs else 0L,
+            setupMs = setupMs,
+            liveMs = SessionTiming.liveMs(mediaConnectedAtMs, mediaLostAtMs, now),
         )
     }
 

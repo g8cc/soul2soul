@@ -32,6 +32,12 @@ class SessionEndDiagTest {
         return lines.drop(i - back).take(size)
     }
 
+    /** 只留代码行：注释里提到某个字段名正是为了解释"为什么不能用它"，不该被扫描判成违规 */
+    private fun code(lines: List<String>): List<String> = lines.filterNot {
+        val t = it.trim()
+        t.startsWith("//") || t.startsWith("/*") || t.startsWith("*")
+    }
+
     // D1：close() 必须把终态报出去——所有本地/远端结束路径都汇流到这里
     @Test
     fun `close reports session end to server`() {
@@ -85,13 +91,55 @@ class SessionEndDiagTest {
             window(webrtc(), "viewerZeroFpsStreak++", 10).any { it.contains("\"video_stall\"") })
     }
 
-    // D6：自报只能走信令通道的枚举/标量，且断线时不得排队重试（否则收尾路径会拖出重连）
+    // D6：自报只能走信令通道的枚举/标量；发不出去时只许落本机文件（不许在收尾路径里拖出重连）
     @Test
     fun `diag upload is guarded and content-free`() {
-        val body = window(selfCheck(), "private fun sendDiag(", 12)
-        assertTrue("发送前必须判 Presence.client.isConnected，断线期间不投递",
+        val body = window(selfCheck(), "private fun sendDiag(", 16)
+        assertTrue("发送前必须判 Presence.client.isConnected",
             body.any { it.contains("Presence.client.isConnected") })
         assertTrue("上报字段只能是标量：detail 必须截断",
             window(selfCheck(), "fun reportEvent(", 12).any { it.contains(".take(64)") })
+    }
+
+    // D7：时长上报不得复用被闪断清零的字段（0.2.55 生产日志 liveMs 失真的根因）
+    @Test
+    fun `session end timing ignores the outage-cleared field`() {
+        val body = code(window(webrtc(), "private fun reportSessionEnd()", 18))
+        assertTrue("reportSessionEnd 不许再用 connectedSinceMs：ICE 闪断会把它清零，时长就归 0",
+            body.none { it.contains("connectedSinceMs") })
+        assertTrue("setupMs/liveMs 必须走 SessionTiming（纯函数，有单测锁）",
+            body.any { it.contains("SessionTiming.setupMs(") } &&
+                body.any { it.contains("SessionTiming.liveMs(") })
+    }
+
+    // D8：失去连通必须单独记一格，首次连通时刻不得被抹掉
+    @Test
+    fun `outage branches stamp the lost instant`() {
+        for (anchor in listOf(
+            "PeerConnection.IceConnectionState.DISCONNECTED -> {",
+            "PeerConnection.IceConnectionState.FAILED -> {",
+        )) {
+            val branch = window(webrtc(), anchor, 12)
+            assertTrue("$anchor 清零 connectedSinceMs 时必须记下 mediaLostAtMs",
+                branch.any { it.contains("mediaLostAtMs = android.os.SystemClock.elapsedRealtime()") })
+        }
+        assertTrue("首次连通必须记下会话内永不清零的 mediaConnectedAtMs",
+            window(webrtc(), "if (!wasConnected) {", 8).any { it.contains("mediaConnectedAtMs = now") })
+    }
+
+    // D9：断连期埋点必须能在复活后到达服务器——米15 接不了 adb，这是它唯一的远程取证通路
+    @Test
+    fun `blind window events are queued locally and drained on reconnect`() {
+        val body = window(selfCheck(), "private fun sendDiag(", 16)
+        assertTrue("发不出去必须入队，否则断连那一刻的证据永久丢失",
+            body.any { it.contains("DiagBacklog.enqueue(") })
+        val backlog = source("app/src/main/java/com/soul2soul/app/util/DiagBacklog.kt")
+        assertTrue("补报队列不得自己发起连接（收尾路径拖出重连会放大断连）",
+            backlog.none { it.contains(".connect(") })
+        assertTrue("重放必须复用线上已认识的 diag.event 通道（服务器零改动）",
+            backlog.any { it.contains("Presence.client.send(\"diag.event\")") })
+        assertTrue("信令复活必须补报",
+            source("app/src/main/java/com/soul2soul/app/session/PresenceService.kt")
+                .any { it.contains("DiagBacklog.flush(") })
     }
 }

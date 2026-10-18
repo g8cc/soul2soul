@@ -89,14 +89,17 @@ object SelfCheck {
 
     private fun sendDiag(ctx: Context, type: String, body: JSONObject) {
         Log.d("S2S-Diag", "$type $body")
-        runCatching {
-            // 会话结束时信令可能已经断了：断线期间不上报，避免在关闭路径里排队重连
+        val sent = runCatching {
             if (Presence.client.isConnected) {
                 Presence.client.send(type) {
                     body.keys().forEach { k -> put(k, body.get(k)) }
                 }
-            }
-        }
+            } else false
+        }.getOrDefault(false)
+        // 发不出去就进本地补报队列（DiagBacklog 只写文件，不碰 socket、不触发重连）。
+        // 断连那一刻正是唯一需要证据的时刻：v0.2.57 之前这里直接 return，
+        // 于是"米15 锁屏后干了什么"在生产日志里是空的。
+        if (!sent) DiagBacklog.enqueue(ctx, type, body)
     }
 
     /** 本 App 是否有 Activity 在前台：Android 14+ 后台起屏幕采集会被系统拒绝，这是断连排查的分叉点 */
