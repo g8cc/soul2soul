@@ -13,6 +13,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { WebSocketServer, WebSocket } from 'ws';
 import { buildIceServers } from './turn.js';
+import { QUIET_TYPES, redactSecrets } from './logpolicy.js';
 import { PairCodeBook } from './pairing.js';
 import { MessageBook } from './messages.js';
 import { RecallBook } from './recall.js';
@@ -33,19 +34,27 @@ const PAIR_REQUEST_MIN_INTERVAL_MS = 5000;
 const INVITE_MIN_INTERVAL_MS = 2000;
 const MAX_MESSAGE_BYTES = 256 * 1024; // SDP offer 最大约 50KB，256KB 封顶（巨包在传输层即断连，不进业务代码）
 
-// ---- 统一日志出口：每行前缀本地时间 HH:MM:SS.mmm ----
+// ---- 统一日志出口：每行前缀本地时间 YYYY-MM-DD HH:MM:SS.mmm ----
 // 断连排查要把双端事件按毫秒对齐（谁先掉、掉之前最后一次协商、心跳有没有断），
 // 旧日志没有时间戳，只能靠相邻行顺序猜。这里只加前缀，不改任何行为与调用点。
+// 必须带日期：这份文件跨天连续写（无轮转），只有 HH:MM:SS 时
+// "07:23 的 close" 分不清是今天还是昨天，客户端补报的 at= 也没法对表。
 const __logTs = () => {
   const d = new Date();
   const p2 = (n) => String(n).padStart(2, '0');
-  return `${p2(d.getHours())}:${p2(d.getMinutes())}:${p2(d.getSeconds())}` +
+  return `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())} ` +
+    `${p2(d.getHours())}:${p2(d.getMinutes())}:${p2(d.getSeconds())}` +
     `.${String(d.getMilliseconds()).padStart(3, '0')}`;
 };
 for (const level of ['log', 'warn', 'error']) {
   const raw = console[level].bind(console);
   console[level] = (...args) => raw(`[${__logTs()}]`, ...args);
 }
+
+// ---- 日志档位：S2S_LOG=minimal 关掉逐帧噪声，默认 diag 保持现行详细度 ----
+// 设这个开关是为了"排查完能关"：今天想静音只能改代码上线（服务器是高风险区）。
+// 注意隐私线不随档位放开：quiet 名单里的正文任何档位都不落盘（见 send()）。
+const LOG_MINIMAL = String(process.env.S2S_LOG || 'diag').trim().toLowerCase() === 'minimal';
 
 
 // ---------- 配对关系持久化 ----------
@@ -224,14 +233,13 @@ function pairingOf(deviceId) { return pairings[deviceId] || null; }
 function peerDeviceId(deviceId) { return pairings[deviceId]?.peer || null; }
 function send(ws, obj) {
   if (ws && ws.readyState === WebSocket.OPEN) {
-    if (obj.type !== undefined) {
+    if (obj.type !== undefined && !LOG_MINIMAL) {
       // 留言正文不落日志（隐私）：与 sdp/ice 同样只记类型
       // incoming/accepted 携带 TURN 时限凭证（username/credential），同样只记类型
-      const quiet = obj.type === 'sdp' || obj.type === 'ice' ||
-        obj.type === 'incoming' || obj.type === 'accepted' ||
-        obj.type === 'msg.post' || obj.type === 'msg.new' || obj.type === 'msg.inbox';
+      // paired/pair.code 是长期重连凭证与可抢用的六位配对码，同样只记类型
+      const quiet = QUIET_TYPES.has(obj.type);
       console.log(`[relay] ${ws.deviceId || '?'} <- ${obj.type}` +
-        (quiet ? '' : ` ${JSON.stringify(obj).slice(0, 120)}`));
+        (quiet ? '' : ` ${JSON.stringify(redactSecrets(obj)).slice(0, 120)}`));
     }
     try {
       ws.send(JSON.stringify(obj));
@@ -614,8 +622,11 @@ wss.on('connection', (ws) => {
           : type === 'ice'
             ? `#${ws.iceSeen} typ=${iceCandidateType(msg.candidate)}`
             : `sessionMs=${ws.sessionAt ? Date.now() - ws.sessionAt : -1} iceSeen=${ws.iceSeen || 0}`;
-        console.log(`[call] ${type} ${ws.deviceId} -> ${peer || '-'} ${detail} ` +
-          `peerOnline=${peer ? online.has(peer) : false}`);
+        // sdp/ice 逐帧行是日志体积的大头（一次协商几十条），S2S_LOG=minimal 时只留 bye
+        if (!LOG_MINIMAL || type === 'bye') {
+          console.log(`[call] ${type} ${ws.deviceId} -> ${peer || '-'} ${detail} ` +
+            `peerOnline=${peer ? online.has(peer) : false}`);
+        }
         if (peer) send(online.get(peer), msg);
         break;
       }
@@ -642,12 +653,21 @@ wss.on('connection', (ws) => {
       }
 
       case 'app.version': {
-        console.log(`[diag.version] ${ws.deviceId} code=${msg.localCode} name=${msg.localName} remote=${msg.remoteCode}/${msg.remoteName} update=${msg.hasUpdate}`);
+        // 客户端可控字符串必须过滤：裸插一个含换行的 model/name 就能伪造任意日志行
+        console.log(`[diag.version] ${ws.deviceId} code=${safeNum(msg.localCode)} ` +
+          `name=${safeTag(msg.localName, 16)} remote=${safeNum(msg.remoteCode)}/${safeTag(msg.remoteName, 16)} ` +
+          `update=${safeBool(msg.hasUpdate)}`);
         break;
       }
       case 'app.diag': {
         // 会话能力自检矩阵（机型/系统/权限）：跨机型问题远程定位用，只含公开设备信息
-        console.log(`[diag.selfcheck] ${ws.deviceId} role=${msg.role} model=${msg.model} brand=${msg.brand ?? '-'} os=${msg.os}/sdk${msg.sdk} rom=${msg.rom ?? '-'} app=${msg.app} notif=${msg.notif} overlay=${msg.overlay} acc=${msg.acc} accConnected=${msg.accConnected ?? '-'} accGestureCap=${msg.accGestureCap ?? '-'} mic=${msg.mic} battery=${msg.battery} ctl=${msg.ctlAllowed ?? msg.ctlSupported ?? '-'}`);
+        console.log(`[diag.selfcheck] ${ws.deviceId} role=${safeTag(msg.role, 16)} ` +
+          `model=${safeTag(msg.model, 32)} brand=${safeTag(msg.brand ?? '-', 16)} ` +
+          `os=${safeTag(msg.os, 12)}/sdk${safeNum(msg.sdk)} rom=${safeTag(msg.rom ?? '-', 24)} ` +
+          `app=${safeTag(msg.app, 16)} notif=${safeBool(msg.notif)} overlay=${safeBool(msg.overlay)} ` +
+          `acc=${safeBool(msg.acc)} accConnected=${safeBool(msg.accConnected)} ` +
+          `accGestureCap=${safeBool(msg.accGestureCap)} mic=${safeBool(msg.mic)} ` +
+          `battery=${safeBool(msg.battery)} ctl=${safeBool(msg.ctlAllowed ?? msg.ctlSupported)}`);
         break;
       }
       default: break;

@@ -1,0 +1,16 @@
+# 生产日志轮转（批准部署时安装：cp 到 /etc/logrotate.d/soul2soul）
+# 现状：/opt/soul2soul/server/start.sh 是 `nohup node >> server.log`，机器上没有
+# soul2soul 的 logrotate 条目 → 文件只增不减。主机根分区已用 90%（剩 3.8G），
+# 排查期一旦把日志打开就更涨，所以"开关"和"轮转"要一起上，不能只上开关。
+#
+# copytruncate 的理由：node 进程持有 fd，在不用信号重启的前提下先复制再截断。
+/opt/soul2soul/server/server.log {
+    weekly
+    size 20M
+    rotate 6
+    missingok
+    notifempty
+    copytruncate
+    compress
+    delaycompress
+}
