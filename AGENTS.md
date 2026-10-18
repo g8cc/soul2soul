@@ -93,6 +93,14 @@ v0.2.44 悬浮球丢失后立的规矩——多轮"稳定性审计"仍漏了一�
 - **一轮复现后先看 `bash scripts/repro-capture.sh summary`**，它按 `docs/PROTOCOL.md` 的
   `DIAG-EVENT-NAMES` 清单逐条列"响了/没响"，不再靠人肉逐条 grep。清单是唯一权威：
   新增事件名不写进那一行，t1 的 `DiagEventRegistryTest` 直接红。
+  summary 会把**实时行**与**补报副本**（带 `at_`）分开标出，因为补报是"至少一次"投递：
+  同一事件可能在断网后既有一条实时、又有一条 `at_` 副本。数发生次数用 `总数 - 副本数`，
+  或直接数不同的 `k=`（10-18 真机那轮 heartbeat 合并计数 4 条、其实只跳了 3 次）。
+- **"强制手段造出来的只是可达性测试"这句话有适用范围，别一刀切**：判据是**脚本触发的是"事件"还是"ROM 的决策"**。
+  `svc wifi disable` 在真机上触发的是事件本身，而断网→换网→socket 死仍由系统走它自己那条路（Mi10 实测出
+  `net_type from_wifi_to_cell` 与 `signaling_down`，这条是真读数）；反过来 `cmd deviceidle enter`、
+  `am set-standby-bucket` 触发的是**决策**（Doze 该不该进、bucket 该不该掉），ROM 自己会不会这么做脚本管不了，
+  对应格子必须保持 `⬜`。
 - **`heartbeat` 的缺口本身就是判据**：连续两条 `k=`（elapsedRealtime 秒，单调锚点）读数差 > 2×300s 说明进程被冻或被杀，
   不需要额外事件；日志侧这一格渲染成 `k_…`（safeTag 磨平等号与逗号）。设备墙钟不可信（实测 Mi5 慢 ~10.5h），任何"间隔"都不许用 wall-clock 相减。
 - **模拟器出数只算"通路证据"，不算"真机验证"**：`docs/AUDIT-MATRIX.md` §8 里 `PASS(模)` 是故意留的记号——
