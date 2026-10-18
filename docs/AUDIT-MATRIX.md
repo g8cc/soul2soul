@@ -117,21 +117,24 @@
 ## 8. 待机与遥测覆盖（v0.2.59 StandbyProbe / diag.event role=standby）
 
 状态：`未配对` / `配对·亮屏待机` / `配对·锁屏待机` / `配对·Doze` / `会话中`。
-格子判据是**"这一格在服务器日志里真的出过数"**，不是"代码里埋了"——所以本表几乎全是 `⬜`，
-这是如实而非漏填：0.2.59 尚未装机，米15 又接不了 adb，唯一能填的路径是发版后她正常用一次。
-`⬜` 后的括号写清"缺哪一次采样"，复现后用 `scripts/repro-capture.sh summary` 一次性对照。
+格子判据是**"这一格在服务器日志里真的出过数"**，不是"代码里埋了"。
+10-18 起本机 dev server + 双模拟器（API34）已把**通路**那一半填掉：凡标 `PASS(模)` 的都是模拟器真出过数，
+**它只证明"埋点会出数"，不证明"米15 上也是这样"**——所以米15/HyperOS 特有的判据（自然掉档、真 Doze、
+被 ROM 杀、锁屏掉线的 `detail=at_`）一律保持 `⬜` 并写清缺哪一次采样，复现后用 `scripts/repro-capture.sh summary` 一次性对照。
+0.2.59 尚未装机（发版待用户点头），`PASS(模)` 的列都注明了是怎么造出来的（强制手段不等于真机行为）。
 
 | 事件＼状态 | 未配对 | 配对·亮屏待机 | 配对·锁屏待机 | 配对·Doze | 会话中 |
 |---|---|---|---|---|---|
-| 信令 socket 死（`signaling_down`/`signaling_up`） | ⬜ 结构性不可见：`diag.*` 在未鉴权连接上被服务器丢弃（index.js 的 authed 门），**零采样是设计不是坏**（读日志口径见 AGENTS.md） | ⬜ 缺一次"配对亮屏静置 + 服务器重启"的 down/up 对（v0.2.57 已有 downMs，本次新增 `n=/d=` 网络与 Doze 同屏） | ⬜ 缺米15 锁屏掉线的 down→up 一对（今日 `detail=at_` 0 命中，正是本轮要证的通路） | ⬜ 缺 Doze 进入后的第一条 down（判"Doze 杀 socket"与"网络切换杀 socket"是否同一条路径） | ⬜ 会话期信令死亡是否也补报（`BacklogTiers` P0 配额下理论上必留，待真机日志确认） |
-| 屏幕开关（`screen_off`/`screen_on`） | ⬜ 同「未配对」口径：receiver 在跑但报文出不了未鉴权连接 | ⬜ 缺一次非会话期亮屏事件（v0.2.59 起 receiver 不再 gated `if live`，这是本轮新增，未验） | ⬜ 缺米15 锁屏瞬间的 `screen_off`（`live=false` 那条=待机证据链第一环） | ⬜ Doze 期屏幕本已灭，只缺"灭屏后再次边沿"是否被 ROM 吞掉（若无事件=冻结，非埋点坏） | PASS（既有）：会话期 screen_on/off 自 0.2.4x 起在生产日志有采样；共享端已由 `ScreenShareService` 报，StandbyProbe 用 `skipScreenEvent` 避免同一时刻两条真值（StandbyPolicyTest 锁） |
-| 网络切换（`net_up`/`net_down`/`net_type`） | ⬜ 未配对期间无通路（同上） | ⬜ 缺 Mi5/Mi10 本机一次 Wi-Fi↔蜂窝切换（本轮唯一能自验的一格，step 7 真机清单第 ③ 项） | ⬜ 缺米15 锁屏后是否报 net_*（与"待机断连"的差分判据） | ⬜ 缺 Doze 断网时 net_down 是否到得了——**到不了本身就是要的答案**（Doze 冻结 binder 回调） | ⬜ 会话期网络切换（`registerDefaultNetworkCallback` 与 ICE restart 是否互相掩盖，待日志） |
-| Doze 进出（`doze_on`/`doze_off`） | ⬜ 无通路 | ⬜ 亮屏待机通常进不了 Doze，此格预期长期为空（不许为凑数改成轮询上报） | ⬜ 缺锁屏后 `doze_on` 的时刻与 `signaling_down` 的先后 | ⬜ 缺 `doze_off`（解锁即报；只有 on 没有 off = 进程被冻在 Doze 里） | ⬜ 会话中主动 `isDeviceIdleMode` 取样的对照（当前只在边沿报，会话期无读数） |
-| App standby bucket 降级（`bucket_*`） | ⬜ 无通路 | ⬜ 缺一次 `bucket_act→bucket_wset` 边沿（60s 轮询 + 边沿去重，StandbyPolicyTest 锁名字映射） | ⬜ 缺 HyperOS 锁屏后是否降到 `bucket_rare`/`bucket_rst`——**这是米15 待机断网最直接的自证** | ⬜ 缺 Doze 与 bucket 降级的因果顺序（哪条先出现） | ⬜ 会话期 bucket 是否被顶回 active（若顶回，说明 FGS 改变了 bucket，属副作用需知） |
-| 进程被杀（`aexit`，AEI 首读） | ⬜ 未配对时不存在"上一轮被杀"的可读语境（且无通路） | ⬜ 缺一次"杀进程→重开 App→连上信令"的 `aexit detail=r=<n>`（API 30 守卫，Mi5 API24/25 不报，须如实标注不可覆盖） | ⬜ 缺米15 被 ROM 杀后首次连上的 `r=`（`REASON_SIGNALED`/`REASON_LOW_MEMORY`/`REASON_USER_STOPPED` 三选一就是最终答案） | ⬜ Doze 与 kill 的区分（此前完全不可知，本轮新增） | ⬜ 会话中不会发生（AEI 只在首次 connected 读一次，设计如此，不追轮询） |
-| 心跳缺口（`heartbeat` 的 `k=` 单调锚点，日志侧渲染成 `k_…`） | ⬜ 未配对不发（`StandbyPolicy.shouldHeartbeat` 要求 paired，单测锁） | PASS（策略层）：300s 一条、会话中不发、未配对不发——StandbyPolicyTest 逐条锁且回滚变红；⬜ 但服务器侧"连续两条 `k=` 差 >2×300s"的缺口判据零采样 | ⬜ 缺锁屏待机的完整序列（缺口即"进程被冻/被杀"，无需额外事件） | ⬜ 缺 Doze 后的缺口长度分布（本轮核心待证格） | PASS（策略层）：会话中 `shouldHeartbeat=false` ⇒ 不产噪声；真实日志里会话期无 heartbeat 待复现确认 |
-| QoS 出会话（`qos_tick`/`qos_bad`/`gather_done`） | N-A（WebRtcClient 未创建） | N-A（无 PeerConnection） | N-A（同左） | N-A（同左） | ⬜ 每 10s 一条 + 异常插一条：单测锁（QosAnomalyTest 9 条 + DiagDetailTest clamp），⬜ 真机 64 字节截断与 `x`（无读数）渲染待一次共享实测 |
-| 补报通路（`detail=at_` + `backlog_drop`） | N-A（无队列消费者） | ⬜ 队列在配对期即在写（DiagBacklog 不筛会话），缺一次"亮屏期断连→重连"的 `at_` 命中 | ⬜ 核心待证：10-18 全天 `detail=at_` 0 命中，本轮改动后必须出现，否则按 §5 先修通路不许改业务 | ⬜ 缺 P0 不被 qos_tick/heartbeat 挤掉的实证（BacklogTierTest 只在 JVM 证了淘汰顺序） | ⬜ 缺一次抖动期多批排空（5 批=100 条）实证 |
+| 信令 socket 死（`signaling_down`/`signaling_up`） | ⬜ 结构性不可见：`diag.*` 在未鉴权连接上被服务器丢弃（index.js 的 authed 门），**零采样是设计不是坏**（读日志口径见 AGENTS.md） | PASS(模)：10-18 14:42 `svc wifi/data disable` 25s 后恢复 ⇒ `signaling_down` 带 `at_` 到达、`signaling_up` 带 `downMs_3019 n_cell d_x`（新增两字段出数） | ⬜ 缺米15 锁屏掉线的 down→up 一对（今日生产日志 `detail=at_` 仍 0 命中，正是要证的通路） | ⬜ 缺 Doze 进入后的第一条 down（判"Doze 杀 socket"与"网络切换杀 socket"是否同一条路径） | ⬜ 会话期信令死亡是否也补报（`BacklogTiers` P0 配额下理论上必留，待真机日志确认） |
+| 屏幕开关（`screen_off`/`screen_on`） | ⬜ 同「未配对」口径：receiver 在跑但报文出不了未鉴权连接 | PASS(模)：非会话期 `screen_off detail=live_0_k_3032`（receiver 不再 gated `if live` 这一改动已出数） | PASS(模)：同一台熄屏静置 8 分钟，`screen_off(14:50:17)`→`screen_on(14:58:17)` 一对齐全 | ⬜ Doze 期屏幕本已灭，只缺"灭屏后再次边沿"是否被 ROM 吞掉（若无事件=冻结，非埋点坏） | PASS（既有）：会话期 screen_on/off 自 0.2.4x 起在生产日志有采样；StandbyProbe 用 `skipScreenEvent` 避免同一时刻两条真值（StandbyPolicyTest 锁） |
+| 网络切换（`net_up`/`net_down`/`net_type`） | ⬜ 未配对期间无通路（同上） | PASS(模)：14:42 断网→恢复 ⇒ 服务器首次收到 `net_down detail=at_…_n_cell_k_2626` + `net_up`（`at=` 严格升序）；⬜ `net_type` 零采样（要一次真实换网且前后 transport 代号不同，模拟器只有一张网卡） | ⬜ 缺米15 锁屏后是否报 net_*（与"待机断连"的差分判据） | ⬜ 缺 Doze 断网时 net_down 是否到得了——**到不了本身就是要的答案**（Doze 冻结 binder 回调） | ⬜ 会话期网络切换（`registerDefaultNetworkCallback` 与 ICE restart 是否互相掩盖，待日志） |
+| Doze 进出（`doze_on`/`doze_off`） | ⬜ 无通路 | ⬜ 亮屏待机通常进不了 Doze，此格预期长期为空（不许为凑数改成轮询上报） | PASS(模)：14:13 `cmd deviceidle enter` 逼出 `doze_on k_828/k_904`（两台、screenOn=false），14:16 `doze_off` 成对回来；**强制 ≠ 自然**，真机自发 Doze 仍 ⬜ | ⬜ 缺 HyperOS 自然 Doze 的时刻与 `signaling_down` 的先后 | ⬜ 会话中主动 `isDeviceIdleMode` 取样的对照（当前只在边沿报，会话期无读数） |
+| App standby bucket 降级（`bucket_*`） | ⬜ 无通路 | PASS(模)：`am set-standby-bucket` 逼出整条链 `rare(prev=10)`→`rst(prev=40)`→`wset(prev=45)`→`act(prev=20)`，五档名字与 `prev=` 两两自洽（45 那格修对的直接证据） | ⬜ 缺 HyperOS 锁屏后是否**自然**降到 `bucket_rare`/`bucket_rst`——**这是米15 待机断网最直接的自证**；模拟器静置 8 分钟 `b` 恒 10，顶不出这一格 | ⬜ 缺 Doze 与 bucket 降级的因果顺序（哪条先出现） | ⬜ 会话期 bucket 是否被顶回 active（若顶回，说明 FGS 改变了 bucket，属副作用需知） |
+| 进程被杀（`aexit`，AEI 首读） | ⬜ 未配对时不存在"上一轮被杀"的可读语境（且无通路） | PASS(模)：`am force-stop`→重开→连上信令 ⇒ `r_10_i_100_a_0`；`adb install -r` ⇒ `r_16_i_125_a_0`（两条实测读数已写进 PROTOCOL 供校准）；⬜ Mi5（API24/25）结构性不报，不许当"已覆盖" | ⬜ 缺米15 被 ROM 杀后首次连上的 `r=`（`REASON_SIGNALED`/`REASON_LOW_MEMORY`/`REASON_FREEZER` 三选一就是最终答案） | ⬜ Doze 与 kill 的区分（此前完全不可知，本轮新增） | ⬜ 会话中不会发生（AEI 只在首次 connected 读一次，设计如此，不追轮询） |
+| 保活锁（`wake_ok`/`wake_off`/`wake_fail` + 心跳里的 `w=`） | ⬜ 无通路 | **10-18 抓到的第二个"读数撒谎"**：`updateWakeLock()` 排在 `StandbyProbe.start()` 之前 ⇒ 首次 acquire 落在 `running=false` 上，`wake_ok` 全日志 0 条且心跳里 `w` 恒 0（锁其实拿着）。修顺序后 PASS(模)：15:00 两台各一条 `wake_ok`（一条直发、一条经补报带 `at_`）；⬜ `w_1` 的心跳对照、`wake_off`、`wake_fail` 三条仍零采样 | ⬜ 缺锁屏期"锁还在不在"的正证（HyperOS 释放自研锁 = 睡死的首要候选，只能真机） | ⬜ Doze 期锁与冻结的区分 | ⬜ 会话期是否被 `ScreenShareService` 的锁覆盖（两把锁的语义要分开读） |
+| 心跳缺口（`heartbeat` 的 `k=` 单调锚点，日志侧渲染成 `k_…`） | ⬜ 未配对不发（`StandbyPolicy.shouldHeartbeat` 要求 paired，单测锁） | PASS(模)：`k` 逐条 +300 单调秒、`g_300` 自洽（StandbyPolicyTest 锁"会话中/未配对不发"且回滚变红） | PASS(模)：熄屏静置 8 分钟里 `heartbeat k_3309 g_x` 准点到达 ⇒ **"待机一句话都不说"这个原始病灶已反证** | ⬜ 缺"连续两条 `k=` 差 >2×300s"的**缺口**实证（本轮核心待证格：缺口才是被冻/被杀的判据，模拟器不会冻） | PASS（策略层）：会话中 `shouldHeartbeat=false` ⇒ 不产噪声；真实日志里会话期无 heartbeat 待复现确认 |
+| QoS 出会话（`qos_tick`/`qos_bad`/`gather_done`） | N-A（WebRtcClient 未创建） | N-A（无 PeerConnection） | N-A（同左） | N-A（同左） | ⬜ 每 10s 一条 + 异常插一条：单测锁（QosAnomalyTest 9 条 + DiagDetailTest clamp），⬜ 真机 64 字节截断与 `x`（无读数）渲染待一次共享实测（本机 `.env` TURN 是占位值、模拟器 ICE 打不通，`ice_failed` 已能出数即是佐证） |
+| 补报通路（`detail=at_` + `backlog_drop`） | N-A（无队列消费者） | PASS(模)：15:00 `wake_ok detail=at_…` 走的是"连接前入队、复活后排空"这条路 | **PASS(模)**：14:42 死亡窗口四条 `at_` 严格升序到达 ⇒ 通路已通；⬜ 米15 生产侧 `detail=at_` 仍 0 命中（那是"待证"，不是"通路坏"） | ⬜ 缺 P0 不被 qos_tick/heartbeat 挤掉的实证（BacklogTierTest 只在 JVM 证了淘汰顺序） | ⬜ 缺一次抖动期多批排空（5 批=100 条）实证；`backlog_drop` 需 P0 超 150 条才出现，仍零采样 |
 
 ---
 维护规则（AUDIT.md §5）：每关一条真机 bug，本表加一行/填一格并登记 gate；新有状态功能上线前必须先有 §表头，格子可以 ⬜，表不能没有。
