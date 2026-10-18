@@ -90,6 +90,10 @@ class PresenceService : Service() {
         }
     }
 
+    // 待机期（无会话）信令只按"翻转"自报：一次断连一条 down、复活一条 up。
+    // 不加这个门，Doze 里每 30s 退避重连一次 = 120 条/小时噪声，真正的 outage 形状反而读不出来。
+    @Volatile private var standbySigDown = false
+
     /**
      * 息屏保活锁：锁屏断连根因是 CPU 进 doze 睡死后回不了服务器 ping 的 pong（30s 即被 terminate）。
      * 仅配对时持有；acquire 必须带超时——MIUI 异常杀进程时 onDestroy 不执行，无超时=永久漏锁耗电。
@@ -101,15 +105,30 @@ class PresenceService : Service() {
             .apply { setReferenceCounted(false) }
     }
 
-    /** 信令掉线/复活的自报。downStartMs>0 才是"从断口复活"；首连不许报 downMs=0 这种假长度 */
-    private fun reportSignaling(event: String, attempt: Int, downStartMs: Long) {
-        val detail = "reconnectAttempt=$attempt" +
-            if (downStartMs > 0L) " downMs=${System.currentTimeMillis() - downStartMs}" else ""
+    /**
+     * 信令掉线/复活的自报。downStartMs>0 才是"从断口复活"；首连不许报 downMs=0 这种假长度。
+     *
+     * detail 预算：补报会加 `at=<13位毫秒> ` 前缀，服务器再过 `safeTag` **静默**截到 64
+     * ⇒ 可用只有 ~47。所以 reconnectAttempt 封顶两位数、downMs 封顶 7 位，省下的位数给
+     * 网络/Doze 快照：一次复活同时看到"断了多久"和"当时是不是在 Doze"，比第 105 次重连这个数字有用得多。
+     */
+    private fun reportSignaling(event: String, attempt: Int, downStartMs: Long, role: String) {
+        val detail = "reconnectAttempt=${attempt.coerceAtMost(99)}" +
+            (if (downStartMs > 0L)
+                " downMs=${(System.currentTimeMillis() - downStartMs).coerceAtMost(9_999_999L)}" else "") +
+            com.soul2soul.app.util.StandbyProbe.signalingFlags()
         com.soul2soul.app.util.SelfCheck.reportEvent(
             this,
-            if (ScreenShareService.isRunning()) "sharer" else "viewer",
+            role,
             event, "-", detail
         )
+    }
+
+    /** 会话期/待机期都算不出"角色"的地方不许硬写 viewer：待机掉线被读成观看端掉线就是这个坑 */
+    private fun signalRole(): String = when {
+        ScreenShareService.isRunning() -> "sharer"
+        Presence.sessionBusy -> "viewer"
+        else -> "standby"
     }
 
     private val wakeReArm = Runnable { updateWakeLock(Prefs.paired(this)) }
@@ -117,11 +136,17 @@ class PresenceService : Service() {
     private fun updateWakeLock(keepAlive: Boolean) {
         handler.removeCallbacks(wakeReArm)
         if (keepAlive) {
-            if (wakeLock.isHeld) wakeLock.release() // 非计数锁：重获以刷新超时
-            wakeLock.acquire(WAKELOCK_TIMEOUT_MS)
-            handler.postDelayed(wakeReArm, WAKE_REARM_MS)
+            // acquire 结果必须出数：「她那边锁到底拿到没有」是"CPU 睡死 vs 网络真断"的分叉点，
+            // 而这条路径此前只有一行无声的 acquire
+            val ok = runCatching {
+                if (wakeLock.isHeld) wakeLock.release() // 非计数锁：重获以刷新超时
+                wakeLock.acquire(WAKELOCK_TIMEOUT_MS)
+            }
+            com.soul2soul.app.util.StandbyProbe.onWakeLock(held = ok.isSuccess, failed = ok.isFailure)
+            if (ok.isSuccess) handler.postDelayed(wakeReArm, WAKE_REARM_MS)
         } else if (wakeLock.isHeld) {
             wakeLock.release()
+            com.soul2soul.app.util.StandbyProbe.onWakeLock(held = false, failed = false)
         }
     }
 
@@ -162,6 +187,8 @@ class PresenceService : Service() {
                         reconnectAttempt = 0
                         // 断连期间攒下的埋点在复活后补报（hello 已先发，服务器按到达顺序处理，authed 成立）
                         com.soul2soul.app.util.DiagBacklog.flush(this@PresenceService)
+                        // 上一轮进程的死因（ApplicationExitInfo）只有此刻才可能发得出去，且只读一次
+                        com.soul2soul.app.util.StandbyProbe.reportPreviousExit(this@PresenceService)
                     } else {
                         // 指数退避: 3s, 6s, 12s ... 上限 30s，避免服务端故障时打爆
                         val delay = (RECONNECT_BASE_MS shl reconnectAttempt.coerceAtMost(4))
@@ -169,20 +196,28 @@ class PresenceService : Service() {
                         reconnectAttempt += 1
                         handler.postDelayed(reconnectRunner, delay)
                     }
-                    // 会话期间的信令断/续：用来差分"媒体还活着但信令掉了"与"两边一起断"。
-                    // 无会话不报，否则待机期每次重连都是噪声
-                    if (Presence.sessionBusy) {
-                        // signaling_down 自己发不出去（SelfCheck.sendDiag 要求 socket 已连），它只进本机
-                        // logcat；所以"断了多久"必须由复活那一条带上来，否则服务器侧永远缺这一格。
-                        if (connected) {
-                            val down = signalingDownSinceMs
-                            signalingDownSinceMs = 0L
-                            reportSignaling("signaling_up", reconnectAttempt, down)
-                        } else {
-                            if (signalingDownSinceMs == 0L) {
-                                signalingDownSinceMs = System.currentTimeMillis()
-                            }
-                            reportSignaling("signaling_down", reconnectAttempt, 0L)
+                    // 信令断/续自报。此前只在会话期报 ⇒ 「待机 socket 到底死了多久」在服务器上
+                    // 至今是一格空白（10-18 那 9 次 pong 超时全部只能从服务端日志反推）。
+                    // 现在两条路都报，但待机期只报翻转：Doze 里每 30s 一次退避重连不能刷成噪声。
+                    if (connected) {
+                        val down = signalingDownSinceMs
+                        signalingDownSinceMs = 0L
+                        if (Presence.sessionBusy) {
+                            reportSignaling("signaling_up", reconnectAttempt, down, signalRole())
+                        } else if (standbySigDown) {
+                            standbySigDown = false
+                            reportSignaling("signaling_up", reconnectAttempt, down, "standby")
+                        }
+                        // 待机首连不发：那是每次冷启动都会有的常量事件，heartbeat 已覆盖"活着"
+                    } else {
+                        if (signalingDownSinceMs == 0L) {
+                            signalingDownSinceMs = System.currentTimeMillis()
+                        }
+                        if (Presence.sessionBusy) {
+                            reportSignaling("signaling_down", reconnectAttempt, 0L, signalRole())
+                        } else if (!standbySigDown) {
+                            standbySigDown = true
+                            reportSignaling("signaling_down", reconnectAttempt, 0L, "standby")
                         }
                     }
                 }
@@ -194,6 +229,9 @@ class PresenceService : Service() {
             connect()
             // wakelock 必须在 startForeground 之后才允许持有（服务真正前台，防 FGS 起失败漏锁）
             updateWakeLock(Prefs.paired(this))
+            // 待机遥测：未配对期 diag.* 会被服务器在未鉴权 socket 上直接丢弃，所以只在配对期开
+            // （不是"埋了坏了"——10-18 复核过这条口径，读日志时未配对期必然为空）
+            if (Prefs.paired(this)) com.soul2soul.app.util.StandbyProbe.start(this)
         }
     }
 
@@ -204,6 +242,11 @@ class PresenceService : Service() {
         if (wakeLock.isHeld) wakeLock.release() // acquire 的对偶出口（穷举 restore）
         scope.cancel()
         com.soul2soul.app.msg.InboxStore.removeListener(inboxListener)
+        // 主动退出必须和"被 ROM 杀"分得开：close() 之前发——socket 还在就当场出去，
+        // Doze 下 TCP 已死就进补报队列，复活时带 at_ 出来（诚实说明：这条只能证明"她退出了/服务被停"，
+        // 不会改变今天 0/40 条 code=1000 的分布，那批是 TCP 先亡）
+        com.soul2soul.app.util.SelfCheck.reportEvent(this, signalRole(), "app_exit", "-", "why=destroy")
+        com.soul2soul.app.util.StandbyProbe.stop(this)
         Presence.sessionBusy = false
         Presence.client.close()
         started = false
@@ -278,6 +321,8 @@ class PresenceService : Service() {
                     Presence.client.setPairToken(it)
                 }
                 updateWakeLock(true)
+                // 配对成功即打开待机遥测（start 幂等）：从此"锁屏静置"这一段不再是无因黑箱
+                com.soul2soul.app.util.StandbyProbe.start(this)
             }
             "unpaired" -> {
                 // 对端解绑（或自己发起后服务端确认）：清除本地配对与令牌
@@ -285,6 +330,10 @@ class PresenceService : Service() {
                 Prefs.setPairToken(this, null)
                 Presence.client.setPairToken(null)
                 com.soul2soul.app.msg.InboxStore.clear()
+                com.soul2soul.app.util.SelfCheck.reportEvent(this, "standby", "app_exit", "-", "why=unpair")
+                // stop 是 start 的对偶出口：解绑后没有呼叫需求，心跳与传感器必须一起关掉，
+                // 否则未配对期会攒出一堆发不出去的排队事件（还占补报队列配额）
+                com.soul2soul.app.util.StandbyProbe.stop(this)
                 updateWakeLock(false) // 解除配对即无呼叫需求，息屏保活锁同步释放
             }
             "pair.recall_ask" -> {

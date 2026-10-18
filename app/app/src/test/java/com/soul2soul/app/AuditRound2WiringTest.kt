@@ -30,6 +30,19 @@ class AuditRound2WiringTest {
         return lines.drop(i).take(n)
     }
 
+    /**
+     * 取两个锚点之间的整段（含起锚、不含止锚）。
+     * 行数窗口在长方法里会腐烂：往 onCreate 里加一行埋点就能让"锁必须在 startForeground 之后"
+     * 这条真成立的不变式假红，反过来也会假绿（窗口切在关键行之前）。
+     */
+    private fun between(lines: List<String>, start: String, end: String): List<String> {
+        val i = lines.indexOfFirst { it.contains(start) }
+        val j = lines.indexOfFirst { it.contains(end) }
+        assertTrue("找不到起锚 $start", i >= 0)
+        assertTrue("找不到止锚 $end", j > i)
+        return lines.subList(i, j)
+    }
+
     @Test
     fun `controlMode writes go only through applyControlMode`() {
         val lines = sessionSource()
@@ -148,7 +161,7 @@ class AuditRound2WiringTest {
         // 防 FGS 起失败却先持锁导致永久漏锁：onCreate 里 acquire 收口到 updateWakeLock，
         // 且必须在 startForeground 之后调用
         val lines = presenceSource()
-        val body = linesAfter(lines, { it.contains("override fun onCreate") }, 60)
+        val body = between(lines, "override fun onCreate", "override fun onStartCommand")
         val fg = body.indexOfFirst { it.contains("startForeground(") }
         val lock = body.indexOfFirst { it.contains("updateWakeLock(") }
         assertTrue("onCreate 必须按配对状态收口 wakelock", lock >= 0)
@@ -170,9 +183,11 @@ class AuditRound2WiringTest {
         val destroy = linesAfter(lines, { it.contains("override fun onDestroy") }, 8)
         assertTrue("onDestroy 必须 release 锁（acquire 的对偶出口）",
             destroy.any { it.contains("wakeLock.release()") })
-        val unpaired = linesAfter(lines, { it.contains("\"unpaired\" ->") }, 10)
+        val unpaired = between(lines, "\"unpaired\" ->", "\"pair.recall_ask\" ->")
         assertTrue("解绑后立即释放 wakelock（hideX 必穷举 restoreX）",
             unpaired.any { it.contains("updateWakeLock(false)") })
+        assertTrue("解绑必须同时关掉待机遥测（start 的对偶出口，否则未配对期攒一堆发不出去的事件）",
+            unpaired.any { it.contains("StandbyProbe.stop(") })
     }
 
     @Test

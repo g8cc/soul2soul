@@ -60,6 +60,12 @@ object SelfCheck {
      * 会话结束自报。服务器看不到 WebRTC 媒体，"谁把这条会话关掉的、为什么"只能靠双端自报；
      * 没有它，对方手机不在手边时断连就只能猜（v0.2.54 后 Mi15 发起 4~6 秒即断，就是卡在这一步）。
      * 只报枚举名与标量，不含任何用户内容。
+     *
+     * `path`（选路，如 `host->srflx`）与 `proj`（结束时屏幕采集还在不在）是服务器
+     * `[diag.session]` 一直在打的两个字段（`server/src/index.js:639,641`），但客户端从未 put 过，
+     * 于是 10-18 生产日志 4/4 条都是 `path=_ proj=_`：P2P 还是 TURN 转发、采集有没有被 ROM 拆掉，
+     * 全读不出来。默认值 `-` 是故意的——调用方漏传会留下 `-` 而不是假装有数据，
+     * 而 `StandbyTelemetryTest` S3 直接锁住 `reportSessionEnd` 必须把两个真值传进来。
      */
     fun reportSession(
         ctx: Context,
@@ -68,15 +74,23 @@ object SelfCheck {
         ice: String,
         setupMs: Long,
         liveMs: Long,
+        path: String = "-",
+        proj: String = "-",
     ) = sendDiag(
         ctx, "diag.session", JSONObject()
             .put("role", role).put("reason", reason).put("ice", ice)
+            .put("path", path).put("proj", proj)
             .put("setupMs", setupMs).put("liveMs", liveMs)
             .put("fg", foreground(ctx)).put("screenOn", screenOn(ctx))
             .put("app", BuildConfig.VERSION_NAME)
     )
 
-    /** 会话中途的关键事件（锁屏、采集成败、画面卡死、surface 重建）：与 reportSession 同一通道 */
+    /**
+     * 会话中途的关键事件（锁屏、采集成败、画面卡死、surface 重建、待机状态翻转）：
+     * 与 reportSession 同一通道，v0.2.59 起 `role` 允许第三个值 `standby`——待机期
+     * 既不是 sharer 也不是 viewer，此前 `reportSignaling` 把它报成 `viewer`，
+     * 于是"待机掉线"在日志里长得和"观看端掉线"一模一样。
+     */
     fun reportEvent(
         ctx: Context, role: String, event: String, ice: String, detail: String? = null
     ) = sendDiag(

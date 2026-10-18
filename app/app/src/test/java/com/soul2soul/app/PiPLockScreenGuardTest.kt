@@ -34,6 +34,15 @@ class PiPLockScreenGuardTest {
         return lines.drop(i).take(size)
     }
 
+    /** 两个锚点之间的整段：onState 里每加一条埋点就会把行数窗口顶穿，改成名字锚 */
+    private fun between(lines: List<String>, start: String, end: String): List<String> {
+        val i = lines.indexOfFirst { it.contains(start) }
+        val j = lines.indexOfFirst { it.contains(end) }
+        assertTrue("找不到起锚 $start", i >= 0)
+        assertTrue("找不到止锚 $end", j > i)
+        return lines.subList(i, j)
+    }
+
     // L1：锁屏/息屏引起的 onUserLeaveHint 不许进小窗（进小窗会拆 surface，且没人重挂）
     @Test
     fun `leave hint does not enter PiP while screen is off`() {
@@ -93,7 +102,7 @@ class PiPLockScreenGuardTest {
     @Test
     fun `outage length reaches the server via the recovery event`() {
         val src = presence()
-        val onState = window(src, "override fun onState(connected: Boolean)", 30)
+        val onState = between(src, "override fun onState(connected: Boolean)", "先建立总线订阅")
         assertTrue("断线侧必须记下断口起点",
             onState.any { it.contains("signalingDownSinceMs = System.currentTimeMillis()") })
         assertTrue("复活侧必须读一次并清零（否则下一次断口会把上一次的长度算进来）",
