@@ -196,30 +196,34 @@ summary() {
     # `$(grep | awk)` 在"零命中"时整条管道返回 1，set -e 会让 summary 静默中途退出
     # （实测过：清单只剩前几行就没了，看着像"事件真这么少"）。awk 恒退 0，且 41 次 grep 变 1 次扫盘。
     local rows
+    # 补报副本单独计一路：同一事件会既有一条实时又有一条 `at_`（至少一次投递，见 PROTOCOL），
+    # 只给合并总数的话，一次断网就把 heartbeat 数成 4 次，然后人就开始编故事。
     rows=$(awk -v names="$reg" '
       BEGIN { m = split(names, arr, "/")   # 顺序按 split 的下标走（for-in 的次序不保证）
               for (i = 1; i <= m; i++) if (arr[i] != "") { n++; r[n]=arr[i]; want[arr[i]]=1 } }
       {
-        if (match($0, /event=[A-Za-z0-9_]+ ice=/)) { seen[substr($0, RSTART+6, RLENGTH-11)]++; tot++ }
+        if (match($0, /event=[A-Za-z0-9_]+ ice=/)) { e = substr($0, RSTART+6, RLENGTH-11)
+               seen[e]++; tot++
+               if (index($0, "detail=at_") > 0) rep[e]++ }
         if (index($0, "[diag.session]") > 0)    { sess++
                if (index($0, "path=_ setupMs") || index($0, "path=- setupMs")) blank++ }
         # 补报口径带下划线：safeTag 把 detail 里的等号磨成 `_`，写等号就是一个 grep 不到的假口径
         if (index($0, "detail=at_") > 0) back++
       }
       END {
-        for (i = 1; i <= n; i++) { c = 0
-          if (r[i] ~ /_$/) { for (e in seen) if (index(e, r[i]) == 1) c += seen[e] }  # bucket_ 是前缀项
-          else if (r[i] in seen) c = seen[r[i]]
-          printf "%s\t%d\n", r[i], c }
+        for (i = 1; i <= n; i++) { c = 0; b = 0
+          if (r[i] ~ /_$/) { for (e in seen) if (index(e, r[i]) == 1) { c += seen[e]; b += rep[e]+0 } }  # bucket_ 是前缀项
+          else { c = seen[r[i]]+0; b = rep[r[i]]+0 }
+          printf "%s\t%d\t%d\n", r[i], c, b }
         for (e in seen) { hit = 0; if (e in want) hit = 1
           if (!hit) for (i = 1; i <= n; i++) if (r[i] ~ /_$/ && index(e, r[i]) == 1) hit = 1
-          if (!hit) printf "?%s\t%d\n", e, seen[e] }   # 日志里有、清单里没有 = 文档烂了
+          if (!hit) printf "?%s\t%d\t%d\n", e, seen[e], rep[e]+0 }   # 日志里有、清单里没有 = 文档烂了
         printf "#diag.event\t%d\n#detail=at_\t%d\n#diag.session\t%d\n#path未投影\t%d\n",
                tot+0, back+0, sess+0, blank+0 }
       ' $logs)
     echo "  事件计数（顺序 = PROTOCOL 清单顺序，按阶段分组；0 条 = 这一轮没响）"
-    local k v total=0 back=0 sess=0 blank=0 undoc=0
-    while IFS=$'\t' read -r k v; do
+    local k v b total=0 back=0 sess=0 blank=0 undoc=0
+    while IFS=$'\t' read -r k v b; do
       case "$k" in
         '#diag.event')   total=$v; continue ;;
         '#detail=at_')   back=$v; continue ;;
@@ -228,9 +232,11 @@ summary() {
       esac
       if [ "${k:0:1}" = "?" ]; then undoc=$((undoc + 1)); printf '    ! %4s  %s（不在 PROTOCOL 清单里）\n' "$v" "${k:1}"
       elif [ "$v" = "0" ]; then n_silent=$((n_silent + 1)); echo "    ·    0  $k"
+      elif [ "${b:-0}" -gt 0 ]; then printf '    ✓ %4s  %s  (其中 %s 条是补报副本)\n' "$v" "$k" "$b"
       else printf '    ✓ %4s  %s\n' "$v" "$k"; fi
     done <<< "$rows"
     echo "  合计 $total 条 diag.event；断连补报到达（detail=at_）$back 条 —— 0 条即通路仍未验证，先修通路再谈业务"
+    echo "  「补报副本」= 同一事件的第二次投递（至少一次语义，见 PROTOCOL）：数发生次数要用 总数-副本数，别把断网造成的重复读成事件变多"
     echo "  diag.session $sess 条，其中 path 未投影（_ =客户端没发；- =发了但这侧无值）$blank 条；清单外事件名 $undoc 个"
   fi
   echo "  客户端 logcat：$(find "$dir" -name 'device-*.log' -size +0 2>/dev/null | wc -l | tr -d ' ') 个非空文件"

@@ -345,6 +345,15 @@ PY
     echo "静态检查: docs/PROTOCOL.md 缺「乐观发送」盲区口径（补报只覆盖 socket 已判死后的事件，死亡窗口靠重放副本）" >&2
     fail=1
   fi
+  # 至少一次投递 = 同一事件会有"一条实时 + 一条 at_ 副本"。summary 若只给合并计数，
+  # 一次断网就能把 heartbeat 数成 4 次（10-18 真机实测就是这样），读数自己造出"心跳变密"的故事；
+  # 所以分开计数的判据 + 文档里的去重口径，两头都不许烂。
+  if ! grep -q '补报副本' "$ROOT/scripts/repro-capture.sh" 2>/dev/null ||
+     ! grep -q 'rep\[e\]++' "$ROOT/scripts/repro-capture.sh" 2>/dev/null ||
+     ! grep -q '不能把 live 与' "$ROOT/docs/PROTOCOL.md" 2>/dev/null; then
+    echo "静态检查: summary 缺「实时/补报副本」分开计数，或 PROTOCOL 缺「live 与 at_ 不相加」去重口径（合并计数会把一次事件读成两次）" >&2
+    fail=1
+  fi
   # StandbyPolicy.bucketName 的字面量表是照记忆写的，v0.2.59 第一版就把 RESTRICTED 记成 50
   # （平台 android-34/35/36 实测是 45，50 不存在）⇒ 真机掉进 restricted 会被读成"未知档"，
   # 而这正是米15 待机断网最想要的那一格。这里直接拿编译 SDK 的 android.jar 对表，凭记忆改立刻红。
