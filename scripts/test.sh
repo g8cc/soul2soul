@@ -315,6 +315,16 @@ PY
     echo "静态检查: repro-capture.sh 缺服务器日志脱敏（sed -u -E + <redacted>）或远端 grep 缺 --line-buffered（两处都要），token 会原样落本机 / 最新断连行会卡在 4KB 缓冲区被丢" >&2
     fail=1
   fi
+  # 「不再二次埋点」的交付物本身也得有锁：summary 若把事件清单写死在脚本里，
+  # 文档与判据就各自腐烂（新增的名字永远"没响"，看上去像埋点坏了）；
+  # 补报口径必须是 detail=at_ ——safeTag 把等号磨成下划线，at= 是一个 grep 不到的假口径。
+  if ! grep -q "DIAG-EVENT-NAMES:" "$ROOT/scripts/repro-capture.sh" 2>/dev/null ||
+     ! grep -q 'summary) summary' "$ROOT/scripts/repro-capture.sh" 2>/dev/null ||
+     ! grep -q 'detail=at_' "$ROOT/scripts/repro-capture.sh" 2>/dev/null ||
+     grep -q 'detail=at=' "$ROOT/scripts/repro-capture.sh" 2>/dev/null; then
+    echo "静态检查: repro-capture.sh 的 summary 必须读 docs/PROTOCOL.md 的 DIAG-EVENT-NAMES（禁止写死清单）、必须挂进 case、补报口径只能是 detail=at_" >&2
+    fail=1
+  fi
   [ "$fail" -eq 0 ]
 }
 

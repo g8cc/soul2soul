@@ -169,9 +169,80 @@ check() {
   return 2
 }
 
+# summary：一轮复现后"到底哪些埋点响了、哪些一条都没响"的一次性对照。
+# 为什么要有它：v0.2.59 把日志盲区从"会话期"扩到"待机期"，新增 20+ 个事件名，
+# 再靠人逐条 grep 就成了"二次埋点"的根因本身。事件清单不写死在这里——
+# 唯一权威是 docs/PROTOCOL.md 的 DIAG-EVENT-NAMES 机器行（t1 的
+# DiagEventRegistryTest 锁"代码发的事件名 ⊆ 该清单"），所以这里读它，
+# 清单缺失就直接红：那说明文档烂了，此时任何"没响"的结论都不可信。
+summary() {
+  local dir=${1:-}
+  if [ -z "$dir" ]; then
+    if [ -f "$STATE" ]; then dir=$(awk -F'\t' '$1=="rundir"{print $2}' "$STATE"); fi
+    [ -n "$dir" ] || dir=$(ls -1dt "$OUT_DIR"/*/ 2>/dev/null | head -1 | tr -d '/')
+  fi
+  [ -n "$dir" ] && [ -d "$dir" ] || { echo "找不到采集目录（summary <目录> 显式指定，或先 start）" >&2; return 2; }
+  local reg
+  reg=$({ grep -h 'DIAG-EVENT-NAMES:' "$(dirname "${BASH_SOURCE[0]}")/../docs/PROTOCOL.md" 2>/dev/null || true; } |
+        sed -E 's/.*DIAG-EVENT-NAMES: *//; s/ *-->.*//')
+  [ -n "$reg" ] || { echo "FAIL docs/PROTOCOL.md 缺 DIAG-EVENT-NAMES 机器行——清单是判据的唯一来源，先补文档再看结论" >&2; return 2; }
+
+  echo "采集目录：$dir"
+  local logs n_silent=0
+  logs=$(find "$dir" -name 'server*.log' -size +0 2>/dev/null | tr '\n' ' ')
+  if [ -z "${logs// /}" ]; then echo "  ⚠ 目录里没有非空 server*.log：这一轮服务器侧零读数（未配对期间 diag.* 被服务器丢弃，空是设计；配对了还空=通路坏）"
+  else
+    # 一趟 awk，不在 bash 里对每个名字 grep 一次：脚本开了 pipefail，
+    # `$(grep | awk)` 在"零命中"时整条管道返回 1，set -e 会让 summary 静默中途退出
+    # （实测过：清单只剩前几行就没了，看着像"事件真这么少"）。awk 恒退 0，且 41 次 grep 变 1 次扫盘。
+    local rows
+    rows=$(awk -v names="$reg" '
+      BEGIN { m = split(names, arr, "/")   # 顺序按 split 的下标走（for-in 的次序不保证）
+              for (i = 1; i <= m; i++) if (arr[i] != "") { n++; r[n]=arr[i]; want[arr[i]]=1 } }
+      {
+        if (match($0, /event=[A-Za-z0-9_]+ ice=/)) { seen[substr($0, RSTART+6, RLENGTH-11)]++; tot++ }
+        if (index($0, "[diag.session]") > 0)    { sess++
+               if (index($0, "path=_ setupMs") || index($0, "path=- setupMs")) blank++ }
+        # 补报口径带下划线：safeTag 把 detail 里的等号磨成 `_`，写等号就是一个 grep 不到的假口径
+        if (index($0, "detail=at_") > 0) back++
+      }
+      END {
+        for (i = 1; i <= n; i++) { c = 0
+          if (r[i] ~ /_$/) { for (e in seen) if (index(e, r[i]) == 1) c += seen[e] }  # bucket_ 是前缀项
+          else if (r[i] in seen) c = seen[r[i]]
+          printf "%s\t%d\n", r[i], c }
+        for (e in seen) { hit = 0; if (e in want) hit = 1
+          if (!hit) for (i = 1; i <= n; i++) if (r[i] ~ /_$/ && index(e, r[i]) == 1) hit = 1
+          if (!hit) printf "?%s\t%d\n", e, seen[e] }   # 日志里有、清单里没有 = 文档烂了
+        printf "#diag.event\t%d\n#detail=at_\t%d\n#diag.session\t%d\n#path未投影\t%d\n",
+               tot+0, back+0, sess+0, blank+0 }
+      ' $logs)
+    echo "  事件计数（顺序 = PROTOCOL 清单顺序，按阶段分组；0 条 = 这一轮没响）"
+    local k v total=0 back=0 sess=0 blank=0 undoc=0
+    while IFS=$'\t' read -r k v; do
+      case "$k" in
+        '#diag.event')   total=$v; continue ;;
+        '#detail=at_')   back=$v; continue ;;
+        '#diag.session') sess=$v; continue ;;
+        '#path未投影')    blank=$v; continue ;;
+      esac
+      if [ "${k:0:1}" = "?" ]; then undoc=$((undoc + 1)); printf '    ! %4s  %s（不在 PROTOCOL 清单里）\n' "$v" "${k:1}"
+      elif [ "$v" = "0" ]; then n_silent=$((n_silent + 1)); echo "    ·    0  $k"
+      else printf '    ✓ %4s  %s\n' "$v" "$k"; fi
+    done <<< "$rows"
+    echo "  合计 $total 条 diag.event；断连补报到达（detail=at_）$back 条 —— 0 条即通路仍未验证，先修通路再谈业务"
+    echo "  diag.session $sess 条，其中 path 未投影（_ =客户端没发；- =发了但这侧无值）$blank 条；清单外事件名 $undoc 个"
+  fi
+  echo "  客户端 logcat：$(find "$dir" -name 'device-*.log' -size +0 2>/dev/null | wc -l | tr -d ' ') 个非空文件"
+  if [ "$n_silent" -gt 0 ]; then
+    echo "  → $n_silent 个事件名零读数。对照 docs/AUDIT-MATRIX.md §8 的 ⬜ 看它本来该在哪一格里响；若那一格需要米15，本轮不响是正常的。"
+  fi
+}
+
 case "${1:-check}" in
   start) start ;;
   stop)  stop_all; echo "已收进程" ;;
   check) check ;;
-  *) echo "用法: start|check|stop" >&2; exit 2 ;;
+  summary) summary "${2:-}" ;;
+  *) echo "用法: start|check|summary [采集目录]|stop" >&2; exit 2 ;;
 esac

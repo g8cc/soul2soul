@@ -79,6 +79,18 @@ v0.2.44 悬浮球丢失后立的规矩——多轮"稳定性审计"仍漏了一�
 - `scripts/e2e.sh` 需 ≥2 台已 boot 设备，探测不到时 test.sh 报 SKIP——**SKIP 不等于通过**，发版说明里要如实写。
 - MIUI/HyperOS 坑集中在：FGS 通知折叠（授权要另设对话框入口）、后台电池优化（电池豁免引导）、FLAG_SECURE 采集黑块（禁用）。
 
+### 读服务器日志的口径（v0.2.59 待机遥测起必须知道）
+
+- **`diag.*` 只在已鉴权连接上打印**（`server/src/index.js` 的 `if (!ws.authed) break`）。
+  所以**未配对期间的日志必然是空的，这不是埋点坏了**；判"某事件零采样"之前先确认那一刻两端已配对。
+- **`detail` 里的 `=` 会被 `safeTag` 磨成 `_`**：补报的真实时刻要 grep `detail=at_`，写 `detail=at=` 是一个不存在的键
+  （t0 有守卫盯着 `docs/PROTOCOL.md` 与本仓库脚本别改回去）。
+- **一轮复现后先看 `bash scripts/repro-capture.sh summary`**，它按 `docs/PROTOCOL.md` 的
+  `DIAG-EVENT-NAMES` 清单逐条列"响了/没响"，不再靠人肉逐条 grep。清单是唯一权威：
+  新增事件名不写进那一行，t1 的 `DiagEventRegistryTest` 直接红。
+- **`heartbeat` 的缺口本身就是判据**：连续两条 `beat=` 单调读数差 > 2×300s 说明进程被冻或被杀，
+  不需要额外事件；设备墙钟不可信（实测 Mi5 慢 ~10.5h），任何"间隔"都不许用 wall-clock 相减。
+
 ## 其他约定
 
 - UI/交互文案面向非技术用户（"她"侧），说人话、给出路（错误必须解释原因+下一步）。
