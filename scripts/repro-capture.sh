@@ -58,8 +58,14 @@ start() {
   # 1) 服务器侧：tail -F + 断线重连（ssh 抖动不该让采集静默死掉）
   #    回读 200 行做上下文种子：check 里的"版本上报"要能在刚起采集时就有读数，
   #    否则空文件会让体检误报"设备没打开 App"。
+  #    落笔记本前先脱敏：线上那版 send() 的 quiet 名单还没有 paired/pair.code，
+  #    [relay] 行会把长期重连凭证与六位配对码原样抄进本地副本（服务器侧修好前先在采集侧堵）。
+  #    脱敏必须在远端做：本机这条管道只有一个后台 pid（$!），再多接一段 sed/perl
+  #    就会把 ssh 变成 stop 杀不掉的孤儿（采集静默继续写，check 还显示在跑）。
   ssh -o ServerAliveInterval=15 -o ServerAliveCountMax=4 "$HOST_ALIAS" \
-    "tail -n 200 '$REMOTE_LOG' 2>/dev/null | grep -aE '$REMOTE_FILTER'; while true; do tail -F -n 0 '$REMOTE_LOG' 2>/dev/null | grep -aE '$REMOTE_FILTER'; sleep 3; done" \
+    "MASK='s/\"(token|code|credential|username)\":\"[^\"]*\"/\"<redacted>\"/g'; \
+     tail -n 200 '$REMOTE_LOG' 2>/dev/null | grep -aE '$REMOTE_FILTER' | sed -u -E \"\$MASK\"; \
+     while true; do tail -F -n 0 '$REMOTE_LOG' 2>/dev/null | grep -aE '$REMOTE_FILTER' | sed -u -E \"\$MASK\"; sleep 3; done" \
     > "$RUN_DIR/server.log" 2> "$RUN_DIR/server.err" &
   printf 'server\t%s\t%s\n' "$!" "$RUN_DIR/server.log" >> "$STATE"
 
