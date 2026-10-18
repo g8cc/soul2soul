@@ -106,4 +106,12 @@ class DiagDetailTest {
         assertEquals("h=99 s=99 r=99 p=99", d)
         assertFits(d, "gather")
     }
+
+    @Test
+    fun `gather line flags the cut-short reading`() {
+        // 收集从没到达 COMPLETE 的那条必须带 inc=1："收完 6 条里 r=0"（TURN 分配失败）
+        // 与"ICE 5 秒就死了、候选根本没长齐"是两个不同根因，混在一起读就会误判 TURN 配置坏了
+        assertEquals("h=0 s=0 r=0 p=0 inc=1", DiagDetail.gather(0, 0, 0, 0, incomplete = true))
+        assertFits(DiagDetail.gather(99, 99, 99, 99, incomplete = true), "gather+inc")
+    }
 }

@@ -1159,13 +1159,27 @@ class WebRtcClient(
         // 收集完成那一刻报一次类型分布（每会话一条，不重复）：r=0 就是 TURN 一个中继都没拿到，
         // 这是"P2P 打洞失败"唯一的远程自证——此前只能从服务器日志反推有没有分配过 relay
         if (state != PeerConnection.IceGatheringState.COMPLETE || gatherReported) return
-        gatherReported = true
+        // 正常时机仍然只在会话还活着时报；没走到 COMPLETE 的那次由会话收尾补（见 reportGatherTally）
         if (closed || endedNotified.get()) return
+        reportGatherTally(incomplete = false)
+    }
+
+    /**
+     * 候选类型分布的唯一上报出口（每会话至多一条）。两个时刻必须都发得出：
+     * 只监听 `COMPLETE` 的话，ICE 快速 FAILED 那条路**根本走不到收集完成**，
+     * 而"TURN 一个中继都没拿到"恰恰只在死掉的那次才有意义 —— 与 0.2.59 自己修掉的
+     * `wake_ok` 顺序 bug 同类的"白埋"（10-19 本机双模拟器 t4 实测 0 条 `gather_done`）。
+     * `inc=1` 让取证时能把"收完 6 条里 r=0"与"收集被掐断"分开读。
+     */
+    private fun reportGatherTally(incomplete: Boolean) {
+        if (gatherReported) return
+        gatherReported = true
         com.soul2soul.app.util.SelfCheck.reportEvent(
             context, role, "gather_done", latestIceState,
             com.soul2soul.app.util.DiagDetail.gather(
                 candidateTally.get(0), candidateTally.get(1),
                 candidateTally.get(2), candidateTally.get(3),
+                incomplete = incomplete,
             ),
         )
     }
@@ -1310,6 +1324,10 @@ class WebRtcClient(
     /** 会话终态自报：服务器只看得见信令帧，媒体侧"为什么结束"必须双端自己说 */
     private fun reportSessionEnd() {
         if (connectStartedAtMs <= 0L) return
+        // 收集没走到 COMPLETE 就散会（快速 FAILED / 超时）时，COMPLETE 那条路永远不会响，
+        // 而 relay 计数只在死掉的那次才有判据价值 ⇒ 在 socket 还能用的最后一刻补一条 inc=1 的。
+        // 这条也受上面那句守卫管：没真正发起过连接就报全 0，会被读成"TURN 分配失败"。
+        reportGatherTally(incomplete = true)
         val now = android.os.SystemClock.elapsedRealtime()
         // 时长一律走 SessionTiming：connectedSinceMs 会被 ICE 闪断清零，
         // 用它算就会把"聊了 18 分钟被拆"和"根本没连上"报成同一个数。

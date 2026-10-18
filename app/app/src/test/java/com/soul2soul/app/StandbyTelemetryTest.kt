@@ -228,4 +228,29 @@ class StandbyTelemetryTest {
             between(probe(), "fun onWakeLock(", "private fun isIdle(")
                 .any { it.contains("emit(if (held) \"wake_ok\" else \"wake_off\"") })
     }
+
+    // S9：候选计数的第二个盲区（10-19 本机双模拟器 t4 实测：整轮 0 条 `gather_done`）。
+    // ICE 快速 FAILED 这条路**走不到** onIceGatheringChange(COMPLETE)，而"TURN 一个中继都没拿到"
+    // 恰恰只在死掉的那次才有意义——只监听 COMPLETE 等于在最需要它的场景里闭嘴，
+    // 与 S8 那个 `wake_ok` 顺序 bug 同属"白埋"。收尾必须补一条 inc=1 的，且两次时机共用一个去重出口。
+    @Test
+    fun `gather tally is still reported when gathering never completes`() {
+        val lines = webrtc()
+        val sites = lines.filter { it.contains("reportGatherTally(incomplete =") }
+        assertEquals("收集完成与会话收尾两个时机各一处，不许再多（同一会话两条=两个真值来源）", 2, sites.size)
+        assertTrue("收集正常完成那条必须报成 incomplete=false（否则 inc 失去区分意义）",
+            sites.any { it.contains("incomplete = false") })
+        // 补发点只能在收尾这条路上：close() → reportSessionEnd() 是全仓库唯一的终态出口（D1 锁）
+        val ending = between(lines, "private fun reportSessionEnd(", "SelfCheck.reportSession(")
+        val guard = ending.indexOfFirst { it.contains("if (connectStartedAtMs <= 0L) return") }
+        val cut = ending.indexOfFirst { it.contains("reportGatherTally(incomplete = true)") }
+        assertTrue("收尾必须补发 incomplete=true 那条，否则快速 FAILED 的会话永远没有 relay 计数", cut >= 0)
+        assertTrue(
+            "补发必须在\"没发起过连接就 return\"之后：没真开始过就报全 0，会被读成\"TURN 分配失败\"",
+            guard in 0 until cut,
+        )
+        val helper = window(lines, "private fun reportGatherTally(", 6)
+        assertTrue("两次时机必须共用同一个去重标记（同一会话至多一条）",
+            helper.any { it.contains("if (gatherReported) return") })
+    }
 }

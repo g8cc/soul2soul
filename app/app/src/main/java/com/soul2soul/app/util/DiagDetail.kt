@@ -63,10 +63,15 @@ object DiagDetail {
         else -> -1
     }
 
-    /** ICE 收集完成时的本地 candidate 类型分布：`h2s1r0p0`，`r0` = TURN 一个中继都没拿到 */
-    fun gather(host: Int, srflx: Int, relay: Int, prflx: Int): String =
+    /**
+     * ICE 收集完成时的本地 candidate 类型分布：`h2s1r0p0`，`r0` = TURN 一个中继都没拿到。
+     * `inc=1` 挂在**没走完收集**就结束时补报的那一条上——两个时刻必须分得开，
+     * 否则"收集完 6 条里 relay=0"和"ICE 5 秒就 FAILED、候选根本还没长齐"会被读成同一件事。
+     */
+    fun gather(host: Int, srflx: Int, relay: Int, prflx: Int, incomplete: Boolean = false): String =
         "h=${host.coerceAtMost(99)} s=${srflx.coerceAtMost(99)} " +
-            "r=${relay.coerceAtMost(99)} p=${prflx.coerceAtMost(99)}"
+            "r=${relay.coerceAtMost(99)} p=${prflx.coerceAtMost(99)}" +
+            (if (incomplete) " inc=1" else "")
 
     private fun typeCode(t: String) = when (t.lowercase()) {
         "host" -> "h"
