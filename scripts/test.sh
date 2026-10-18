@@ -273,13 +273,16 @@ PY
   fi
   # 中文文案里"变量引用紧跟全角括号"会被 bash 把多字节字符吞进变量名，set -u 下当场 unbound
   # 崩掉整段（实测 drive-test.sh AC-6 的 SKIP 打印就是这么死的）。必须用大括号形式。
+  # ⚠️ 这里的字符类以前只有 `[A-Z_]`：小写变量（`$jar`/`$devices` 这一类）全部漏网，
+  # 10-18 加待机守卫时踩到——检测器绿着、脚本当场 "unbound variable" 崩在半路。
+  # 名字大小写不是安全边界，两条都要查。
   local fullwidth
   fullwidth=$(python3 - "$ROOT/scripts" <<'PY'
 import glob, re, sys
 bad = []
 for f in sorted(glob.glob(sys.argv[1] + "/*.sh")):
     for i, line in enumerate(open(f, encoding="utf-8"), 1):
-        for m in re.finditer(r"\$[A-Z_][A-Z0-9_]*", line):
+        for m in re.finditer(r"\$[A-Za-z_][A-Za-z0-9_]*", line):
             nxt = line[m.end():m.end() + 1]
             if nxt and ord(nxt) > 127:
                 bad.append("%s:%d" % (f, i))
@@ -437,7 +440,7 @@ PY
     return 2
   fi
   if [ "${devices:-0}" -lt 2 ]; then
-    echo "需要 2 台在线模拟器/设备（当前 $devices），见 docs/TESTING.md T4 前置"
+    echo "需要 2 台在线模拟器/设备（当前 ${devices}），见 docs/TESTING.md T4 前置"
     return 2
   fi
   ADB_BIN="$ADB" bash "$ROOT/scripts/e2e.sh"
