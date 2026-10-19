@@ -26,6 +26,9 @@ export JAVA_HOME=/Users/wardonguo/tools/jdk17/jdk-17.0.2.jdk/Contents/Home
 
 - 改纯逻辑 → 必须有对应用例；每条真机踩坑修复 → 必须有锁定用例。
 - T1 固定 `:app:testProdDebugUnitTest`（勿跑 flavor×4）。
+- **脚本在跑的时候不要编辑它**：bash 是按字节偏移续读脚本文件的，运行中改 `scripts/e2e.sh`（哪怕只改注释、只要长度变了）
+  会让正在跑的那一轮从错误的偏移开始解析——现象是"莫名语法错/少跑几段"，不是"我改的内容有问题"。
+  要改就先停掉这一轮再重启（10-19 复跑 t4 时踩过一次，那轮直接作废重跑）。
 - 测试**绝不**写 `server/data/pairings.json`（T3 自动用 `S2S_DATA_FILE=$(mktemp)`）。
 - 浮点边界断言前用 `node -e "Math.fround(...)"` 复核单精度。
 
