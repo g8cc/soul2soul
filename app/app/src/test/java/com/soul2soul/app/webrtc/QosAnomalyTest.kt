@@ -31,36 +31,20 @@ class QosAnomalyTest {
         audioConcealedMs = 0.0,
     )
 
-    private fun pick(prev: DiagDetail.Qos?, cur: DiagDetail.Qos) =
-        QosAnomaly.pick(prev, cur, framesBlockedByUs = false, peerPaused = false)
+    private fun pick(prev: DiagDetail.Qos?, cur: DiagDetail.Qos) = QosAnomaly.pick(prev, cur)
 
+    /**
+     * 0 帧**不是**这里的判据（v0.2.62 t4 实测后撤掉）：静态画面单窗口 0 帧是常态，
+     * 双端每 10s 各插一条 `b=fps0` 一分钟 12 条，把 P0 补报配额灌满、真异常反而被挤掉；
+     * 而"画面真的死了"已经有 `video_stall`——3 个完整 10s 窗口的 streak + 本端停帧/对方锁屏门控。
+     * 这条断言锁的是"只有一个真值来源"：把 fps0 规则加回来，它必须变红。
+     */
     @Test
-    fun `帧率为 0 且不是自己停的帧才报 fps0`() {
-        assertEquals("b=fps0", pick(s(fps = 30.0), s(fps = 0.0)))
-        assertNull(pick(s(fps = 30.0), s(fps = 1.0)))
-        // 负数 = stats 没给这一格读数，不是"卡成 0 帧"，不许伪造现场
+    fun `单窗口 0 帧不插异常条_video_stall 才是零帧的唯一判据`() {
+        assertNull(pick(s(fps = 30.0), s(fps = 0.0)))
         assertNull(pick(s(fps = 30.0), s(fps = -1.0)))
-    }
-
-    @Test
-    fun `本端停帧或对方锁屏时 fps0 是设计行为_不报`() {
-        val bad = s(fps = 0.0)
-        assertNull(
-            QosAnomaly.pick(s(), bad, framesBlockedByUs = false, peerPaused = true),
-        )
-        assertNull(
-            QosAnomaly.pick(s(), bad, framesBlockedByUs = true, peerPaused = false),
-        )
-        // 抑制 fps0 之后仍要看见别的异常，不能被这条吞掉
-        assertEquals(
-            "b=vl,50",
-            QosAnomaly.pick(
-                s(),
-                s(fps = 0.0, vLoss = 5.0),
-                framesBlockedByUs = true,
-                peerPaused = false,
-            ),
-        )
+        // 0 帧不报，但它盖不住别的异常：同一条读数里的丢包照报
+        assertEquals("b=vl,50", pick(s(), s(fps = 0.0, vLoss = 5.0)))
     }
 
     @Test
@@ -100,15 +84,15 @@ class QosAnomalyTest {
     }
 
     @Test
-    fun `首条没有 prev 时只可能报 fps0`() {
+    fun `首条没有 prev 时什么都不报（差分判据没有基线）`() {
         assertNull(pick(null, s(vLoss = 50.0)))
-        assertEquals("b=fps0", pick(null, s(fps = 0.0)))
+        assertNull(pick(null, s(fps = 0.0)))
+        assertNull(pick(null, s(rtt = 999L)))
     }
 
     @Test
     fun `每条异常码都留得下补报预算`() {
         val codes = listOfNotNull(
-            pick(s(), s(fps = 0.0)),
             pick(s(path = "host->srflx"), s(path = "relay->relay")),
             pick(s(), s(vLoss = 100.0)),
             pick(s(), s(aLoss = 100.0)),

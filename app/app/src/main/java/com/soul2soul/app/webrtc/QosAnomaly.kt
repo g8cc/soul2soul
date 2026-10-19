@@ -18,18 +18,12 @@ object QosAnomaly {
     const val RTT_JUMP_TIMES = 3.0
     const val RTT_JUMP_FLOOR_MS = 60L
 
-    /**
-     * @param framesBlockedByUs 本端自己把帧停了（surface 没了），与对端无关
-     * @param peerPaused 对方锁屏 = 画面暂停是设计行为（语音继续），不许报成卡顿
-     */
-    fun pick(
-        prev: DiagDetail.Qos?,
-        cur: DiagDetail.Qos,
-        framesBlockedByUs: Boolean,
-        peerPaused: Boolean,
-    ): String? {
-        // 只认"确实 0 帧"：负数=这一格 stats 里没有读数，报出来就是把"没数据"洗成"卡死了"
-        if (cur.videoFps == 0.0 && !framesBlockedByUs && !peerPaused) return "b=fps0"
+    fun pick(prev: DiagDetail.Qos?, cur: DiagDetail.Qos): String? {
+        // 这里**不**判"这一格 0 帧"。v0.2.62 t4 实测：静态画面上单窗口 0 帧是常态
+        // （采集没变化就不出帧）， sharer 与 viewer 两端每 10s 各插一条 `b=fps0`，
+        // 一分钟 12 条把 P0 配额灌满，而真正的"画面死了"由 `video_stall` 负责——
+        // 它有连续 3 个完整 10s 窗口的 streak、且排除本端停帧与对方锁屏。
+        // 留两条判据等于制造第二个真值来源，而且这条的证据更弱（一个窗口）。
         val before = prev ?: return null
         if (cur.path != before.path && cur.path != "unknown" && before.path != "unknown") {
             return "b=pth,${DiagDetail.pathCode(before.path)}>${DiagDetail.pathCode(cur.path)}"

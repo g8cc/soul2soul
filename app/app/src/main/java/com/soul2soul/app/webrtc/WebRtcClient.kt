@@ -1065,20 +1065,14 @@ class WebRtcClient(
                                 context, role, "qos_tick", latestIceState,
                                 com.soul2soul.app.util.DiagDetail.qos(sample),
                             )
-                            // 提前出来的那一条（prev 还没有）只当背景，不跑异常判据：
-                            // QosAnomaly 的第一条规则是 `videoFps == 0.0 → b=fps0`，而刚连上的
-                            // 头一两秒收流帧率本来就可能真是 0——那正是 0.2.57 花力气摘掉的
-                            // "假卡顿告警"这一类（docs/AUDIT-MATRIX.md G 段）。
-                            if (diagDue || prevQos != null) QosAnomaly.pick(
-                                prev = prevQos, cur = sample,
-                                // 本机锁屏期间采集不出帧是 0.2.56 的设计语义（画面暂停·语音继续），
-                                // 本端 surface 没了停帧也是自己的事——两种都不许报成"卡死"
-                                framesBlockedByUs = localRenderPaused || !localScreenOn(),
-                                peerPaused = remoteScreenPaused,
-                            )?.let { bad ->
-                                com.soul2soul.app.util.SelfCheck.reportEvent(
-                                    context, role, "qos_bad", latestIceState, bad,
-                                )
+                            // 异常判据全部是"相对上一条"的差分（选路变化、rtt 跳变），
+                            // 所以连上后补的那一条没有 prev ⇒ 不跑；0 帧不在这里判（见 QosAnomaly）。
+                            prevQos?.let { p ->
+                                QosAnomaly.pick(prev = p, cur = sample)?.let { bad ->
+                                    com.soul2soul.app.util.SelfCheck.reportEvent(
+                                        context, role, "qos_bad", latestIceState, bad,
+                                    )
+                                }
                             }
                         }
                         // 观看端"黑屏"的直接证据：ICE 仍 CONNECTED 但收流帧率连续为 0，

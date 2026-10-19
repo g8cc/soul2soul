@@ -143,16 +143,30 @@ class StandbyTelemetryTest {
         val after = lines.subList(i, lines.size).take(20)
         assertTrue("同一站点必须插一条异常码（例行那条会把卡那一下盖掉）",
             after.any { it.contains("QosAnomaly.pick(") })
+    }
+
+    // S5a（v0.2.62 t4 实测后新增）：0 帧只允许有一个真值来源 = video_stall 的连续窗口。
+    //     `b=fps0` 是单窗口判据：静态画面本来就 0 帧，双端每 10s 各一条 ⇒ 一分钟 12 条把 P0
+    //     补报配额灌满（真异常反而被挤掉），而且它和 video_stall 指同一件事、证据更弱。
+    @Test
+    fun `zero fps is judged exactly once_and that place is the stall streak`() {
+        val anomaly = source("app/src/main/java/com/soul2soul/app/webrtc/QosAnomaly.kt")
         assertTrue(
-            "异常码必须带上本端停帧与对方锁屏两个抑制条件，否则锁屏期间每 10s 造一条假故障",
-            after.any { it.contains("framesBlockedByUs = localRenderPaused || !localScreenOn()") } &&
-                after.any { it.contains("peerPaused = remoteScreenPaused") },
+            "QosAnomaly 不许再出现 fps0 码（回滚即红）：0 帧归 video_stall 管",
+            code(anomaly).none { it.contains("\"b=fps0\"") },
+        )
+        val lines = webrtc()
+        val stall = lines.indexOfFirst { it.contains("viewerZeroFpsStreak++") }
+        assertTrue("观看端必须保留连续窗口判据（撤掉 fps0 之后它是唯一出口）", stall >= 0)
+        assertTrue(
+            "streak 必须有「本端停帧」与「没读数」两个前置分支，否则又造出假告警",
+            lines.take(stall).takeLast(16).any { it.contains("if (localRenderPaused)") } &&
+                lines.take(stall).takeLast(16).any { it.contains("inboundVideoFps < 0.0") },
         )
     }
 
     // S5b（v0.2.62）：提前出来的那一条只当背景——它没有完整窗口，既不能驱动异常判据
-    //（刚连上头一两秒 videoFps 真的可能是 0，那就是 0.2.57 摘掉的假卡顿那一类），
-    // 也不能推进 video_stall 的连续计数（会把告警提前一格）。
+    //（差分判据没有上一条可比），也不能推进 video_stall 的连续计数（会把告警提前一格）。
     @Test
     fun `the early qos_tick does not drive anomaly or stall counters`() {
         val lines = webrtc()
@@ -165,8 +179,9 @@ class StandbyTelemetryTest {
             lines[first].contains("established && !qosTickEmitted"),
         )
         assertTrue(
-            "异常判据必须挡掉「提前那条」（prevQos 还不存在时 fps0 没有对照基线）",
-            lines.any { it.contains("if (diagDue || prevQos != null) QosAnomaly.pick(") },
+            "异常判据必须挡掉「提前那条」：它全部是相对上一条的差分，prevQos 还不存在时没有基线",
+            lines.any { it.contains("prevQos?.let { p ->") } &&
+                lines.any { it.contains("QosAnomaly.pick(prev = p, cur = sample)") },
         )
         assertTrue(
             "video_stall 连续计数必须留在 10s 节奏上",
