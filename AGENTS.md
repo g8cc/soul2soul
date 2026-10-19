@@ -119,6 +119,10 @@ v0.2.44 悬浮球丢失后立的规矩——多轮"稳定性审计"仍漏了一�
   或直接数不同的 `k=`（10-18 真机那轮 heartbeat 合并计数 4 条、其实只跳了 3 次）。
 - **`diag.*` 的 `screenOn` 列是"发送那一刻"的采样，不是事件时刻的状态**（`SelfCheck.kt:138-140` 读 `isInteractive`，事件名来自广播 action，两者可以差零点几秒）。10-19 09:01 实测过一条 `screen_off` 带 `screenOn=true`、0.73s 后紧跟同 `k` 的 `screen_on`＝MIUI 秒级闪灭。**判"当时屏灭没灭"要看事件序列本身**，不许拿这一列自证。
 - **待机/换网时 `signaling_down` 一直早于 `net_down`**（10-18/10-19 三次真机采样：早 52ms、54ms、4.86s，跨三个数量级）⇒ socket 层是更早的传感器，`net_*` 只是晚到的旁证，"断网杀了信令"这句在日志里从没被直接证实过。另外 0.2.58 起 `signaling_down` 自己也能经补报到达（`detail=at_`；10-18 18:35 Mi10 第一次，10-19 又两轮含灭屏那次），0.2.56 那格"到不了服务器"的死角已闭合。
+- **补报队列的分级是"默认保护"，不是 P0 白名单**：`BacklogTiers.tierOf` 只把 `heartbeat`(P1) 与
+  `qos_tick`(P2) 降级，**其余一切事件名（含 `signaling_down`/`screen_off`/`probe_start`/`video_stall`/`stop_tap`）都是 P0**，
+  新加的埋点忘了登记也默认受保护。读日志时不许按"某个手写清单里有没有这个名字"来判断某条证据能不能丢
+  （10-19 复核时 PROTOCOL 正是写成了白名单口径，已改正并由 `BacklogTierTest` T9/T10 锁住默认方向）。
 - **"强制手段造出来的只是可达性测试"这句话有适用范围，别一刀切**：判据是**脚本触发的是"事件"还是"ROM 的决策"**。
   `svc wifi disable` 在真机上触发的是事件本身，而断网→换网→socket 死仍由系统走它自己那条路（Mi10 实测出
   `net_type from_wifi_to_cell` 与 `signaling_down`，这条是真读数）；反过来 `cmd deviceidle enter`、

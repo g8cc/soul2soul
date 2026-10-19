@@ -105,4 +105,45 @@ class BacklogTierTest {
             replayedDetail.length <= 64,
         )
     }
+
+    private fun repoFile(rel: String): java.io.File {
+        var dir: java.io.File? = java.io.File("").absoluteFile
+        while (dir != null) {
+            val f = java.io.File(dir, rel)
+            if (f.exists()) return f
+            dir = dir.parentFile
+        }
+        throw IllegalStateException("找不到 $rel（工作目录: ${java.io.File("").absolutePath}）")
+    }
+
+    // T9：分级是"默认保护 + 只降级两个名字"，不是 P0 白名单。
+    //     白名单写法会让新加的埋点默认落进最廉价档、在断连积压时被静默丢掉，
+    //     而 signaling_down/screen_off 这些本来就不在任何手写清单里（10-19 复核 PROTOCOL 时撞见文档写成了白名单）。
+    @Test
+    fun `unregistered event names default to the protected tier`() {
+        val notInAnyHandList = listOf(
+            "signaling_down", "signaling_up", "screen_off", "screen_on",
+            "probe_start", "video_stall", "video_resumed", "peer_signal", "stop_tap",
+        )
+        notInAnyHandList.forEach {
+            assertEquals("$it 被漏出死亡档", BacklogTiers.TIER_DEATH, BacklogTiers.tierOf(line(it)))
+        }
+        assertEquals(BacklogTiers.TIER_DEATH, BacklogTiers.tierOf(line("some_future_probe_event")))
+        // 降级只允许 heartbeat/qos_tick 两个名字（改默认分支或多加降级都必须先过这条）
+        val text = Regex("/\\*.*?\\*/", RegexOption.DOT_MATCHES_ALL)
+            .replace(repoFile("app/src/main/java/com/soul2soul/app/util/BacklogTiers.kt").readText(), "")
+        val demoted = Regex(""""([a-z_]+)"\s*->\s*TIER_(?!DEATH)""").findAll(text).map { it.groupValues[1] }.toSet()
+        assertEquals(setOf("heartbeat", "qos_tick"), demoted)
+        assertTrue("默认分支不见了", Regex("""else\s*->\s*TIER_DEATH""").containsMatchIn(text))
+    }
+
+    // T10：文档不许把上面那条规则写成白名单（读日志的人按白名单读，会以为 signaling_down 可丢）
+    @Test
+    fun `PROTOCOL 写的是默认保护而不是 P0 清单`() {
+        val doc = repoFile("docs/PROTOCOL.md").readText()
+        val rule = doc.lines().first { it.contains("淘汰是分级而不是") }
+        assertTrue("PROTOCOL 的淘汰规则没写「默认 P0」：$rule", rule.contains("默认 P0"))
+        assertTrue("PROTOCOL 没说明只降级两个名字", rule.contains("只有") && rule.contains("被降级"))
+        assertTrue("PROTOCOL 又退回 P0 白名单写法", !Regex("""P0（`aexit`""").containsMatchIn(rule))
+    }
 }
