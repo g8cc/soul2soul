@@ -85,6 +85,10 @@ v0.2.44 悬浮球丢失后立的规矩——多轮"稳定性审计"仍漏了一�
   两台模拟器连的是本机 dev server（`/tmp/s2s-emu-run/server.log`），它们的读数**不会**出现在生产日志里，
   反过来生产日志里出现的每一条都能落到这两台真机之一。
 - `scripts/e2e.sh` 需 ≥2 台已 boot 设备，探测不到时 test.sh 报 SKIP——**SKIP 不等于通过**，发版说明里要如实写。
+- **本机 dev server 目前借用了线上那套 TURN 的凭证**（10-19 用户点头，为的是让模拟器 ICE 走到 CONNECTED，媒体段第一次具备判定力）。
+  后果要一起记住：`gather_done` 会出 `r_1`、`path` 会是 `r-r` 这类真值，**这是"通路证据"不是"真机验证"**（矩阵里记 `PASS(模)`），
+  它不代表米15/米10 的选路也这样；而反过来拿它当"TURN 坏了"的证据更是误读。媒体跑完后要把 `TURN_HOST/TURN_PORT/TURN_STATIC_AUTH_SECRET`
+  改回占位值，否则以后每次 t4 都在偷偷依赖生产 coturn。凭证值不写进任何文件（ssh 命令替换注入环境变量）。
 - MIUI/HyperOS 坑集中在：FGS 通知折叠（授权要另设对话框入口）、后台电池优化（电池豁免引导）、FLAG_SECURE 采集黑块（禁用）。
 
 ### 读服务器日志的口径（v0.2.59 待机遥测起必须知道）
@@ -113,6 +117,16 @@ v0.2.44 悬浮球丢失后立的规矩——多轮"稳定性审计"仍漏了一�
   `net_type from_wifi_to_cell` 与 `signaling_down`，这条是真读数）；反过来 `cmd deviceidle enter`、
   `am set-standby-bucket` 触发的是**决策**（Doze 该不该进、bucket 该不该掉），ROM 自己会不会这么做脚本管不了，
   对应格子必须保持 `⬜`。
+- **`video_stall` 在 0.2.61 及以前是"读不到帧率"的别名，不是卡死**：这一版 libwebrtc 的
+  `outbound-rtp`/`inbound-rtp` 根本没有 `framesPerSecond`，而观看端判据写的是 `inboundVideoFps <= 0.0`
+  ⇒ 直读得到的 -1 每 10s 加一格，30s 后必然告警。线上那 6 条（`ice=CONNECTED`、`rttMs=84/59/91`、
+  链路明明是好的）全部属于这一类。**读旧日志时把 `video_stall` 当成"画面卡住"是错的**；
+  v0.2.62 起帧率是累计 `framesSent`/`framesReceived` 的区间相减，"没读数"走独立分支。
+- **"连上几秒就自动断开"在 Android 14+ 上有一个自因**：带宽估计器爬坡期把 `availableOutgoingBitrate`
+  钉在 300kbps 初值（实测连读两拍 300、触发降档那一刻已是 5.38Mbps）→ 3 连拍降档 →
+  在同一 `ScreenCapturerAndroid` 上 stop+start → 系统判"第二次开采集"撤销录屏授权 →
+  `reason=projection_stopped`。米15 那两通 14.1s/16.1s 与 Mi10（Android 12 容忍 token 复用）能撑 155s
+  的设备差异由此解释。v0.2.62 起 14+ 只降码率不动采集尺寸，画质档与采集尺寸正式分家。
 - **`heartbeat` 的缺口本身就是判据**：连续两条 `k=`（elapsedRealtime 秒，单调锚点）读数差 > 2×300s 说明进程被冻或被杀，
   不需要额外事件；日志侧这一格渲染成 `k_…`（safeTag 磨平等号与逗号）。设备墙钟不可信（实测 Mi5 慢 ~10.5h），任何"间隔"都不许用 wall-clock 相减。
 - **"待机为什么断"要两条读数一起定：最后一条 `heartbeat` 的时刻 + 复活时那条 `aexit` 的 `a=`**，只看 socket 的 `code=1006` 会把被杀误读成断网。

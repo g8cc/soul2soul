@@ -70,6 +70,8 @@ bash scripts/test.sh --e2e
   衍生操作口径：**抽掉即红必须走真 gate（`test.sh --tier t0`），不是只手跑自检脚本**；若那份 harness 文件此刻正被 t4 使用，就把 `scripts/` 复制到 `/tmp` 沙箱去改坏（`test.sh` 的 `ROOT="$PWD"`，配 `app/server/docs` 三个软链即可跑 t0，t0 全程只 grep），别在跑着的那份上动刀——10-19 用 `git checkout scripts/ui.py` 做回滚实测时把自己的未提交修复一起清掉了。
   ⑲ **「跳过了几条」必须是累加，不是写死的数字（10-19 复核 t4 输出撞见）**：那轮汇总行印 `SKIP_ENV=2`，屏上却有**三行** `SKIP(环境)`——`stop_tap` 那条打了 SKIP 却没进账；`drive-test.sh` 里两处 `ENV_SKIP=2` 更是**赋值覆盖**（AC-6 那条自己写着"四条断言"却只记 2）。这不是排版问题：发版说明里"媒体未本机验证"必须能落到"具体哪几条没判"，数字与屏上行数对不上时，读的人会把它当成"少数几条之外都已判定"。改法：每条被环境挡掉的**断言**自己 `ENV_SKIP=$((ENV_SKIP + n))`（计数单位是断言数而不是 SKIP 行数——`drive-test.sh` 里一行 `SKIP(环境)` 覆盖的是 ICE+onLive 两条、AC-6 那行覆盖四条 ck），ICE 不可路由那一段横幅不再记账（它不是断言）；t0 守卫 `ENV_SKIP=<数字>`（除 `=0` 初始化）在 e2e.sh/drive-test.sh 里出现即红（沙箱里把一条改回 `ENV_SKIP=1` 实测红）。**观测确认**：改后同一条路径重跑 t4，`== E2E: PASS=9 FAIL=0 SKIP_ENV=3 ==` 与屏上三行 SKIP 一一对上。
   模拟器只验信令/服务/UI 状态，媒体与手感的结论仍以真机为准。宿主 load 高时两台 qemu 会饿死 app 主线程（实测 `ANR in … Waited 5002ms for FocusEvent` → 系统杀进程），此时 ICE/`viewer-ready` 变红属环境而非产品，drive-test.sh 会把 ANR/杀进程计数打在媒体断言之前。
+  ⑳ **坑⑲的镜像：断言会"消失"而不是"变红"（10-19 借线上 TURN 让本机第一次判得出媒体时撞见）**。`stop_tap` 那条整个写在 `if [ "$ICE" != "OK" ]` 里——理由正当（点它会拆掉 A 的会话，媒体通就必须排在同屏/笔迹之后），但 ICE=OK 的那条路里它既不计 PASS 也不计 ENV_SKIP，于是汇总行悄悄少一条（实测 `PASS=9` 而应为 10、`SKIP_ENV=0`）。这类缺陷比恒真/恒假更隐蔽：**两条分支各跑一次得到的行数不一样，而"该有几条"没有独立的真值来源可对照**。改法是把断言收成函数 `check_stop_tap()`，两个分支各调一次（ICE=OK 时挪到 T4-5 之后），t0 守卫直接盯"两处调用都在"（沙箱里删掉 `= OK` 那条实测红）。口径：**凡因副作用要挑执行时机的断言，必须证明它在 ICE 两种结果下都被判定过**；只写在一条分支里=另一条分支静默丢格子。
+  ㉑ **判据直读了平台根本不提供的字段，而它的缺省值恰好落在告警分支上（10-19 由 t4 媒体段第一次出数才撞见）**。观看端"画面卡死"写的是 `inboundVideoFps <= 0.0`，而 `framesPerSecond` 在本版 libwebrtc 的 `outbound-rtp`/`inbound-rtp` 上**不存在** ⇒ 直读得到 -1，每 10s 给 streak 加一格，30s 后必然 `video_stall`：线上 6 条（`ice=CONNECTED`、`rttMs=84/59/91`）全是这条空判据产出的，而它们一直被读成"她那边确实卡"。同一类的第二例是 `available > 0 && available < required×72%`：`> 0` 看着像在防"未知"，其实防不住**读得到但还没稳**的值——带宽估计器爬坡期钉在 300kbps 初值（实测连两拍 300、触发降档那一刻同一列已是 5.38Mbps），6s 内必攒出一次降档，而降档在 Android 14+ 是致命动作。口径：**任何 `<= 0` / `< 阈值` 形态的判据，落笔前先问"读不到时走哪条支路"**；缺省值 `-1` 必须有独立分支（既不告警也不清零），能用"累计计数区间相减"就别直读平台字段（字段存在性由 libwebrtc 版本决定，不写测试就永远没人发现），而"还没稳的读数"要显式建模成一维（`bandwidthSettled`），不是靠 `> 0` 撞运气。锁定：`RtpQualityWindowTest` 5 条（`framesFps` 的 0/未知/回退/窗口太短）+ `VideoQualityPolicyTest` 爬坡期四条 + `CaptureRestartGuardTest` C4（把 `== 0.0` 退回 `<= 0.0` 实测红）。
   诚实边界：坑⑩里「ICE 连上→媒体硬断言」这条分支本机**从没跑过**（没有可路由的 relay 就没有 CONNECTED）。要让媒体段重新具备判定力，得先在本机起一个真 TURN，并把 dev server 的 `TURN_HOST` 指到模拟器可达的地址（一般是宿主在 SLIRP 里的 `10.0.2.2`，需自行验证）；做不到之前，媒体结论只能来自真机双端。**同理，AC-6 锁屏保活（坑⑮）本机也只验证了"判据不再是空的"，没验证过"锁屏真的不断连"——那要等真机双端。**
 - T4 断言的五条铁律（v0.2.56 复盘：e2e.sh 里曾同时存在**恒真**与**恒假**两种空断言，绿了半年）：
   ① `scripts/ui.py has` 只打印 YES/NO、**恒返回 0**，所以 `ui has X && OK=YES` 是恒真；只有 `[ "$(ui has …)" = "YES" ]` 才是断言（drive-test.sh 全程用后者）。
@@ -228,7 +230,7 @@ Service 窗口接线这类 JVM 跑不了的代码，锁定用例的形态是**�
 | StrokeMapping (11) | video=0 回退；0.05 容差边界；往返一致；整屏尺寸还原；非有限坐标拒绝 | FR-5 / §5 |
 | IceServerParser (7) | 多 urls；urls 缺失跳过；凭证携带 | §2.3 |
 | IceRestartBudget (3) | 单次最多 3 次；稳定 30 秒后清额度；未使用时不误报重置 | ICE 恢复额度回归 |
-| RtpQualityWindow (3) | 累计计数换算窗口丢包/隐藏音频时长；首样本/计数重置/缺失统计不伪报 0 | 弱网与语音质量诊断 |
+| RtpQualityWindow (5) | 累计计数换算窗口丢包/隐藏音频时长；首样本/计数重置/缺失统计不伪报 0 | 弱网与语音质量诊断 |
 | PairCodeBook (9) | +4999/+5000ms；旧码作废；第 5/6 次尝试；TTL ±1ms；sweep；self_pair | §2 防爆破（repo 常量） |
 | MessageBook (10) | 限速 999/1000ms；发件人隔离；text 500/501；voice 校验（bad id/时长）；list 时序+拷贝+过期；ack 只删自己；容量溢出丢最旧；forgetDevice 双向；sweep TTL±1ms；self/空收件人 | 离线留言（未发版） |
 | turn (5) | 固定 HMAC 向量（openssl 交叉验证）；udp+tcp；username 过期秒 | §2.3 |
