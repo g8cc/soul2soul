@@ -2,7 +2,17 @@
 
 倒序。锚点为 git 短哈希（`git log --grep='v0\.2\.'` 可复核）。App 内更新通道自 v0.2.16 起可用。
 
-## v0.2.27 — 2026-10（本批）
+## v0.2.63 — 2026-10-19（本批，已上通道）
+
+- **一次性把 0.2.59–0.2.63 五代的东西带上更新通道**：通道此前停在 `versionCode 60`（0.2.59 `6210c83`、0.2.60 `4df1ff7` 各单独发过），0.2.61/0.2.62 只进过 repo 没单独上通道，本版把它们一起带走。远端 `version.json` = `{63, "0.2.63", sha256 379f194b…}`，HTTPS 取包 200，本地构建产物 sha256 与线上逐字节一致。米15 只能靠这条通道更新，而它是唯一接不了 adb 的那台
+- **v0.2.59 全量遥测版**（`568a63d` `1d8eaf9`）：把传感器从会话期搬到待机期——`StandbyProbe` 收 SCREEN_ON/OFF、`ConnectivityManager` 默认网络回调（`net_up/net_down/net_type`）、Doze 进出、app standby bucket 降级、wakelock 获取结果，外加配对期 300s 一条 `heartbeat`（**连续两条 `k=` 差 >2×300s 本身就是"进程被冻/被杀"的判据**）；`ApplicationExitInfo` 在复活时报上一轮死因（`aexit r_… i_… a_…`）；`diag.session` 的 `path`/`proj` 真正填上（此前服务器白印 `_`）；会话期 QoS 从"只在 logcat"变成每 10s 一条 `qos_tick` + 异常插 `qos_bad`，`gather_done` 带 host/srflx/relay 候选计数（TURN 分配失败=`r_0`，此前这条判据不存在）；补报队列 `DiagBacklog` 改分级淘汰（默认 P0，只降级 `heartbeat`/`qos_tick`）+ 有界 flush + 入队离开主线程
+- **v0.2.61 终止原因分名**（`d97ee5a` `1a493b1`）：`projection_stopped`（系统撤授权）先占 first-wins 槽、`remote_bye`/`peer_gone`/`call_canceled` 各有各的名分、`stop_tap detail=src_…` 回答她点的是哪个停止入口。≤0.2.60 的日志里 `local_stop` 同时是"她按的"与"ROM 撤的"，只能靠同行 `proj` 补救
+- **v0.2.62 修掉"连上几秒就自动断开"的两个自因**（`d370a3d` `fc4814c` `7519bd2`）：带宽估计器爬坡期的 300kbps 初值被当实测 → 3 连拍降档 → 同一 `ScreenCapturerAndroid` stop+start → Android 14 判第二次开采集并撤销授权 → 4.5s 死；改法是爬坡期不参与降档判据、14+ 只降码率不动采集尺寸。帧率改累计 `framesSent`/`framesReceived` 区间相减（这版 libwebrtc 没有 `framesPerSecond`，直读的 -1 曾被 `<=0.0` 判成 0 帧 = 线上 6 条假 `video_stall` 的成因）；`qos_bad` 的 `b=fps0` 撤除，0 帧只留 `video_stall` 一个真值来源
+- **测试与口径**（`f249a29` `65bf01d` `5ef1a0c` `4f98deb`）：S10 把"高于 minSdk 的系统 API 必须各自带版本闸门"锁在**调用点所在函数体**上（漏闸门不是少一条读数，是 Mi5 直接崩、此后那条通路整条消失）；扫出并修掉四条"固定行数窗口对否定式判据只贴前半段"的空锁（含把已废的"锁屏 15 秒自动结束"写回分支而用例照绿那种），另加两条 t0 守卫盯着这个形状；`docs/TESTING.md` 立坑㉚
+- **诚实边界**：本版是客户端行为，服务器一行未动。通道上有包 ≠ 装了 —— 依赖米15 的格子在 `diag.version code=63` 出现之前一律不许升 PASS；Android 7/8（本机 Mi5）上 `bucket_*`/`aexit` 零采样属设计（API 28/30 门槛），心跳 `b=` 恒为 `x`
+- ⚠️ 本文件在 v0.2.27 与 v0.2.55 之间**长期没记账**（0.2.28–0.2.54 这段没有条目，别把它读成"那半年没改动"）；上面的锚点用 `git log --grep='v0\.2\.' --oneline` 可逐条复核
+
+## v0.2.27 — 2026-10
 
 - 观看端沉浸全屏：通话连通后 5 秒无操作，控件连同状态栏/导航栏一起收起，整屏只显示对方画面；轻点画面同步唤回控件+系统栏，侧边滑入可临时呼出系统栏；画中画返回全屏自动恢复联动。Android 7/MIUI 上 androidx WindowInsetsControllerCompat 的 hide(systemBars) 会吞掉 FULLSCREEN 位（实测只隐藏了导航栏），API<30 改为直写 legacy systemUiVisibility flags
 - 观看端两侧空隙改纯黑衬底（影院黑边语义）。曾实现"远端画面 1/12 降采样模糊放大"衬底，但糊图本质是前景内容的鬼影，两台手机屏幕比例不同时看起来像两块屏幕重叠，观感更差，故回退为纯黑
