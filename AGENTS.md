@@ -122,6 +122,22 @@ v0.2.44 悬浮球丢失后立的规矩——多轮"稳定性审计"仍漏了一�
   ⇒ 直读得到的 -1 每 10s 加一格，30s 后必然告警。线上那 6 条（`ice=CONNECTED`、`rttMs=84/59/91`、
   链路明明是好的）全部属于这一类。**读旧日志时把 `video_stall` 当成"画面卡住"是错的**；
   v0.2.62 起帧率是累计 `framesSent`/`framesReceived` 的区间相减，"没读数"走独立分支。
+- **"画面死了"只有一条判据：`video_stall`，但它必须与共享端同一刻的 `qos_tick` 第 7 格成对读（v0.2.63 起）**：
+  单看 `video_stall` 会误判——共享端画面静止时编码器不出新帧，观看端连续 3 窗口测到 0 帧是真的 0 帧，
+  而画面没坏（10-19 本机 established 会话实测：静止期 6 条、间隔 72~382s 不刷屏；同刻 sharer 第 7 格也是 0）。
+  三条分法：两端都 `0`=源头静止；sharer `>0` 而 viewer `0`=媒体真断；任一端 `x`=无读数、什么都不判。
+  `qos_bad` 里的 `b=fps0`（单窗口 0 帧）已撤除——静态画面单窗口 0 帧本来就是常态（采集没变化就不出帧），双端每 10s 各插一条、一分钟 12 条把 P0 补报配额灌满，
+  真异常反而被挤掉。所以 0 帧看 `video_stall`/`video_resumed`（连续 3 个完整 10s 窗口，且排除本端停帧与对方锁屏），
+  `qos_tick` 第 7 格只是原始帧率读数（`x`=没测到，不许当 0 读）。
+- **"她画的我看不到"有三种成因，先别怀疑通路（10-19 实测）**：① 收笔后 `StrokeColors.FADE_MS=2000` 淡出，
+  截图晚于 2s ⇒ diff 恒 0（判据要拍在"手指还按着"的时刻，书写中永不淡出）；② 通路真坏（看 B 侧
+  `annotation dropped` / channel null）；③ **宿主 App 声明了 `HIDE_OVERLAY_WINDOWS`**（Android 12+
+  `Window.setHideOverlayWindows`）——设置页、部分 ROM 桌面、银行类 App 前台期间，框架把别人所有
+  `TYPE_APPLICATION_OVERLAY` 强制隐藏：窗口 attached、`mDrawState=READY_TO_SHOW`、也在 draw，但
+  `isVisible=false` / `isReadyForDisplay()=false` / `alpha=0.0`，一帧都不合成，涂鸦球一起消失。
+  机器可查形式：`dumpsys window windows | grep mForceHideNonSystemOverlayWindow=true`
+  （注意窗口头是 `Window{hash u0 pkg}`，grep `Window \{` 会静默 0 命中，10-19 我就据此误判过"窗口不存在"）。
+  排除 ③ 之前不允许下"通路坏了"的结论；这一格的产品处置仍是 `⬜`（见 `docs/AUDIT-MATRIX.md` §1 末行）。
 - **"连上几秒就自动断开"在 Android 14+ 上有一个自因**：带宽估计器爬坡期把 `availableOutgoingBitrate`
   钉在 300kbps 初值（实测连读两拍 300、触发降档那一刻已是 5.38Mbps）→ 3 连拍降档 →
   在同一 `ScreenCapturerAndroid` 上 stop+start → 系统判"第二次开采集"撤销录屏授权 →
