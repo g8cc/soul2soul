@@ -97,7 +97,14 @@ class StandbyTelemetryTest {
         assertTrue("SelfCheck 必须把 path 写进 diag.session", put.any { it.contains("put(\"path\"") })
         assertTrue("SelfCheck 必须把 proj 写进 diag.session", put.any { it.contains("put(\"proj\"") })
         val end = window(webrtc(), "private fun reportSessionEnd(", 30)
-        assertTrue("会话结束必须传真实选路（取不到就留默认 -，不许编）", end.any { it.contains("path = lastQos") })
+        assertTrue(
+            "会话结束必须传真实选路（取不到就留默认 -，不许编）",
+            end.any { it.contains("path = if (lastSelectedPath ==") },
+        )
+        assertTrue(
+            "选路必须来自锁存值而不是散会后那条 tick（那一刻 pairs 已经没了，读出来只能是被磨平的 o-o）",
+            end.any { it.contains("DiagDetail.pathCode(lastSelectedPath)") },
+        )
         assertTrue("会话结束必须传投影状态", end.any { it.contains("proj = projectionState") })
         assertTrue(
             "隐私停止时只能改状态、不能再发一条事件（同一件事两个真值来源）",
@@ -122,7 +129,8 @@ class StandbyTelemetryTest {
             branch.any { it.contains("path=") })
     }
 
-    // S5：qos_tick 只允许从 10s 诊断站点发——发在 2s 轮询里就是 5 倍日志量，且读数窗口未闭合
+    // S5：qos_tick 只允许有一个发射点，且站点必须是"10s 节奏 或 连上后的第一条"两态——
+    //     发在 2s 轮询里就是 5 倍日志量；但只按 10s 出，短会话（她那种连上几秒就散）一条都读不到
     @Test
     fun `qos_tick is emitted only from the ten second diagnostic site`() {
         val lines = webrtc()
@@ -139,6 +147,47 @@ class StandbyTelemetryTest {
             "异常码必须带上本端停帧与对方锁屏两个抑制条件，否则锁屏期间每 10s 造一条假故障",
             after.any { it.contains("framesBlockedByUs = localRenderPaused || !localScreenOn()") } &&
                 after.any { it.contains("peerPaused = remoteScreenPaused") },
+        )
+    }
+
+    // S5b（v0.2.62）：提前出来的那一条只当背景——它没有完整窗口，既不能驱动异常判据
+    //（刚连上头一两秒 videoFps 真的可能是 0，那就是 0.2.57 摘掉的假卡顿那一类），
+    // 也不能推进 video_stall 的连续计数（会把告警提前一格）。
+    @Test
+    fun `the early qos_tick does not drive anomaly or stall counters`() {
+        val lines = webrtc()
+        val due = lines.indexOfFirst { it.contains("val diagDue =") }
+        val first = lines.indexOfFirst { it.contains("val firstTick =") }
+        val site = lines.indexOfFirst { it.contains("if (diagDue || firstTick) {") }
+        assertTrue("站点必须先算 diagDue 再算 firstTick 再进门", due in 0 until first && first < site)
+        assertTrue(
+            "firstTick 必须同时要求 established 且本会话还没出过 tick（否则每 2s 补一条）",
+            lines[first].contains("established && !qosTickEmitted"),
+        )
+        assertTrue(
+            "异常判据必须挡掉「提前那条」（prevQos 还不存在时 fps0 没有对照基线）",
+            lines.any { it.contains("if (diagDue || prevQos != null) QosAnomaly.pick(") },
+        )
+        assertTrue(
+            "video_stall 连续计数必须留在 10s 节奏上",
+            lines.any { it.contains("if (diagDue && !isSharer && established && !remoteScreenPaused)") },
+        )
+    }
+
+    // S5c（v0.2.62）：选路是闩锁而不是"最近一轮的原文"——断会后 stats 里没有 succeeded 的 pair，
+    // 无脑覆盖会让 diag.session 的 path 在唯一需要它的短会话里退化成 u-u。
+    @Test
+    fun `selected path is latched and never overwritten by a missing reading`() {
+        val lines = webrtc()
+        val assign = lines.indexOfFirst { it.contains("lastSelectedPath = selectedPath") }
+        assertTrue("必须有赋值点", assign >= 0)
+        assertTrue(
+            "赋值必须被「真的有选中对」的条件包住（unknown / ?->? 都不许覆盖闩锁）",
+            lines.take(assign).takeLast(4).any { it.contains("if (selectedPath.contains(\"->\")") },
+        )
+        assertTrue(
+            "diag.session 的 path 必须读闩锁值，并且从没读到过时留 \"-\"（不许拿 u-u 冒充知道）",
+            lines.any { it.contains("path = if (lastSelectedPath == \"unknown\")") },
         )
     }
 

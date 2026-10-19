@@ -219,6 +219,8 @@ class WebRtcClient(
      */
     @Volatile private var lastQos: com.soul2soul.app.util.DiagDetail.Qos? = null
     @Volatile private var lastSelectedPath = "unknown"
+    /** 本会话是否已经出过至少一条 `qos_tick`（连上后那一条不等 10s 节奏，见轮询里的 firstTick） */
+    @Volatile private var qosTickEmitted = false
 
     /** 采集侧状态：viewer 没有投影 ⇒ "-"，不许用 "off" 冒充"知道它没开" */
     @Volatile private var projectionState = "-"
@@ -916,12 +918,22 @@ class WebRtcClient(
                     best = if (selectedRtt >= 0) selectedRtt else fallbackRtt
                     availableOutgoingBps =
                         if (selectedAvailable >= 0) selectedAvailable else fallbackAvailable
-                    lastSelectedPath = selectedPath
+                    // 只在读到"真的有选中的 candidate-pair"时才覆盖。断会之后 stats 里没有 succeeded 的对，
+                    // selectedPath 退回 "unknown"，若无脑覆盖，短会话（<10s，一条例行 tick 都来不及出）
+                    // 的 path 就永远读不出来——而"P2P 还是走中继"正是这一列存在的唯一理由。
+                    // "?->?"（选中了对但候选查不到）同样不覆盖：那是采集缺陷，不是新事实。
+                    if (selectedPath.contains("->") && !selectedPath.startsWith("?")) {
+                        lastSelectedPath = selectedPath
+                    }
                     if (best >= 0) listener.onRtt(best)
 
                     // 统计仍每 2 秒用于自适应；详细媒体诊断每 10 秒记录一次。
+                    // 但"连上之后的第一条"不等 10 秒：她的典型故障是连上几秒就散，
+                    // 按 10s 节奏那条永远出不来 ⇒ 短会话零读数，等于又白埋一次（v0.2.62）。
                     statsPollCount += 1
-                    if (statsPollCount % DIAGNOSTIC_EVERY_POLLS == 0) {
+                    val diagDue = statsPollCount % DIAGNOSTIC_EVERY_POLLS == 0
+                    val firstTick = established && !qosTickEmitted
+                    if (diagDue || firstTick) {
                         // Keep codec diagnostics, but report network quality as interval deltas:
                         // cumulative counters hide whether the current 10s window was actually bad.
                         for ((_, stats) in report.statsMap) {
@@ -993,11 +1005,16 @@ class WebRtcClient(
                         val prevQos = lastQos
                         lastQos = sample
                         if (established) {
+                            qosTickEmitted = true
                             com.soul2soul.app.util.SelfCheck.reportEvent(
                                 context, role, "qos_tick", latestIceState,
                                 com.soul2soul.app.util.DiagDetail.qos(sample),
                             )
-                            QosAnomaly.pick(
+                            // 提前出来的那一条（prev 还没有）只当背景，不跑异常判据：
+                            // QosAnomaly 的第一条规则是 `videoFps == 0.0 → b=fps0`，而刚连上的
+                            // 头一两秒收流帧率本来就可能真是 0——那正是 0.2.57 花力气摘掉的
+                            // "假卡顿告警"这一类（docs/AUDIT-MATRIX.md G 段）。
+                            if (diagDue || prevQos != null) QosAnomaly.pick(
                                 prev = prevQos, cur = sample,
                                 // 本机锁屏期间采集不出帧是 0.2.56 的设计语义（画面暂停·语音继续），
                                 // 本端 surface 没了停帧也是自己的事——两种都不许报成"卡死"
@@ -1012,7 +1029,9 @@ class WebRtcClient(
                         // 观看端"黑屏"的直接证据：ICE 仍 CONNECTED 但收流帧率连续为 0，
                         // 说明断的是共享端的采集/编码，不是网络（服务器看不见媒体，只能自报）。
                         // 对方锁屏期间零帧是设计行为（画面暂停·语音继续），排除在外。
-                        if (!isSharer && established && !remoteScreenPaused) {
+                        // `diagDue`：连续计数只有在完整 10s 节奏上才有判据力，
+                        // 连上后补的那一条不许把它提前一格（否则 streak 会提早一格变成告警）。
+                        if (diagDue && !isSharer && established && !remoteScreenPaused) {
                             if (localRenderPaused) {
                                 // 本端 surface 没了，停帧是自己造成的，与对端无关
                                 viewerZeroFpsStreak = 0
@@ -1344,9 +1363,13 @@ class WebRtcClient(
             ice = latestIceState,
             setupMs = setupMs,
             liveMs = SessionTiming.liveMs(mediaConnectedAtMs, mediaLostAtMs, now),
-            // 最后一次的选路/投影状态：服务器这两列已经印了两天全是 `_`，P2P 与 TURN 转发
-            // 至今分不出来。取不到读数就留默认 "-"（空格），不许编一条
-            path = lastQos?.let { com.soul2soul.app.util.DiagDetail.pathCode(it.path) } ?: "-",
+            // 会话期间最后一次**真的读到**的选路（不是"散会之后那一条 tick"的读数——那一刻 pairs 已经没了）。
+            // 从没读到过就留 "-"（发了但这侧无值），不许拿 u-u/o-o 冒充知道。
+            path = if (lastSelectedPath == "unknown") {
+                "-"
+            } else {
+                com.soul2soul.app.util.DiagDetail.pathCode(lastSelectedPath)
+            },
             proj = projectionState,
         )
     }

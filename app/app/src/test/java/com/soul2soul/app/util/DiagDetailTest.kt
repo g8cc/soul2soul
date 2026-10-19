@@ -53,6 +53,11 @@ class DiagDetailTest {
         assertEquals("s-r", DiagDetail.pathCode("srflx->relay"))
         assertEquals("o-o", DiagDetail.pathCode("->"))
         assertEquals("o-o", DiagDetail.pathCode("peer reflexive"))
+        // v0.2.62：短会话里"这一轮没读到选中的对"以前也塌成 o-o，
+        // 于是 P2P/TURN 的判据在唯一需要它的会话里读不出来。三种成因必须三种写法。
+        assertEquals("u-u", DiagDetail.pathCode("unknown"))
+        assertEquals("q-q", DiagDetail.pathCode("?->?"))
+        assertEquals("q-h", DiagDetail.pathCode("?->host"))
     }
 
     @Test

@@ -42,8 +42,16 @@ object DiagDetail {
             "${pctX10(r.videoLossPct)},${ms(r.videoJitterMs)},${fps(r.videoFps)}," +
             "${pctX10(r.audioLossPct)},${ms(r.audioJitterMs)},${ms(r.audioConcealedMs)}"
 
-    /** 选路 `local->remote` 压成两个字母：h=host s=srflx r=relay o=其它/未知 */
+    /**
+     * 选路 `local->remote` 压成两个字母：h=host s=srflx r=relay o=其它 q=候选类型读不出 u=根本没读到选中对。
+     *
+     * `u-u` 与 `o-o` 必须分得开（v0.2.62）：`unknown` 是"这一轮 stats 里没有 succeeded 的 candidate-pair"
+     * （未连上、或断会之后的那一条 tick），`o-o` 是"读到了但对不上 host/srflx/relay 任何一个"。
+     * 以前两者都塌成 `o-o`，于是"这次会话到底走了中继还是直连"在短会话里永远读不出来，
+     * 而那正是这两列存在的唯一理由。
+     */
     fun pathCode(path: String): String {
+        if (path == "unknown") return "u-u"
         val parts = path.split("->")
         val local = parts.firstOrNull().orEmpty()
         val remote = parts.getOrNull(1).orEmpty()
@@ -77,6 +85,9 @@ object DiagDetail {
         "host" -> "h"
         "srflx" -> "s"
         "relay" -> "r"
+        // 选中了对但候选对象查不到（stats 里 localCandidateId 指向的条目缺失）：
+        // 这是采集缺陷，不能和"真的是某种其它类型"混成同一个 o
+        "?" -> "q"
         else -> "o"
     }
 
