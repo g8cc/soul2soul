@@ -294,8 +294,14 @@ fi
 # 下次不用重跑就知道输在哪。顶 MainActivity 不会拆掉共享：会话页只在**观看端**建 PeerConnection
 # （SessionActivity.kt:569/573 `isSharer = false` 才赋值 client），共享端的采集与服务在
 # ScreenShareService 里，Activity 被 singleTask 清掉也不影响 isRunning()。
-if [ "$ICE" != "OK" ]; then
+#
+# 为什么收成函数而不是写在 if 里（v0.2.62）：这一条测的是**客户端自己的报文体**，与媒体通不通无关，
+# 但它的动作会拆掉 A 的会话，所以 ICE=OK 时必须挪到同屏/笔迹两条之后跑。原先它整个包在
+# `if [ "$ICE" != "OK" ]` 里 ⇒ 媒体一通反而一条断言都不判了，既不 PASS 也不进 ENV_SKIP 的账
+# （实测 PASS=9 而应为 10、SKIP_ENV=0）——这正是坑⑲禁止的"打了格子却没记账"的另一种形态。
+check_stop_tap() {
   "$ADB" -s "$S1" shell am start -n "$PKG/com.soul2soul.app.MainActivity" >/dev/null 2>&1 || true
+  local BTN STOPTAP i
   BTN=$(ui has "$S1" "结束" 2>/dev/null || echo NO)
   [ "$BTN" = "YES" ] && ui tap "$S1" "结束" once >/dev/null 2>&1 || true
   STOPTAP=0
@@ -311,7 +317,8 @@ if [ "$ICE" != "OK" ]; then
   else
     ck "共享端点结束时报文体里带 src_main_page" 0
   fi
-fi
+}
+if [ "$ICE" != "OK" ]; then check_stop_tap; fi
 
 # ---------- T4-4 屏幕共享验证：A 打开设置页，B 应同步显示相同画面 ----------
 sleep 5
@@ -366,6 +373,9 @@ else
   echo "  SKIP(环境) B 的笔迹出现在 A 屏幕(ICE 未连通)"
   ENV_SKIP=$((ENV_SKIP + 1))
 fi
+
+# 媒体通了才走到这里补上 stop_tap：它是拆会话的动作，必须排在同屏与笔迹两条之后（见上面的函数注释）
+if [ "$ICE" = "OK" ]; then check_stop_tap; fi
 
 # ---------- T4-6 挂断 ----------
 ui tap "$S2" "结束" >/dev/null 2>&1 || true

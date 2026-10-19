@@ -210,6 +210,15 @@ PY
     echo '静态检查: SKIP_ENV 不许写死数字（只许 ENV_SKIP=0 初始化 + ENV_SKIP=$((ENV_SKIP + n)) 累加；写死会盖掉别处已记的账）'
     fail=1
   fi
+  # 坑⑲的镜像：那条查"数字撒谎"，这条查"格子消失"。stop_tap 测的是客户端自己的报文体，
+  # 与媒体通不通无关，却整个写在 `if [ "$ICE" != "OK" ]` 里（因为点它会拆掉会话，必须排在
+  # 同屏/笔迹之后）⇒ 借线上 TURN 让 ICE 连通后（v0.2.62 起本机第一次判得出媒体）那条既不
+  # PASS 也不进 ENV_SKIP 的账，实测汇总少一条。两种 ICE 结果都必须判到。
+  if ! (grep -qF 'if [ "$ICE" != "OK" ]; then check_stop_tap; fi' "$ROOT/scripts/e2e.sh" 2>/dev/null &&
+        grep -qF 'if [ "$ICE" = "OK" ]; then check_stop_tap; fi' "$ROOT/scripts/e2e.sh" 2>/dev/null); then
+    echo '静态检查: stop_tap 必须在 ICE 两种结果下都被判定（只写在 !=OK 里＝媒体一通就静默少一条断言，既不 PASS 也不记账）'
+    fail=1
+  fi
   # v0.2.57 生产日志复盘实锤：[relay] 把 paired.token（长期重连凭证，16 条）与
   # pair.code（六位配对码，12 条）原样落盘。隐私名单收在 logpolicy.js，
   # index.js 必须走它——把 send() 改回内联 quiet 判定就是拆线，必须红。
