@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 测试 flavor 必须和正式版在桌面/设置里一眼分得开：
+         10-19 把 emu 包（只改了 SIGNALING_URL）装到 Mi10 上，桌面出现两个同名「陪着你」，
+         用户按名字删掉了真正配对过的那一个（正式版）。 -->
+    <string name="app_name">陪着你·测试</string>
+</resources>
