@@ -51,7 +51,7 @@ object BacklogTiers {
      */
     fun trim(lines: List<String>, nowMs: Long = System.currentTimeMillis()): List<String> {
         if (lines.size <= MAX_ENTRIES) return lines
-        val quotas = intArrayOf(QUOTA_DEATH, QUOTA_BEAT, QUOTA_QOS)
+        val quotas = intArrayOf(QUOTA_DEATH, QUOTA_GAP, QUOTA_QOS)
         val keep = BooleanArray(lines.size)
         val seen = IntArray(quotas.size)
         var droppedDeath = 0
