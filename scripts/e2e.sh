@@ -272,7 +272,10 @@ ICE=UNKNOWN
 for i in $(seq 1 20); do
   # CONNECTED 与 FAILED 都是终态，必须同轮观测：只等 CONNECTED 会在"FAILED 恰好落在轮询结束后"
   # 时把环境失败误报成异常（实测 20:20:32 capture_ok → 20:20:48 FAILED，而旧轮询 20:20:47 就退出了）
-  C=$(count_log "$S1" "ice state: COMPLETED|ice state: CONNECTED")
+  # 必须带 `->`：客户端唯一打印形式是 `ice state: $previousState->$state`（WebRtcClient.kt:725），
+  # 写成字面 `ice state: CONNECTED` 永远匹配不到 ⇒ ICE=OK 结构性不可达，整段媒体断言白丢
+  # （10-19 复现：20 轮轮询全 0，而同一时刻 logcat 明明有 CHECKING->CONNECTED）。
+  C=$(count_log "$S1" "ice state: [A-Z_]+->(COMPLETED|CONNECTED)")
   Fl=$(count_log "$S1" "ice state: [A-Z_]+->FAILED")
   [ "${C:-0}" -gt 0 ] && { ICE=OK; break; }
   [ "${Fl:-0}" -gt 0 ] && { ICE=FAILED; break; }

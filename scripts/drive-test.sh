@@ -185,7 +185,8 @@ EA0=$(endlog $S1); EB0=$(endlog $S2)
 
 # 5) 会话存活 60s (静止画面不再被看门狗误杀)
 sleep 60
-ICEA=$($ADB -s $S1 logcat -d 2>/dev/null | grep -c "ice state: COMPLETED\|ice state: CONNECTED" || true)
+# ICE 判定必须匹配 `旧态->新态` 这个唯一打印形式（WebRtcClient.kt:725），与 scripts/e2e.sh 同口径
+ICEA=$($ADB -s $S1 logcat -d 2>/dev/null | grep -cE "ice state: [A-Z_]+->(COMPLETED|CONNECTED)" || true)
 FAILED_A=$($ADB -s $S1 logcat -d 2>/dev/null | grep -cE "ice state: [A-Z_]+->FAILED" || true)
 LIVEB=$($ADB -s $S2 logcat -d 2>/dev/null | grep -c "viewer-ready" || true)
 CKA=$($ADB -s $S1 logcat -d -b crash 2>/dev/null | grep -c "Fatal signal" || true)

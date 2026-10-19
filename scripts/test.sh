@@ -290,6 +290,27 @@ PY
     echo "静态检查: harness 的 ICE 转移判据必须写 [A-Z_]+->（单字符类匹配不到 CHECKING->FAILED=恒假）" >&2
     fail=1
   fi
+  # 坑⑬ 修完字符类之后，成功分支**仍然是**结构性不可达（10-19 复现）：判据写成字面
+  # `ice state: CONNECTED`，而客户端唯一的打印形式是 `旧态->新态`（WebRtcClient.kt:725），
+  # 实测 20 轮轮询全 0、同一时刻 logcat 明明有 CHECKING->CONNECTED ⇒ 媒体段整段白丢。
+  # 冻结字符串式的 ICE 判据必须带箭头；注释里的反例不算（否则解释"为什么不能这么写"的字
+  # 被自己的检测器判红，人就学会把守卫删掉）。
+  local ice_arrow
+  ice_arrow=$(python3 - "$ROOT/scripts/e2e.sh" "$ROOT/scripts/drive-test.sh" <<'PY'
+import sys
+bad = []
+for f in sys.argv[1:]:
+    for i, raw in enumerate(open(f, encoding="utf-8"), 1):
+        code = raw.split("#", 1)[0]
+        if "ice state:" in code and "->" not in code:
+            bad.append("%s:%d" % (f.rsplit("/", 1)[-1], i))
+print(" ".join(bad))
+PY
+)
+  if [ -n "$ice_arrow" ]; then
+    echo "静态检查: harness 的 ICE 成功判据缺箭头，客户端只打印 旧态->新态，字面 CONNECTED 永远匹配不到（恒假）: $ice_arrow" >&2
+    fail=1
+  fi
   # v0.2.56 t4 复盘（drive-run1）：sess_page 把 dumpsys 的 mFocusedApp 也统计进来，而它滞后停在
   # 已 finish 的 ActivityRecord 上（实测 B 会话页 CLOSE、mCurrentFocus 已是 MainActivity，
   # mFocusedApp 仍写着 SessionActivity）→「观看端会话页未退出」恒真。焦点判据只准看 mCurrentFocus。
