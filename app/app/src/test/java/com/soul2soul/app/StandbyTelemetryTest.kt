@@ -381,4 +381,39 @@ class StandbyTelemetryTest {
             }
         }
     }
+
+    // S11（10-19 生产实测后新增）：临终那条退出事件必须同步落盘，不许退回乐观发送。
+    // 现象：17:48:10 两端 `close code=1000 reason=bye` 都到了（证明 onDestroy 确实跑了、
+    // close 帧确实发得出去），而 `app_exit` 全库 0 条。原因是 reportEvent 写进 socket 缓冲就算发了，
+    // 三行之后的 client.close() 把还没出去的帧连同连接一起关掉。
+    @Test
+    fun `app exit at teardown goes to the backlog instead of a frame about to be closed`() {
+        val destroyed = functionBody(presence(), "override fun onDestroy()")
+        assertTrue("onDestroy 必须用 reportExitQueued（补报队列），回滚即红",
+            destroyed.any { it.contains("SelfCheck.reportExitQueued(") })
+        assertTrue("onDestroy 里不许再用乐观发送发退出事件（那条路径在这里结构性发不出去）",
+            code(destroyed).none { it.contains("reportEvent(") })
+        val qi = destroyed.indexOfFirst { it.contains("SelfCheck.reportExitQueued(") }
+        val ci = destroyed.indexOfFirst { it.contains("Presence.client.close()") }
+        assertTrue("onDestroy 必须保留 close() 出口（否则补报也没有下一次连接）", ci >= 0)
+        assertTrue("退出证据必须排在拆连接之前", qi in 0 until ci)
+
+        val helper = functionBody(selfCheck(), "fun reportExitQueued(")
+        assertTrue("必须走 DiagBacklog.enqueueSync（同步落盘），不是异步的 enqueue",
+            helper.any { it.contains("DiagBacklog.enqueueSync(") })
+        val sync = functionBody(backlog(), "fun enqueueSync(")
+        // 进程可能在这行之后立刻没了：排进 io 队列的任务不保证被执行
+        assertTrue("enqueueSync 不许把写盘甩给 io 线程（临终任务等不到它跑）",
+            code(sync).none { it.contains("io.execute") })
+        assertTrue("两条入队路径必须共用同一条落盘函数，否则修剪规则会分叉",
+            sync.any { it.contains("appendLine(") })
+        assertTrue("异步入队路径必须还在（广播/ICE 回调不许被顺手改成同步）",
+            functionBody(backlog(), "fun enqueue(").any { it.contains("io.execute") })
+
+        // 解绑那次 socket 活着、后面也没有 close()：它该继续当场发出去，
+        // 两个入口不许共用一条"要等她下次打开 App 才到"的路径
+        val unpaired = between(presence(), "\"unpaired\" -> {", "\"pair.recall_ask\" -> {")
+        assertTrue("解绑的 app_exit 仍走实时发送",
+            unpaired.any { it.contains("SelfCheck.reportEvent(this, \"standby\", \"app_exit\"") })
+    }
 }

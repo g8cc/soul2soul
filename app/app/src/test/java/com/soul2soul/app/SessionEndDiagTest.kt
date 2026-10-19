@@ -135,8 +135,14 @@ class SessionEndDiagTest {
         val body = window(selfCheck(), "private fun sendDiag(", 16)
         assertTrue("发送前必须判 Presence.client.isConnected",
             body.any { it.contains("Presence.client.isConnected") })
-        assertTrue("上报字段只能是标量：detail 必须截断",
-            window(selfCheck(), "fun reportEvent(", 12).any { it.contains(".take(64)") })
+        // 按文件扫，不按"reportEvent 往后 12 行"扫：报文体现在由 eventBody 统一构造（reportEvent
+        // 与 reportExitQueued 共用），窗口版会跟着重构一起变成空锁。
+        // 判据方向是"每一个 detail 都必须截断"，多一个出口也不会漏。
+        val detailSites = code(selfCheck()).filter { it.contains("put(\"detail\"") }
+        assertTrue("SelfCheck 里一个 detail 字段都没扫到：出口已改名/删除，这条锁等于没锁",
+            detailSites.isNotEmpty())
+        assertTrue("上报字段只能是标量：每一处 detail 都必须截断到 64（safeTag 静默截断、无溢出标记）",
+            detailSites.all { it.contains(".take(64)") })
     }
 
     // D7：时长上报不得复用被闪断清零的字段（0.2.55 生产日志 liveMs 失真的根因）

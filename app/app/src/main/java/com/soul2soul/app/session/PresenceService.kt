@@ -252,10 +252,12 @@ class PresenceService : Service() {
         if (wakeLock.isHeld) wakeLock.release() // acquire 的对偶出口（穷举 restore）
         scope.cancel()
         com.soul2soul.app.msg.InboxStore.removeListener(inboxListener)
-        // 主动退出必须和"被 ROM 杀"分得开：close() 之前发——socket 还在就当场出去，
-        // Doze 下 TCP 已死就进补报队列，复活时带 at_ 出来（诚实说明：这条只能证明"她退出了/服务被停"，
-        // 不会改变今天 0/40 条 code=1000 的分布，那批是 TCP 先亡）
-        com.soul2soul.app.util.SelfCheck.reportEvent(this, signalRole(), "app_exit", "-", "why=destroy")
+        // 主动退出必须和"被 ROM 杀"分得开。必须走补报队列：下面第三行就 close()，
+        // 乐观发送的那一帧还躺在 socket 缓冲里会一起被关掉（10-19 实测：两端
+        // `close code=1000 reason=bye` 都到了，`app_exit` 一条没出）。
+        // 诚实说明：这条只能证明"她退出了/服务被停"，不会改变今天 0/40 条 code=1000
+        // 的分布，那批是 Doze 下 TCP 先亡、close 帧本来就送不出去。
+        com.soul2soul.app.util.SelfCheck.reportExitQueued(this, signalRole(), "why=destroy")
         com.soul2soul.app.util.StandbyProbe.stop(this)
         Presence.sessionBusy = false
         Presence.client.close()

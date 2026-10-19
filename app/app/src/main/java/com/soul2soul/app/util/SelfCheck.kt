@@ -97,14 +97,29 @@ object SelfCheck {
     fun reportEvent(
         ctx: Context, role: String, event: String, ice: String, detail: String? = null
     ): JSONObject {
-        val body = JSONObject()
-            .put("role", role).put("event", event).put("ice", ice)
-            .put("detail", (detail ?: "-").take(64))
-            .put("fg", foreground(ctx)).put("screenOn", screenOn(ctx))
-            .put("app", BuildConfig.VERSION_NAME)
+        val body = eventBody(ctx, role, event, ice, detail)
         sendDiag(ctx, "diag.event", body)
         return body
     }
+
+    /**
+     * 拆服务那一刻的退出事件：只入队、不发送。
+     * `reportEvent` 走的是乐观发送，而 `onDestroy` 里紧跟着就是 `client.close()`——
+     * 帧还在 socket 缓冲里就连同连接一起被关掉了（10-19 实测：两端 `code=1000 reason=bye`
+     * 都在，`app_exit` 一条没到）。入队后下次连上带 `at_` 重放，时刻不会丢。
+     * 代价要说清：这条永远以补报行的形式出现，且她若再也不打开 App 就永远不到。
+     */
+    fun reportExitQueued(ctx: Context, role: String, detail: String) {
+        DiagBacklog.enqueueSync(ctx, "diag.event", eventBody(ctx, role, "app_exit", "-", detail))
+    }
+
+    private fun eventBody(
+        ctx: Context, role: String, event: String, ice: String, detail: String?
+    ) = JSONObject()
+        .put("role", role).put("event", event).put("ice", ice)
+        .put("detail", (detail ?: "-").take(64))
+        .put("fg", foreground(ctx)).put("screenOn", screenOn(ctx))
+        .put("app", BuildConfig.VERSION_NAME)
 
     /** 把一条已经构造好的事件体直接塞进补报队列（不再碰 socket），供死亡窗口重放用 */
     fun queueEvent(ctx: Context, body: JSONObject) = DiagBacklog.enqueue(ctx, "diag.event", body)

@@ -19,7 +19,7 @@ import org.json.JSONObject
  * v0.2.59 起这个队列不再只是"能存"：待机和通话期都会产读数，量比原来大一个数量级，
  * 所以这里做了三件事——分级淘汰（死亡瞬间的行不许被心跳/QoS 挤掉）、一次复活多排几批
  * （抖动期每 17~104 秒重连一次，每次只发 20 条等于永远排不空）、入队离开调用方线程
- * （广播接收器与 ICE 回调都可能落在主线程）。
+ * （广播接收器与 ICE 回调都可能落在主线程；例外是 [enqueueSync]，临终那一条反必须同步落盘）。
  */
 object DiagBacklog {
 
@@ -45,15 +45,33 @@ object DiagBacklog {
             JSONObject().put("t", type).put("b", withAt(body)).toString()
         }.getOrNull() ?: return
         val app = ctx.applicationContext
+        runCatching { io.execute { appendLine(app, line) } }
+    }
+
+    /**
+     * 进程正在拆的时候用的入队：**同步**落盘，不等 io 线程。
+     * 与 [enqueue] 的差别只有一处，但那一处就是这条证据存在的全部理由——
+     * `PresenceService.onDestroy` 之后进程可能立刻没了，排进 daemon 线程队列的任务
+     * 根本不保证被执行（v0.2.59 把入队挪离主线程时没考虑到"调用方就是临终现场"）。
+     * 10-19 实测：17:48:10 两端都留下了 `close code=1000 reason=bye`（= onDestroy 确实跑了、
+     * close 帧确实发出去了），而 `app_exit` 一条都没到——事件走的是乐观发送，
+     * 帧还在 socket 缓冲里就被三行之后的 `close()` 关掉了。
+     * 主线程写一行 ~200 字节，是这一刻唯一能接受的形式。
+     */
+    fun enqueueSync(ctx: Context, type: String, body: JSONObject) {
+        val line = runCatching {
+            JSONObject().put("t", type).put("b", withAt(body)).toString()
+        }.getOrNull() ?: return
+        appendLine(ctx.applicationContext, line)
+    }
+
+    /** 两条入队路径共用的落盘（超过 [TRIM_BYTES] 才整表修剪，平时一条 append） */
+    private fun appendLine(app: Context, line: String) {
         runCatching {
-            io.execute {
-                runCatching {
-                    synchronized(lock) {
-                        val f = file(app)
-                        if (f.exists() && f.length() > TRIM_BYTES) writeAll(app, readLines(app) + line)
-                        else f.appendText(line + "\n")
-                    }
-                }
+            synchronized(lock) {
+                val f = file(app)
+                if (f.exists() && f.length() > TRIM_BYTES) writeAll(app, readLines(app) + line)
+                else f.appendText(line + "\n")
             }
         }
     }
