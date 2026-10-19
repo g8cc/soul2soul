@@ -1,3 +1,6 @@
+// Kotlin DSL 里 `java` 会被 Gradle 的 java 扩展占位，必须显式 import（写 java.util.Properties 会 Unresolved reference）
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -33,12 +36,18 @@ android {
 
     signingConfigs {
         create("release") {
+            // 口令不入库：读 rootProject 的 keystore.properties（.gitignore 覆盖，模板见 keystore.properties.example）
+            val propsFile = rootProject.file("keystore.properties")
             val ksFile = rootProject.file("keystore/soul2soul-release.jks")
-            if (ksFile.exists()) {
+            if (propsFile.exists() && ksFile.exists()) {
+                val props = Properties().apply { propsFile.inputStream().use { load(it) } }
+                val alias = props.getProperty("keyAlias") ?: error("keystore.properties 缺 keyAlias")
+                val store = props.getProperty("storePassword") ?: error("keystore.properties 缺 storePassword")
+                val key = props.getProperty("keyPassword") ?: store
                 storeFile = ksFile
-                storePassword = "soul2soul2026"
-                keyAlias = "soul2soul"
-                keyPassword = "soul2soul2026"
+                storePassword = store
+                keyAlias = alias
+                keyPassword = key
                 // Android 7.0 的 MIUI 安装器对 v2-only 包有静默失败 bug，强制 v1+v2 双签名
                 enableV1Signing = true
                 enableV2Signing = true

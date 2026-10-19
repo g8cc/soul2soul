@@ -263,6 +263,21 @@ PY
       fail=1
     fi
   done
+  # 签名口令原先明文躺在 app/app/build.gradle.kts 里、跟着提交推到了 GitHub（10-19 用户点头移出）。
+  # 这条守卫只保证"别再写回构建脚本"，不声称历史上没漏过——那个值仍在 git 历史里，改口令才是真闭合。
+  # 判据扫的是整棵 app/ + scripts/（不含 build/ 产物），按"赋值右边是字符串字面量"匹配：
+  # 口令文件本身写的是 `storePassword=真值`（没有引号），不会被这条误伤。
+  if grep -rnE '(storePassword|keyPassword)[[:space:]]*=[[:space:]]*"' \
+       --include='*.kts' --include='*.gradle' --include='*.gradle.kts' --include='*.properties' --include='*.sh' \
+       "$ROOT/app" "$ROOT/scripts" 2>/dev/null | grep -v '/build/' | grep -q .; then
+    echo "静态检查: 签名口令不许内联在构建脚本里（只允许读 app/keystore.properties，模板见 keystore.properties.example）"
+    fail=1
+  fi
+  # 口令文件的唯一容身处是被 ignore；ignore 那行一旦被人删掉，下一次 commit 就把它推出去了
+  if ! grep -qx 'keystore.properties' "$ROOT/.gitignore"; then
+    echo "静态检查: .gitignore 必须保留 keystore.properties 这一行（口令文件不许被跟踪）"
+    fail=1
+  fi
   # v0.2.57 生产日志复盘实锤：[relay] 把 paired.token（长期重连凭证，16 条）与
   # pair.code（六位配对码，12 条）原样落盘。隐私名单收在 logpolicy.js，
   # index.js 必须走它——把 send() 改回内联 quiet 判定就是拆线，必须红。

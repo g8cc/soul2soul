@@ -17,7 +17,11 @@ export JAVA_HOME=/Users/wardonguo/tools/jdk17/jdk-17.0.2.jdk/Contents/Home
 - Flavor：`prod`（连云服务器）/ `emu`（applicationId 加 `.emu`，连 `ws://10.0.2.2:8080` 双模拟器）× debug/release 共 4 变体。
 - **不要用 `-P` 属性切换信令 URL**（BuildConfig 任务对属性变化不敏感，会拿旧值）。
 - 版本 bump 必须配合 `clean`：Kotlin 会内联 BuildConfig 常量（v0.2.12 实锤 hasUpdate 焊死）。`publish-release.sh` 已内置 clean。
-- 签名口令在 `app/app/build.gradle.kts`（勿外泄、勿写入其他文件）。
+- **签名口令不入库**：`app/app/build.gradle.kts` 只读 `app/keystore.properties`（`.gitignore` 覆盖；模板 `app/keystore.properties.example`）。缺该文件时 release 不配置签名，
+  `packageProdRelease` 直接报 `SigningConfig "release" is missing required property "storeFile"`（10-19 实测 rc=1，不会悄悄产出未签名包）。
+  ⚠️ 这条是 10-19 才补的：**口令的旧值仍明文躺在 git 历史与 GitHub 上**（`git log --all -S` 命中 3 个提交），移出 HEAD 不等于撤回——
+  真要闭合只能 `keytool -storepasswd/-keypasswd` 换口令（证书不变 ⇒ 老设备仍可覆盖安装），历史改写是另一件事。
+  t0 两条守卫盯着：构建脚本里出现 `storePassword = "…"` 字面量即红、`.gitignore` 少了 `keystore.properties` 那行即红。
 
 ## 测试（必读）
 
