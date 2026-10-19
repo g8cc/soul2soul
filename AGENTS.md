@@ -86,6 +86,13 @@ v0.2.44 悬浮球丢失后立的规矩——多轮"稳定性审计"仍漏了一�
 
 ### 读服务器日志的口径（v0.2.59 待机遥测起必须知道）
 
+- **`diag.session reason` 的版本分界是 0.2.61**（10-19 抓到四处"同一个字符串掩盖两种死法"，全部已在 repo 修掉）：
+  ≤0.2.60 里 `local_stop` 同时涵盖"她按了停止"与"HyperOS 撤销录屏授权"（`MediaProjection.Callback.onStop()`
+  不占 first-wins 槽，被收尾那条 `local_stop` 覆盖），共享端被对方挂断则只剩 `local_close`。
+  0.2.61 起可直接读：`projection_stopped`＝系统撤的授权、`remote_bye`＝她挂的、`peer_gone`＝只是信令掉线
+  （媒体可能本来就好）、`call_canceled`＝主叫在授权阶段反悔（`setupMs=-1`，从没连过，别读成"连上几秒被挂断"），
+  另有 `diag.event stop_tap detail=src_main_page|src_notify` 回答"她点的是哪一个停止入口"。
+  现网补救读法（≤0.2.60 唯一可用的一列）＝同一行 `proj`：`stopped`⇒被撤销、`live`⇒她按的；`proj=_` 的会话永久无法判。
 - **`diag.*` 只在已鉴权连接上打印**（`server/src/index.js` 的 `if (!ws.authed) break`）。
   所以**未配对期间的日志必然是空的，这不是埋点坏了**；判"某事件零采样"之前先确认那一刻两端已配对。
 - **`detail` 里的 `=` 会被 `safeTag` 磨成 `_`**：补报的真实时刻要 grep `detail=at_`，写 `detail=at=` 是一个不存在的键
