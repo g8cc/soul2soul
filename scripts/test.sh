@@ -155,21 +155,30 @@ PY
   # v0.2.59 待机遥测的注册对称性：StandbyProbe 是本项目第一处"非会话期"系统广播监听，
   # 漏一条 unregister 就是解绑后仍在收 SCREEN_OFF/网络回调（耗电 + 攒发不出去的事件）。
   # 形状照上面 wm.addView/removeView 那条：按文件配对，不按行号。
-  local orphaned kf
+  # **按条数而不是"有没有"**（10-19 证伪时撞见的洞）：StandbyProbe 注册 screen+doze 两个 receiver，
+  # 旧的"文件里含 unregisterReceiver( 即算过"判据，把其中一个整行删掉 t0 照样绿（实测 rc=0）——
+  # 因为另一个还在同一文件里。计数版才是这条守卫本来想说的意思。
+  # 选择/计数都用 `(^|[^A-Za-z])registerReceiver(`：`unregisterReceiver(` 里也含
+  # `registerReceiver(` 这个子串，不加字母锚会把 unregister 也数进 register（净结果恰好抵掉）。
+  local orphaned kf regcnt uncmt
   orphaned=""
-  for kf in $(grep -rl --include='*.kt' "\.registerReceiver(" "$ROOT/app/app/src/main/java" 2>/dev/null); do
-    grep -q "unregisterReceiver(" "$kf" || orphaned="$orphaned $kf"
+  for kf in $(grep -rlE --include='*.kt' '(^|[^A-Za-z])registerReceiver\(' "$ROOT/app/app/src/main/java" 2>/dev/null); do
+    regcnt=$(grep -oE '(^|[^A-Za-z])registerReceiver\(' "$kf" | wc -l | tr -d ' ')
+    uncmt=$(grep -oE '(^|[^A-Za-z])unregisterReceiver\(' "$kf" | wc -l | tr -d ' ')
+    [ "$uncmt" -ge "$regcnt" ] || orphaned="$orphaned $(basename "$kf")(register=$regcnt/unregister=$uncmt)"
   done
   if [ -n "$orphaned" ]; then
-    echo "静态检查: registerReceiver 缺配对 unregisterReceiver:$orphaned"
+    echo "静态检查: registerReceiver 条数多于 unregisterReceiver（漏一条=解绑后仍在收系统广播）:$orphaned"
     fail=1
   fi
   orphaned=""
-  for kf in $(grep -rl --include='*.kt' "registerDefaultNetworkCallback(" "$ROOT/app/app/src/main/java" 2>/dev/null); do
-    grep -q "unregisterNetworkCallback(" "$kf" || orphaned="$orphaned $kf"
+  for kf in $(grep -rlE --include='*.kt' 'registerDefaultNetworkCallback\(' "$ROOT/app/app/src/main/java" 2>/dev/null); do
+    regcnt=$(grep -oE 'registerDefaultNetworkCallback\(' "$kf" | wc -l | tr -d ' ')
+    uncmt=$(grep -oE 'unregisterNetworkCallback\(' "$kf" | wc -l | tr -d ' ')
+    [ "$uncmt" -ge "$regcnt" ] || orphaned="$orphaned $(basename "$kf")(register=$regcnt/unregister=$uncmt)"
   done
   if [ -n "$orphaned" ]; then
-    echo "静态检查: registerDefaultNetworkCallback 缺配对 unregisterNetworkCallback:$orphaned"
+    echo "静态检查: registerDefaultNetworkCallback 条数多于 unregisterNetworkCallback（漏一条=探针停了还在刷 net_down）:$orphaned"
     fail=1
   fi
   # diag.session 的这两列服务器印了两天全是 `_`（字段在服务端一直存在，客户端从没 put 过）
