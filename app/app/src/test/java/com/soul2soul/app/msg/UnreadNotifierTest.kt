@@ -143,4 +143,27 @@ class UnreadNotifierTest {
         assertTrue("conversation() 含自己发出去的，拿它当未读会把回复也通知一遍",
             sync.none { it.contains("conversation()") })
     }
+
+    @Test
+    fun `M4 留言通知安静躺着-不响不横幅不震动（用户 10-20 定口径）`() {
+        val text = notifier().joinToString("\n")
+        for (noisy in listOf("setPriority", "setDefaults", "setVibrate", "setSound")) {
+            assertTrue("留言通知用了 $noisy＝会响或会横幅，与\"静静躺在通知里\"相反",
+                !text.contains(noisy))
+        }
+        val ch = msgChannel(source("app/src/main/java/com/soul2soul/app/session/Notif.kt"))
+        assertTrue("msg 渠道必须真的是 IMPORTANCE_LOW", ch.any { it.contains("IMPORTANCE_LOW") })
+        assertTrue("同一条语句里不许再出现别的档位（HIGH/MAX＝横幅+声音）",
+            ch.none { it.contains("IMPORTANCE_HIGH") || it.contains("IMPORTANCE_MAX") || it.contains("IMPORTANCE_DEFAULT") })
+    }
+
+    /** CH_MSG 那条渠道语句：同一行收尾就取一行，跨行则取到收尾括号（不许只取半句） */
+    private fun msgChannel(lines: List<String>): List<String> {
+        val a = lines.indexOfFirst { it.contains("NotificationChannel(CH_MSG") }
+        assertTrue("找不到 msg 渠道——渠道被改名/删除时这条锁必须先红，不许静默跳过", a >= 0)
+        if (lines[a].contains(")")) return listOf(lines[a])
+        val b = ((a + 1)..lines.lastIndex).firstOrNull { lines[it].contains(")") }
+            ?: error("msg 渠道语句取不出收尾，扫描口径需重看")
+        return lines.subList(a, b + 1)
+    }
 }
