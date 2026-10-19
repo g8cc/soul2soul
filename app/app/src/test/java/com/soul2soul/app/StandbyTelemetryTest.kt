@@ -109,12 +109,18 @@ class StandbyTelemetryTest {
             end.any { it.contains("DiagDetail.pathCode(lastSelectedPath)") },
         )
         assertTrue("会话结束必须传投影状态", end.any { it.contains("proj = projectionState") })
-        // 禁令范围＝整个 onStop()。6 行窗口版是实测过的空锁：`onStop()` 实际 11 行，
-        // 在第 8 行（`if (!closed)` 里）插一条 reportEvent，`tests=13 failures=0`。
+        // v0.2.64 起"隐私停止"不再结束会话，`proj` 这一列只在会话真的收尾时才打印，
+        // 撤授权那一刻在日志里就只剩 `diag.event projection_revoked` 一条（见 D10：两头都要有）。
+        // 所以这里禁的不再是"再发一条事件"，而是"再造一个结束真值源"——
+        // 结束原因必须仍然只有 notifyEnded/stopSession 两处，否则 diag.session.reason 会分叉。
+        val onStop = code(functionBody(webrtc(), "override fun onStop() {"))
         assertTrue(
-            "隐私停止时只能改状态、不能再发一条事件（同一件事两个真值来源）",
-            code(functionBody(webrtc(), "override fun onStop() {"))
-                .none { it.contains("reportEvent(") },
+            "撤销授权必须留下读数（会话续存时，这是它在服务器日志里唯一的形状）",
+            onStop.any { it.contains("reportEvent(") },
+        )
+        assertTrue(
+            "但不许在这里声明自己是终止原因：diag.session 只能由 reportSessionEnd 一处产生",
+            onStop.none { it.contains("reportSession(") || it.contains("noteEnd(") },
         )
     }
 

@@ -87,6 +87,11 @@ class WebRtcClient(
         /** 网络往返延迟（毫秒），每 2 秒回调一次（实时性可视化用） */
         fun onRtt(ms: Long)
         fun onEnded(reason: String)
+        /**
+         * 系统撤销录屏授权（她锁屏 / 在系统隐私提示里点停止）：画面停了，语音与数据通道照旧。
+         * 0.2.64 起这不是会话终止——共享端要保活，并把"重新开画面"的入口交回给她。
+         */
+        fun onProjectionRevoked() {}
     }
 
     private val eglContext = App.instance.eglBase.eglBaseContext
@@ -303,6 +308,91 @@ class WebRtcClient(
 
     // ---------- 建立流程 ----------
 
+    /**
+     * 系统撤销授权后重开画面：**只换采集器，不动 PeerConnection**。
+     *
+     * 视频轨挂在 [videoSource] 上而不是挂在采集器上，所以新采集器把帧喂回同一个 source
+     * 就是对原轨道续流——不需要 renegotiate、不需要重新 ICE，对方的音频/涂鸦/操控全程无感。
+     * 传新 token 是合法的：Android 14 禁的是**复用**旧 resultData，一次全新授权就是新 token
+     * （见 [qualityLongEdge] 那条 14+ 语义）。
+     *
+     * @return false 表示画面没起来但会话照旧（音频还活着），调用方只该提示重试，不许拆会话
+     */
+    fun restartCapture(projectionData: Intent): Boolean {
+        val source = videoSource ?: return false
+        val helper = surfaceHelper ?: return false
+        if (closed || pc == null) return false
+        val old = capturer
+        val capturer = ScreenCapturerAndroid(projectionData, projectionCallback())
+        this.capturer = capturer
+        runCatching { old?.dispose() }
+        return runCatching {
+            capturer.initialize(helper, context, captureObserver(source, restart = true))
+            capturer.startCapture(captureWidth, captureHeight, CAPTURE_FPS)
+        }.fold(
+            onSuccess = {
+                projectionState = "live"
+                com.soul2soul.app.util.SelfCheck.reportEvent(
+                    context, "sharer", "projection_resumed",
+                    latestIceState, "${captureWidth}x${captureHeight}",
+                )
+                true
+            },
+            onFailure = { e ->
+                Log.w(TAG, "restartCapture failed", e)
+                // 起不来就退回 stopped，别让 proj=live 成为第二个真值来源（读数会说谎）
+                projectionState = "stopped"
+                false
+            },
+        )
+    }
+
+    /**
+`restart=false` 是首次开采集：起不来就等于这通电话没有画面，
+     * 必须响亮结束会话（旧行为）。`restart=true` 是撤销授权后的重试：音频与数据通道本来就活着，
+     * 一次重试失败只能报读数、不许把整通电话拆掉（0.2.64 的保活语义）。
+     */
+    private fun captureObserver(source: VideoSource, restart: Boolean): CapturerObserver {
+        val upstream = source.capturerObserver
+        return object : CapturerObserver {
+            override fun onCapturerStarted(success: Boolean) {
+                upstream.onCapturerStarted(success)
+                com.soul2soul.app.util.SelfCheck.reportEvent(
+                    context, "sharer",
+                    if (success) "capture_ok" else "capture_fail",
+                    latestIceState,
+                    "${captureWidth}x${captureHeight}",
+                )
+                if (!success && !restart) notifyEnded("capture_START_FAILED")
+            }
+
+            override fun onCapturerStopped() = upstream.onCapturerStopped()
+
+            override fun onFrameCaptured(frame: VideoFrame) = upstream.onFrameCaptured(frame)
+        }
+    }
+
+    /**
+     * 系统侧撤销录屏授权的唯一回调（她锁屏、或她在系统隐私提示里点"停止"）。
+     * 0.2.63 及以前这里直接结束会话——那是错的：她锁屏是为了省电，不是想挂电话，
+     * 而语音与数据通道跟 MediaProjection 没有任何关系（10-19 双真机日志实测 `ice=CONNECTED`
+     * 且 rtt 正常，只有画面死了）。0.2.64 起这里只把画面标成 stopped 并交给上层保活。
+     */
+    private fun projectionCallback(): android.media.projection.MediaProjection.Callback =
+        object : android.media.projection.MediaProjection.Callback() {
+            override fun onStop() {
+                projectionState = "stopped"
+                // closed 必须先判：close() 里 capturer.stopCapture() 会主动走一遍 onStop，
+                // 那是我们自己收尾，不是系统撤销——报出去就成了每通电话一条假事件
+                if (closed) return
+                com.soul2soul.app.util.SelfCheck.reportEvent(
+                    context, "sharer", "projection_revoked",
+                    latestIceState, "keepalive",
+                )
+                listener.onProjectionRevoked()
+            }
+        }
+
     /** 共享端入口。projectionData 为系统屏幕录制授权返回的 Intent */
     fun startSharer(projectionData: Intent) {
         projectionState = "starting"
@@ -310,23 +400,7 @@ class WebRtcClient(
         this.pc = pc
         startConnectTimeout()
 
-        val capturer: VideoCapturer = ScreenCapturerAndroid(
-            projectionData,
-            object : android.media.projection.MediaProjection.Callback() {
-                // 用户在系统隐私提示里"停止"录屏：授权被撤销，会话必须体面结束而非黑屏挂着
-                override fun onStop() {
-                    projectionState = "stopped"
-                    // 必须先 noteEnd 再交出去：ScreenShareService.stopSession 收尾会补一条
-                    // local_stop，而 noteEnd 是 first-wins。不占位就会被"她按了停止"覆盖掉，
-                    // 系统撤销授权与被按停止在服务器日志里就成同一个原因（0.2.60 生产日志实锤）。
-                    // 只占这一格、不另发事件：同一件事发两条就是两个真值来源。
-                    if (!closed) {
-                        noteEnd("projection_stopped")
-                        listener.onEnded("projection_stopped")
-                    }
-                }
-            },
-        )
+        val capturer: VideoCapturer = ScreenCapturerAndroid(projectionData, projectionCallback())
         projectionState = "live"
         this.capturer = capturer
         val source = factory.createVideoSource(true) // isScreencast: 启用内容编码模式
@@ -340,24 +414,7 @@ class WebRtcClient(
         val helper = SurfaceTextureHelper.create("s2s-capture", eglContext)
         surfaceHelper = helper
         // 保留异步启动失败通知，但不再为每一帧做 AtomicLong 计数。
-        val upstream = source.capturerObserver
-        val observingCapturer = object : CapturerObserver {
-            override fun onCapturerStarted(success: Boolean) {
-                upstream.onCapturerStarted(success)
-                com.soul2soul.app.util.SelfCheck.reportEvent(
-                    context, "sharer",
-                    if (success) "capture_ok" else "capture_fail",
-                    latestIceState,
-                    "${captureWidth}x${captureHeight}",
-                )
-                if (!success) notifyEnded("capture_START_FAILED")
-            }
-
-            override fun onCapturerStopped() = upstream.onCapturerStopped()
-
-            override fun onFrameCaptured(frame: VideoFrame) = upstream.onFrameCaptured(frame)
-        }
-        capturer.initialize(helper, context, observingCapturer)
+        capturer.initialize(helper, context, captureObserver(source, restart = false))
         capturer.startCapture(w, h, CAPTURE_FPS)
 
         val videoTrack = factory.createVideoTrack("v0", source)

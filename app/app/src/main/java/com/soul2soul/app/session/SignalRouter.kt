@@ -31,14 +31,25 @@ object SignalRouter {
     sealed class DataAction {
         object None : DataAction()
         object PeerScreenOff : DataAction()  // 显示「对方锁屏了」
+        object PeerVideoOff : DataAction()   // 显示「对方画面已停」：系统撤销录屏授权，会话存续
         object HideBanner : DataAction()     // 解锁且仍连通 → 收起状态条
         object RevokedBanner : DataAction()  // 操控中被收回授权 → 横幅说明原因
         data class ControlFailure(val messageRes: Int) : DataAction()
     }
 
-    fun routeData(k: String, controlMode: Boolean, live: Boolean, reason: String = ""): DataAction = when (k) {
+    fun routeData(
+        k: String,
+        controlMode: Boolean,
+        live: Boolean,
+        reason: String = "",
+        remoteVideoPaused: Boolean = false,
+    ): DataAction = when (k) {
         "screenoff" -> DataAction.PeerScreenOff
-        "screenon" -> if (live) DataAction.HideBanner else DataAction.None
+        "videooff" -> DataAction.PeerVideoOff
+        // 解锁 ≠ 画面回来了：她可能一直不点「重新开画面」。这一路必须什么都不做，
+        // 否则 0.2.64 的保活会让横幅在画面仍然停着的时候先收起来，对方读成"好了"
+        "screenon" -> if (live && !remoteVideoPaused) DataAction.HideBanner else DataAction.None
+        "videoon" -> if (live) DataAction.HideBanner else DataAction.None
         "ctl_denied" -> if (controlMode) DataAction.RevokedBanner else DataAction.None
         "ctl_error" -> if (controlMode) {
             DataAction.ControlFailure(

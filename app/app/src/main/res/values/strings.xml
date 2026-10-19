@@ -60,6 +60,12 @@
     <string name="sharing_starting">等待对方接听…</string>
     <string name="sharing_live">陪玩中 · 点通知可允许/收回TA操控</string>
     <string name="sharing_no_mic">陪玩中 · 语音未开（无麦克风权限）</string>
+    <string name="sharing_video_paused">画面已停 · 点这里重新开启</string>
+    <string name="reauth_title">重新开启画面？</string>
+    <string name="reauth_body">刚才锁屏时系统收回了录屏授权。你们的通话没断，重新授权后即可继续共享画面。</string>
+    <string name="reauth_go">开启画面</string>
+    <string name="reauth_later">先不要画面</string>
+    <string name="reauth_missing_service">通话已经结束了，这次不用授权</string>
     <string name="action_end">结束</string>
     <string name="action_mute">静音</string>
     <string name="action_unmute">取消静音</string>
@@ -101,6 +107,7 @@
     <string name="peer_ended">TA 已结束本次共玩</string>
     <string name="peer_lost">连接断开，共玩已结束</string>
     <string name="peer_screen_off">对方锁屏了，画面暂停·语音继续</string>
+    <string name="peer_video_off">对方画面已暂停·语音继续</string>
     <string name="overlay_permission_missing">悬浮窗权限未生效——请在 系统设置→授权管理→应用权限管理→陪着你 里开启「显示悬浮窗」，否则对方看不到你的画笔</string>
     <string name="perm_accessibility">远程协助（可选）</string>
     <string name="ctl_off">协助</string>

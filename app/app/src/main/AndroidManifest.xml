@@ -84,6 +84,14 @@
             android:launchMode="singleTask"
             android:theme="@style/Theme.AppCompat.DayNight.Dialog" />
 
+        <!-- 录屏授权被系统撤销后的重新授权入口（点"画面已停"通知弹出；Dialog 主题，不进最近任务） -->
+        <activity
+            android:name=".session.CaptureReauthActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:launchMode="singleTask"
+            android:theme="@style/Theme.AppCompat.DayNight.Dialog" />
+
         <!-- 在线待命: 持有信令长连接 -->
         <!-- Android14 对 dataSync 型前台服务有每日时长上限，超时会把常驻待命直接停掉；
              本 App 自托管分发不走 Play 审查，specialUse（无时限）才是常驻连接的正确类型 -->

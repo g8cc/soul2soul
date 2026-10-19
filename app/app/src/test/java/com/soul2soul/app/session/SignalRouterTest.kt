@@ -134,6 +134,57 @@ class SignalRouterTest {
     }
 
     @Test
+    fun `videooff 与 screenoff 一样要横幅 但文案是画面已停`() {
+        assertEquals(
+            SignalRouter.DataAction.PeerVideoOff,
+            SignalRouter.routeData("videooff", controlMode = false, live = true),
+        )
+        // 与 live 无关：撤销授权那一刻会话当然是活的，而迟到的 videooff 也不该被吞掉
+        assertEquals(
+            SignalRouter.DataAction.PeerVideoOff,
+            SignalRouter.routeData("videooff", controlMode = true, live = false),
+        )
+    }
+
+    @Test
+    fun `解锁不许替对方撒谎：画面仍停着时 screenon 不收横幅`() {
+        // 0.2.64 保活语义：她锁屏 → 系统撤授权 → 画面停、通话续。她解锁后如果一直没点
+        // 「重新开画面」，观看端只收到 screenon；此时收起横幅＝谎称画面回来了
+        assertEquals(
+            SignalRouter.DataAction.None,
+            SignalRouter.routeData(
+                "screenon", controlMode = false, live = true, remoteVideoPaused = true
+            ),
+        )
+        // Android 12 及以下锁屏不撤授权：没有 videooff 在前，解锁照常收横幅
+        assertEquals(
+            SignalRouter.DataAction.HideBanner,
+            SignalRouter.routeData(
+                "screenon", controlMode = false, live = true, remoteVideoPaused = false
+            ),
+        )
+        // 会话已收口：不许把状态条从"已结束"文案上抢走
+        assertEquals(
+            SignalRouter.DataAction.None,
+            SignalRouter.routeData(
+                "screenon", controlMode = false, live = false, remoteVideoPaused = true
+            ),
+        )
+    }
+
+    @Test
+    fun `videoon 是画面回来的唯一收横幅入口 未连通时不碰状态条`() {
+        assertEquals(
+            SignalRouter.DataAction.HideBanner,
+            SignalRouter.routeData("videoon", controlMode = false, live = true),
+        )
+        assertEquals(
+            SignalRouter.DataAction.None,
+            SignalRouter.routeData("videoon", controlMode = false, live = false),
+        )
+    }
+
+    @Test
     fun `未知 k 走静默 由悬浮窗层自行消费`() {
         assertEquals(
             SignalRouter.DataAction.None,

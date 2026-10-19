@@ -131,6 +131,19 @@ v0.2.44 悬浮球丢失后立的规矩——多轮"稳定性审计"仍漏了一�
   （媒体可能本来就好）、`call_canceled`＝主叫在授权阶段反悔（`setupMs=-1`，从没连过，别读成"连上几秒被挂断"），
   另有 `diag.event stop_tap detail=src_main_page|src_notify` 回答"她点的是哪一个停止入口"。
   现网补救读法（≤0.2.60 唯一可用的一列）＝同一行 `proj`：`stopped`⇒被撤销、`live`⇒她按的；`proj=_` 的会话永久无法判。
+  **0.2.64 起 `reason=projection_stopped` 不再产生**（这一版把"撤授权"从会话终止改成画面停·语音续）：
+  ≥0.2.64 的判据换成 `diag.event projection_revoked`（撤的一刻）/ `projection_resumed`（她重开成功）/
+  `projection_reopen_fail`（重开失败，detail `no_data` 与 `startCapture` 是两种出路）。
+  ⚠️ 两个方向都会读反：在新版本日志找 `projection_stopped` 判"埋点坏了"是错的，它只是不再该出现；
+  把 `proj=stopped` 读成"她挂了"也是错的，`proj` 只回答收尾那一刻的采集状态，不回答中途有没有被撤过。
+- **`reason=projection_stopped` 到 0.2.63 为止，0.2.64 起它根本不再产生**：系统撤销录屏授权（她锁屏省电、或在系统隐私提示里点"停止录制"）
+  从这一版起**不是会话终止**，而是"画面停·语音与信令续·一键重开"。判据换了一条：
+  `diag.event projection_revoked`（detail `keepalive`）＝画面被撤而会话还活着；`projection_resumed`＝她重开成功；
+  `projection_reopen_fail` 的 detail 分两种出路（`no_data`=通知没把 Intent 带回来，`startCapture`=新 token 起不来采集，只能再授权一次）。
+  两个方向都不许读反：拿 ≥0.2.64 的日志找 `projection_stopped` 会得出"这版没埋"，而它只是不再该出现了；
+  反过来把 `proj=stopped` 当成"她挂了"也是错的——`proj` 只描述收尾那一刻的采集状态，不回答"中途有没有被撤过"。
+  观看端侧同步换了语义：撤授权收到的是 DataChannel `k=videooff`（横幅「对方画面已暂停·语音继续」+ 暂停 `video_stall` 判定），
+  **`screenon`（解锁）从这一版起不等于"画面回来了"**，只有 `videoon` 能收横幅——解锁就撒谎比卡在旧横幅更糟。
 - **`diag.*` 只在已鉴权连接上打印**（`server/src/index.js` 的 `if (!ws.authed) break`）。
   所以**未配对期间的日志必然是空的，这不是埋点坏了**；判"某事件零采样"之前先确认那一刻两端已配对。
 - **`detail` 里的 `=` 会被 `safeTag` 磨成 `_`**：补报的真实时刻要 grep `detail=at_`，写 `detail=at=` 是一个不存在的键

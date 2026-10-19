@@ -187,19 +187,30 @@ class SessionEndDiagTest {
                 .any { it.contains("DiagBacklog.flush(") })
     }
 
-    // D10：系统撤销录屏 ≠ 她按了停止。10-18 生产日志（app=0.2.58）里两次 14~16 秒的
-    // "连上就断"都报成 reason=local_stop，根因是 onStop 只交出去不占位，收尾那条
-    // local_stop 把真因盖掉了。
+    // D10：v0.2.64 把这一格翻了个面。0.2.55~0.2.63 要求 onStop 占 first-wins 槽
+    // （否则"系统撤授权"和"她按停止"在日志里是同一个 local_stop），但 0.2.63 真机首采证明
+    // 更根本的问题是**撤销授权不该结束会话**：她锁屏是为了省电，语音与数据通道和
+    // MediaProjection 无关，而旧行为让对端听到的是挂断。
+    // 于是"原因位"没了，可观测性必须由 `diag.event projection_revoked` + 同一行的 `proj` 接手——
+    // 两头都锁：写回 noteEnd 变红（回到挂断语义），删掉事件也变红（这件事重新变成日志盲区）。
     @Test
-    fun `revoked projection claims its own end reason`() {
-        val cb = window(webrtc(), "MediaProjection.Callback()", 12)
-        val claimed = cb.indexOfFirst { it.contains("noteEnd(\"projection_stopped\")") }
-        val handed = cb.indexOfFirst { it.contains("listener.onEnded(\"projection_stopped\")") }
-        assertTrue("撤销授权必须先 noteEnd 占位，否则 diag.session.reason 只能是 local_stop", claimed >= 0)
-        assertTrue("noteEnd 必须早于交出去（first-wins，晚了就白写）", handed > claimed)
-        // 覆盖方仍在——去掉上面那条占位，local_stop 就会重新赢，这条锁才会真的变红
-        assertTrue("收尾仍会补 local_stop（这是本锁存在的理由，不许顺手删掉它）",
-            window(share(), "private fun stopSession(", 40)
+    fun `revoked projection is a survival event, not an end reason`() {
+        val cb = code(functionBody(webrtc(), "private fun projectionCallback("))
+        assertTrue(
+            "撤销授权不许再声明结束原因：写回来就是 0.2.63 的行为——她锁屏=对端听到挂断",
+            cb.none { it.contains("noteEnd(") },
+        )
+        assertTrue(
+            "更不许把会话交出去结束（onEnded 一路通向 stopSession）",
+            cb.none { it.contains("listener.onEnded(") },
+        )
+        assertTrue("proj 状态位必须翻转（diag.session 那一条靠它区分被撤与她按）",
+            cb.any { it.contains("projectionState = \"stopped\"") })
+        assertTrue("事件位必须补上，否则'被系统撤了画面'在日志里彻底消失",
+            cb.any { it.contains("\"projection_revoked\"") })
+        // 覆盖方仍在——收尾那条 local_stop 没变，这也是"reason 只能有一个真值来源"的前提
+        assertTrue("收尾仍会补 local_stop（本锁的另一半：结束原因仍然只有 stopSession/notifyEnded 两处）",
+            functionBody(share(), "private fun stopSession(")
                 .any { it.contains("webRtc?.noteEnd(\"local_stop\")") })
     }
 

@@ -40,6 +40,8 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
 
     @Volatile private var live = false
     @Volatile private var stopping = false
+    /** 系统撤销录屏授权而会话存续：画面停、语音与数据通道照旧（0.2.64） */
+    @Volatile private var videoPaused = false
     private val pendingSignals = mutableListOf<JSONObject>()
     private var signalJob: Job? = null
     private var screenReceiverRegistered = false
@@ -104,6 +106,31 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
                 stopSession(sendBye = true)
                 return START_NOT_STICKY
             }
+            ACTION_RESTART_CAPTURE -> {
+                // 通知栏"重新开画面"→ CaptureReauthActivity 拿到新授权后回到这里。
+                // 会话没拆过，所以只需要换采集器；失败也不能拆（语音还活着），只把通知留原样=还能再点
+                if (webRtc == null) { stopSelf(); return START_NOT_STICKY }
+                val data = intent.getProjectionExtra(EXTRA_PROJECTION)
+                if (data == null) {
+                    com.soul2soul.app.util.SelfCheck.reportEvent(
+                        this, "sharer", "projection_reopen_fail",
+                        webRtc?.iceStateName ?: "-", "no_data",
+                    )
+                    return START_NOT_STICKY
+                }
+                val ok = runCatching { webRtc?.restartCapture(data) == true }.getOrDefault(false)
+                if (ok && videoPaused) {
+                    videoPaused = false
+                    sendScreenStatus("videoon")
+                } else if (!ok) {
+                    com.soul2soul.app.util.SelfCheck.reportEvent(
+                        this, "sharer", "projection_reopen_fail",
+                        webRtc?.iceStateName ?: "-", "startCapture",
+                    )
+                }
+                updateNotification(statusText())
+                return START_NOT_STICKY
+            }
             ACTION_TOGGLE_MUTE -> {
                 if (webRtc == null) { stopSelf(); return START_NOT_STICKY } // 会话已结束：迟到的通知动作别挂尸
                 micMuted = !micMuted
@@ -134,6 +161,7 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
         // onDestroy(). Reset all per-call state before accepting the new projection.
         stopping = false
         pendingSignals.clear()
+        videoPaused = false // 新会话从零开始：上一通的"画面已停"绝不能带进这一通
 
         val projection: Intent? = intent?.let { it.getProjectionExtra(EXTRA_PROJECTION) }
         if (projection == null) {
@@ -434,6 +462,23 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
 
     override fun onRtt(ms: Long) {}
 
+    /**
+     * 系统撤销录屏授权（她锁屏的那条路）：会话存续、只停画面。
+     * 0.2.63 及以前这里等于挂断，于是"她锁屏省电"被对方读成"她把我挂了"——
+     * 而音频/涂鸦/操控跟 MediaProjection 没有任何依赖关系，10-19 日志里 ice 一直 CONNECTED。
+     */
+    override fun onProjectionRevoked() {
+        watchdog.post {
+            // 迟到的回调不许改状态：收尾路径会把 webRtc 置空，那一刻再发 videooff 就是给对方
+            // 一条再也不会被 videoon 撤掉的横幅（成对操作必须穷举退出路径）
+            if (stopping || webRtc == null || !live) return@post
+            if (videoPaused) return@post // 边沿触发，重复 onStop 不刷通知
+            videoPaused = true
+            sendScreenStatus("videooff")
+            updateNotification(statusText())
+        }
+    }
+
     // ---------- 会话控制 ----------
 
     private fun stopSession(sendBye: Boolean) {
@@ -485,12 +530,14 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
     }
 
     /** 通知正文把"语音到底开没开"说清楚：无麦权限时根本没有上行音频，别让人以为按静音就行 */
-    private fun statusText(): String = when {
-        checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) !=
-            PackageManager.PERMISSION_GRANTED -> getString(R.string.sharing_no_mic)
-        micMuted -> getString(R.string.sharing_muted)
-        else -> getString(R.string.sharing_live)
-    }
+    private fun statusText(): String = getString(
+        ShareNoticePolicy.statusTextRes(
+            noMic = checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) !=
+                PackageManager.PERMISSION_GRANTED,
+            muted = micMuted,
+            videoPaused = videoPaused,
+        )
+    )
 
     /** Android 14 会校验 FGS 类型对应的运行时权限；无麦克风权限时只声明屏幕采集。 */
     private fun startSessionForeground() {
@@ -548,11 +595,20 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
+        // 画面已停时整条通知的点按改道到"重新开画面"：Android 7 只放得下 3 个动作按钮，
+        // 而 HyperOS 默认把 FGS 通知的动作折叠到看不见——正文点按是唯一稳定的入口
+        // （与上面 consentIntent 同一个理由，别再指望多塞一个按钮）
+        val reauthIntent = PendingIntent.getActivity(
+            this, 25,
+            Intent(this, CaptureReauthActivity::class.java)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
         return NotificationCompat.Builder(this, Notif.CH_SESSION)
             .setSmallIcon(R.drawable.ic_heart)
             .setContentTitle(getString(R.string.sharing_title))
             .setContentText(text)
-            .setContentIntent(consentIntent)
+            .setContentIntent(if (videoPaused) reauthIntent else consentIntent)
             .setOngoing(true)
             // 动作必须带图标：Android 8+ 通知折叠态只渲染图标按钮，icon=0 的纯文字按钮
             // 要展开才显示，而 MIUI/HyperOS 常驻通知默认折叠——v0.2.46 真机实锤"按钮时有时无"
@@ -572,6 +628,7 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
 
     companion object {
         const val ACTION_STOP = "com.soul2soul.app.action.STOP_SHARE"
+        const val ACTION_RESTART_CAPTURE = "com.soul2soul.app.action.RESTART_CAPTURE"
         const val ACTION_TOGGLE_MUTE = "com.soul2soul.app.action.TOGGLE_MUTE"
         const val ACTION_TOGGLE_CTL = "com.soul2soul.app.action.TOGGLE_CTL"
         const val ACTION_SET_CTL = "com.soul2soul.app.action.SET_CTL"
@@ -621,6 +678,18 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
                 Intent(ctx, ScreenShareService::class.java)
                     .setAction(ACTION_STOP)
                     .putExtra(EXTRA_STOP_SRC, src),
+            )
+        }
+        /**
+         * 重新授权后把新 token 交回服务：只换采集器，会话与音频不动。
+         * 这里不回传成败——采集结果由服务自己刷新通知栏（画面起没起来，她在通知上就能看到），
+         * Activity 拿一个布尔也没有第二条真值来源可用。
+         */
+        fun reopenCapture(ctx: Context, projectionData: Intent) {
+            ctx.startService(
+                Intent(ctx, ScreenShareService::class.java)
+                    .setAction(ACTION_RESTART_CAPTURE)
+                    .putExtra(EXTRA_PROJECTION, projectionData),
             )
         }
     }

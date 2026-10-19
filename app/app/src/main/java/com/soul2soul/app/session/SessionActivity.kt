@@ -74,6 +74,8 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
     private var byeSent = false
     private var hdOn = false
     private var live = false
+    /** 共享端报过 videooff 且还没报 videoon：解锁不许把横幅收起来（画面仍然停着） */
+    private var remoteVideoPaused = false
     private var elapsedBase = 0L
     private var audioRoute: AudioRouteController? = null
 
@@ -723,7 +725,8 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
             if (isFinishing || isDestroyed || callInvalidated) return@runOnUiThread
             // 判据（controlMode/live）与 UI 更新同在主线程：与提取前的读取时序一致
             when (val action = SignalRouter.routeData(
-                json.optString("k"), overlay.controlMode, live, json.optString("reason")
+                json.optString("k"), overlay.controlMode, live, json.optString("reason"),
+                remoteVideoPaused
             )) {
                 SignalRouter.DataAction.None -> Unit
                 SignalRouter.DataAction.PeerScreenOff -> {
@@ -733,10 +736,19 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
                     // 不同步这个位每次锁屏都会误报一次 video_stall
                     client?.setRemoteScreenPaused(true)
                 }
+                SignalRouter.DataAction.PeerVideoOff -> {
+                    // 0.2.64 起共享端锁屏不再挂断，而是"画面停、通话续"：
+                    // 必须和"对方挂了"区分开，否则观看端只会以为连接坏了
+                    remoteVideoPaused = true
+                    tvState.visibility = View.VISIBLE
+                    tvState.setText(R.string.peer_video_off)
+                    client?.setRemoteScreenPaused(true)
+                }
                 SignalRouter.DataAction.HideBanner -> {
                     // 对方锁屏/收回授权：手势被静默丢弃时横幅必须说明原因，
                     // 否则操控端只会以为"功能坏了"（历史工单：退出后不能操控=这个）
                     tvState.visibility = View.GONE
+                    if (json.optString("k") == "videoon") remoteVideoPaused = false
                     // 横幅收起与暂停复位同一条路径（screenon 唯一入口），不给漏配机会
                     client?.setRemoteScreenPaused(false)
                 }
