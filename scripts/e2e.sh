@@ -6,7 +6,10 @@ set -Eeuo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 ADB="${ADB_BIN:-$(command -v adb 2>/dev/null || true)}"
 EMU="${EMU_BIN:-$(command -v emulator 2>/dev/null || true)}"
-APK="${APK_PATH:-/tmp/s2s-emu.apk}"
+# 默认装**本仓库刚构建出来的**那个包。原先默认 /tmp/s2s-emu.apk（10-19 实测踩坑）：那是上一轮手动复制的副本，
+# 我改完客户端并 bump 到 0.2.62 之后重跑 t4，它先 uninstall 再把 0.2.61 装回去 ⇒ 整轮"新埋点出数"的
+# 结论其实测的是旧版本，而日志里 `app=` 与 repo 的 versionName 不一致是唯一线索（没人去看）。
+APK="${APK_PATH:-$ROOT/app/app/build/outputs/apk/emu/debug/app-emu-debug.apk}"
 UI_PY="${E2E_UI_PY:-$ROOT/scripts/ui.py}"
 S1="${E2E_S1:-emulator-5554}"   # 角色 A: 共享端
 S2="${E2E_S2:-emulator-5556}"   # 角色 B: 观看端
@@ -59,7 +62,7 @@ if [ -z "$EMU" ]; then
   done
 fi
 [ -n "$ADB" ] && [ -x "$ADB" ] || { echo "adb 不存在，请设置 ADB_BIN" >&2; exit 2; }
-[ -f "$APK" ] || { echo "APK 不存在: ${APK}（设置 APK_PATH）" >&2; exit 2; }
+[ -f "$APK" ] || { echo "APK 不存在: ${APK}（先跑 gradle -p app assembleEmuDebug，或设置 APK_PATH）" >&2; exit 2; }
 [ -f "$UI_PY" ] || { echo "UI 脚本不存在: $UI_PY" >&2; exit 2; }
 python3 -c 'from PIL import Image' >/dev/null 2>&1 || { echo "T4 需要 Python Pillow" >&2; exit 2; }
 
@@ -110,6 +113,18 @@ ck "两端 APK 安装成功" $([ "$I1" = "1" ] && [ "$I2" = "1" ] && echo 1 || e
 if [ "$I1" != "1" ] || [ "$I2" != "1" ]; then
   echo "!! 安装失败:"; tail -20 "$LOG_DIR/i1.log" "$LOG_DIR/i2.log"; exit 1
 fi
+# 装进去的必须就是这份代码：设备返回的 versionName 与 build.gradle.kts 对一次。
+# 不一致时这一轮所有"新埋点出数/没出数"的结论都作废（10-19 就是这么白跑了一轮 0.2.61）。
+EXPECT_VER=$(sed -n 's/^[[:space:]]*versionName = "\(.*\)"/\1/p' "$ROOT/app/app/build.gradle.kts" 2>/dev/null | head -1 || true)
+for S in "$S1" "$S2"; do
+  GOT_VER=$("$ADB" -s "$S" shell dumpsys package "$PKG" 2>/dev/null | sed -n 's/.*versionName=\([0-9A-Za-z.+-]*\).*/\1/p' | head -1 || true)
+  if [ -z "$EXPECT_VER" ] || [ "$EXPECT_VER" != "$GOT_VER" ]; then
+    echo "  !! ${S} 上装的是 versionName=${GOT_VER}，repo build.gradle.kts 是 ${EXPECT_VER} ⇒ 这一轮读数不能算新代码的" >&2
+    ck "t4 两端装的都是当前代码（versionName 与 build.gradle.kts 一致）" 0
+  else
+    ck "t4 两端装的都是当前代码（versionName 与 build.gradle.kts 一致）" 1
+  fi
+done
 for S in "$S1" "$S2"; do
   # swiftshader 无头模式里 systemui 常弹 ANR，会把 uiautomator dump 卡死、点击全落空
   "$ADB" -s "$S" shell settings put global hide_error_dialogs 1 >/dev/null 2>&1 || true

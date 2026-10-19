@@ -4,7 +4,7 @@ set -u -o pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 ADB="${ADB_BIN:-$(command -v adb 2>/dev/null || true)}"
 EMU="${EMU_BIN:-$(command -v emulator 2>/dev/null || true)}"
-APK="${APK_PATH:-/tmp/s2s-emu.apk}"
+APK="${APK_PATH:-$ROOT/app/app/build/outputs/apk/emu/debug/app-emu-debug.apk}"   # 默认装本仓库刚构建的包（e2e.sh 同口径，10-19 曾因 /tmp 里的旧副本白跑一轮 0.2.61）
 S1="${E2E_S1:-emulator-5554}"; S2="${E2E_S2:-emulator-5556}"
 PKG="${E2E_PACKAGE:-com.soul2soul.app.emu}"
 ACT="$PKG/com.soul2soul.app.MainActivity"
