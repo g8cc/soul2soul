@@ -288,8 +288,16 @@ fi
 # 抢输了不谎报：A 已经收尾（有 diag.session 而没 stop_tap）就记 SKIP(环境)，
 # 因为那一刻根本没有可点的"结束"按钮，这条断言在结构上不可执行。
 # 诚实边界：通知栏那条要点系统 UI，本机证不了 ⇒ src_notify 仍是零采样，只能等真机。
+# 10-19 09:53 那轮 SKIP 的两种可能没被分开（① bye 先到，按钮随会话一起没了；② A 的前台不是
+# MainActivity，「结束」压根不在屏上——它只在 boxSharing 里）。这一版两条一起治，并且把
+# ②变成可观测的：先把 MainActivity 顶上来，点之前先数一次按钮在不在，把答案写进 SKIP 行——
+# 下次不用重跑就知道输在哪。顶 MainActivity 不会拆掉共享：会话页只在**观看端**建 PeerConnection
+# （SessionActivity.kt:569/573 `isSharer = false` 才赋值 client），共享端的采集与服务在
+# ScreenShareService 里，Activity 被 singleTask 清掉也不影响 isRunning()。
 if [ "$ICE" != "OK" ]; then
-  ui tap "$S1" "结束" once >/dev/null 2>&1 || true
+  "$ADB" -s "$S1" shell am start -n "$PKG/com.soul2soul.app.MainActivity" >/dev/null 2>&1 || true
+  BTN=$(ui has "$S1" "结束" 2>/dev/null || echo NO)
+  [ "$BTN" = "YES" ] && ui tap "$S1" "结束" once >/dev/null 2>&1 || true
   STOPTAP=0
   for i in 1 2 3 4; do
     [ "$(count_log "$S1" '"event":"stop_tap".*"detail":"src_main_page"')" -gt 0 ] && { STOPTAP=1; break; }
@@ -298,7 +306,7 @@ if [ "$ICE" != "OK" ]; then
   if [ "$STOPTAP" = 1 ]; then
     ck "共享端点结束时报文体里带 src_main_page" 1
   elif [ "$(count_log "$S1" 'diag.session')" -gt 0 ]; then
-    echo "  SKIP(环境) 共享端点结束时报文体里带 src_main_page：对端先把 A 的会话拆了，没有可点的「结束」"
+    echo "  SKIP(环境) 共享端点结束时报文体里带 src_main_page：对端先把 A 的会话拆了（点前屏上有「结束」=$BTN）"
   else
     ck "共享端点结束时报文体里带 src_main_page" 0
   fi
