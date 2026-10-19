@@ -342,14 +342,30 @@ if [ "$ICE" != "OK" ]; then check_stop_tap; fi
 sleep 5
 "$ADB" -s "$S1" shell am start -a android.settings.SETTINGS >/dev/null
 sleep 6
+# 观看端会话页是沉浸式全屏，系统会盖一层「Viewing full screen / Got it」通知（带遮罩，占屏 ~35%）。
+# 10-19 本机第一次真跑到这条断言时它就是 FAIL 主因之一——不是因为画面没同步（B 的截图里
+# A 的设置页清清楚楚在），而是因为这层系统 UI 挡在中间。它是系统的、不是本产品的，
+# 所以处理方式是"先点掉再比"，而不是把阈值放宽到能容忍一块蓝色遮罩。
+NOTICE=0
+ui tap "$S2" "Got it" >/dev/null 2>&1 || true
+sleep 1
+has "$S2" "Viewing full screen" && NOTICE=1
 shot "$S1" "$LOG_DIR/e2e_a.png"
 shot "$S2" "$LOG_DIR/e2e_b.png"
 DIST=999
 if DIST=$(python3 - "$LOG_DIR/e2e_a.png" "$LOG_DIR/e2e_b.png" <<'EOF'
 from PIL import Image
 import sys
-a = Image.open(sys.argv[1]).convert('RGB').resize((64, 64))
-b = Image.open(sys.argv[2]).convert('RGB').resize((64, 64))
+a = Image.open(sys.argv[1]).convert('RGB')
+b = Image.open(sys.argv[2]).convert('RGB')
+# 观看端是"等比适配 + 上下黑边"，共享端截图是整块屏：不裁黑边直接比，黑边自己就能把
+# 平均差推到 140+（10-19 实测 417.7 对阈值 60），那测的就不是"像不像"而是"有没有黑边"。
+# 只裁纯黑（<=4）；诚实边界：若共享的内容本身接近全黑，这一格会误判成"不像"——
+# 当前 T4 的判据画面是设置页（亮画面），要换判据画面时这条必须重新核。
+box = b.convert('L').point(lambda p: 255 if p > 4 else 0).getbbox()
+if box:
+    b = b.crop(box)
+a = a.resize((64, 64)); b = b.resize((64, 64))
 pa = list(a.getdata()); pb = list(b.getdata())
 d = sum(abs(x[0]-y[0]) + abs(x[1]-y[1]) + abs(x[2]-y[2]) for x, y in zip(pa, pb)) / len(pa)
 print(f"{d:.1f}")
@@ -357,35 +373,66 @@ EOF
 ); then :; else echo "截图差异计算失败" >&2; fi
 echo "  两端截图差异(越低越像): $DIST"
 if [ "$ICE" = "OK" ]; then
+  if [ "$NOTICE" = "1" ]; then
+    echo "  SKIP(环境) B 看到了 A 的屏幕：系统「Viewing full screen」遮罩点不掉，截图必然对不上"
+    ENV_SKIP=$((ENV_SKIP + 1))
+  else
   SIMILAR=0
   python3 - "$DIST" <<'EOF' >/dev/null 2>&1 && SIMILAR=1 || true
 import sys
 sys.exit(0 if float(sys.argv[1]) < 60 else 1)
 EOF
   ck "B 看到了 A 的屏幕(设置页画面同步)" "$SIMILAR"
+  fi
 else
   echo "  SKIP(环境) B 看到了 A 的屏幕(ICE 未连通)"
   ENV_SKIP=$((ENV_SKIP + 1))
 fi
 
 # ---------- T4-5 标注：B 上画一笔，A 悬浮层应出现笔迹 ----------
+# 三条必须知道的时序/环境事实（10-19 第一次跑到这条时 diff 恒 0，三条都是当时踩的）：
+# ① 收笔（`e`）之后共享端那一笔就开始淡出，FADE_MS=2000 后彻底没了（OverlayCanvasView）
+#    ——旧版 swipe 完 sleep 4 再截图，落在"已经淡完"之后，结构上恒假；所以这里改成
+#    "手指还按着的时候截图"（书写中永不淡出，见 OverlayCanvasView.onDraw 的 fadeStart==0 分支）。
+# ② A 必须先从 T4-4 的设置页回到我们自己的页面。Android 12+ 的窗口可以声明
+#    `HIDE_OVERLAY_WINDOWS`（`Window.setHideOverlayWindows`），声明后**别的 App 的
+#    TYPE_APPLICATION_OVERLAY 在它可见期间被框架强制隐藏**——com.android.settings 就是这么干的。
+#    实测：A 停在设置页时，笔迹悬浮窗在 dumpsys 里形是 `mForceHideNonSystemOverlayWindow=true
+#    / isVisible=false / mDrawState=READY_TO_SHOW`（窗口建了、内容画了、合成时被扣住），
+#    把 A 顶回 MainActivity 后同一笔立刻在 A 屏上出 4842 个变化像素。
+#    ⇒ 这不是通路坏了，是宿主 App 把我们的层藏了。**这条对产品同样是事实**：她画的笔迹
+#    遇到声明该标志的前台应用（设置、部分 ROM 桌面、银行类）会整层消失，见 AUDIT-MATRIX §1 最后一行。
+# ③ swipe 用子 shell 后台跑，别用 `&` + `wait`——wait 会把 e2e 的 `set -e` 语义搅进来。
+"$ADB" -s "$S1" shell am start -n "$PKG/com.soul2soul.app.MainActivity" >/dev/null 2>&1 || true
+sleep 3
 shot "$S1" "$LOG_DIR/e2e_a_before.png"
-"$ADB" -s "$S2" shell input swipe 300 600 600 900 400
-sleep 4
+( "$ADB" -s "$S2" shell input swipe 300 600 600 900 4000 >/dev/null 2>&1 & )
+sleep 1.5
 shot "$S1" "$LOG_DIR/e2e_a_after.png"
+sleep 3  # 等手指抬起，别把下一段的点击和这笔手势叠在一起
 DIFF=0
 if DIFF=$(python3 - "$LOG_DIR/e2e_a_before.png" "$LOG_DIR/e2e_a_after.png" <<'EOF'
 from PIL import Image, ImageChops
 import sys
 a = Image.open(sys.argv[1]).convert('RGB')
 b = Image.open(sys.argv[2]).convert('RGB')
-d = ImageChops.difference(a, b).resize((64, 64))
-cnt = sum(1 for p in d.getdata() if sum(p) > 30)
+# 两张都是 A 自己的截图，尺寸一致 ⇒ 全分辨率直接比（缩到 64x64 会把一条 6px 宽的线摊平到
+# 读不出来）。状态栏那一带排除掉：分钟翻牌的跳变不是笔迹，会把计数灌满假阳性。
+top = a.height * 8 // 100
+a = a.crop((0, top, a.width, a.height))
+b = b.crop((0, top, b.width, b.height))
+d = ImageChops.difference(a, b)
+cnt = sum(1 for p in d.getdata() if sum(p) > 60)
 print(cnt)
 EOF
 ); then :; else echo "笔迹差异计算失败" >&2; fi
 echo "  A 截图差异数: $DIFF (笔迹浮现应 > 0)"
 if [ "$ICE" = "OK" ]; then
+  if [ "${DIFF:-0}" -le 5 ] 2>/dev/null; then
+    # 失败时先自证"是不是被宿主 App 藏了"：这个字段是 ②的唯一机器判据，没有它下一个人还要从头查
+    HID=$("$ADB" -s "$S1" shell dumpsys window windows 2>/dev/null | grep -c "mForceHideNonSystemOverlayWindow=true" || true)
+    echo "    诊断: A 上被框架强制隐藏的悬浮窗数=${HID}（>0 ⇒ 是宿主 App 声明了 HIDE_OVERLAY_WINDOWS，不是通路坏了）"
+  fi
   ck "B 的笔迹出现在 A 屏幕" $([ "$DIFF" -gt 5 ] 2>/dev/null && echo 1 || echo 0)
 else
   echo "  SKIP(环境) B 的笔迹出现在 A 屏幕(ICE 未连通)"

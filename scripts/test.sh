@@ -219,6 +219,24 @@ PY
     echo '静态检查: stop_tap 必须在 ICE 两种结果下都被判定（只写在 !=OK 里＝媒体一通就静默少一条断言，既不 PASS 也不记账）'
     fail=1
   fi
+  # 坑㉔（10-19 实测 3058 个变化像素才换回来的两条）：笔迹断言 `A 截图差异数: 0` 有两种成因，
+  # 脚本必须同时带着"排除宿主藏层"的那一步，否则下一个人还会从头查一遍通路：
+  # ① 共享端停在设置页时，Android 12+ 的 `HIDE_OVERLAY_WINDOWS` 使框架把别人所有
+  #    TYPE_APPLICATION_OVERLAY 强制隐藏（窗口建了、内容画了、不合成）⇒ 拍之前必须顶回 MainActivity；
+  # ② FAIL 时必须打印 mForceHideNonSystemOverlayWindow 计数，把"宿主藏层"与"通路坏了"分开——
+  #    没有这一行，脚本自己分不清这两件事（我就据此误判过一次"canvas 窗口不存在"）。
+  if ! (
+    grep -qF 'ck "B 的笔迹出现在 A 屏幕"' "$ROOT/scripts/e2e.sh" &&
+    grep -qF 'grep -c "mForceHideNonSystemOverlayWindow=true"' "$ROOT/scripts/e2e.sh" &&
+    awk -v pat='am start -n "$PKG/com.soul2soul.app.MainActivity"' '
+      index($0, "T4-5 标注") { inSec = 1 }
+      inSec && index($0, pat) { hit = NR }
+      inSec && index($0, "e2e_a_before.png") { if (hit && hit < NR) ok = 1; exit }
+      END { exit ok ? 0 : 1 }' "$ROOT/scripts/e2e.sh"
+  ); then
+    echo '静态检查: 笔迹断言必须①拍前把共享端顶回 MainActivity ②FAIL 时打印 mForceHideNonSystemOverlayWindow（宿主藏层≠通路坏了；缺任一条 10-19 那轮白查）'
+    fail=1
+  fi
   # v0.2.57 生产日志复盘实锤：[relay] 把 paired.token（长期重连凭证，16 条）与
   # pair.code（六位配对码，12 条）原样落盘。隐私名单收在 logpolicy.js，
   # index.js 必须走它——把 send() 改回内联 quiet 判定就是拆线，必须红。
