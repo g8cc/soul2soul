@@ -89,8 +89,17 @@ v0.2.44 悬浮球丢失后立的规矩——多轮"稳定性审计"仍漏了一�
   emu 包 `adb install -r` 到 Mi10，桌面上出现**两个同名「陪着你」**，用户按名字删掉了真正配过对的正式版。
   两条后果要记住：① `deviceId` 存在 App 自己的 SharedPreferences（`util/Prefs.kt:12-17`，首启生成 UUID），
   **卸载即抹掉**，重装会拿到新号 ⇒ 服务器那条配对从此指向不存在的设备（= #61 陈旧配对死路），只能重新配对；
-  ② 生产日志不丢（遥测在服务器侧）。已修：emu flavor 现在带独立桌面名「陪着你·测试」
-  （`app/src/emu/res/values/strings.xml`），t0 守卫盯"两个 flavor 的 `app_name` 不许相同"。
+  ② 生产日志不丢（遥测在服务器侧）。已修：两个源集各有一条独立桌面名——
+  `app/app/src/emu/res/values/strings.xml`「陪着你·测试」、`app/app/src/debug/res/values/strings.xml`「陪着你·调试」。
+  **实测优先级（10-19 四个变体逐个 `aapt dump badging`，别按名字猜）**：build type 源集压过 flavor 源集，
+  所以 `assembleEmuDebug` 落地的图标写的是「陪着你·调试」，「·测试」只在 emu**release** 才出现。
+  四格实测：prodRelease=`陪着你`（唯一保留正式名）、prodDebug=`陪着你·调试`、emuDebug=`陪着你·调试`、emuRelease=`陪着你·测试`。
+  日常真机联调走 `assembleProdDebug` ⇒ 桌面上看到的是「陪着你·调试」。
+  安全不变式是"非 prodRelease 都 ≠ 正式版"，与"哪条名字赢"是两回事，别把后者当成前者的证据。——之所以 debug 也必须有自己的名字：
+  它的 applicationId 与线上包**完全相同**（`com.soul2soul.app`）而签名证书不同，
+  `adb install -r` 会报 `INSTALL_FAILED_UPDATE_INCOMPATIBLE`，**那句报错的标准"解法"是先卸载**，
+  deviceId 正是那一刻没的。所以这条路径上"同名"不只是看不出该删哪个，还会诱导人到破坏性解法。
+  t0 守卫按源集逐条盯：`src/emu` 与 `src/debug` 的 `app_name` 存在且不等于正式版（三种抽法各自实测变红）。
   口径：**测试包的名字必须自带"可以删"信号**，同名图标 = 用户无法区分 = 迟早删错。
 - **本机 dev server 目前借用了线上那套 TURN 的凭证**（10-19 用户点头，为的是让模拟器 ICE 走到 CONNECTED，媒体段第一次具备判定力）。
   后果要一起记住：`gather_done` 会出 `r_1`、`path` 会是 `r-r` 这类真值，**这是"通路证据"不是"真机验证"**（矩阵里记 `PASS(模)`），

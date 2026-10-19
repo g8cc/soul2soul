@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- debug 构建类型（prodDebug 与 emuDebug 都走这里）必须是另一个桌面名。
+         10-19 的实锤事故只修了一半：那次是 emu 包和正式版同名导致用户按名字删掉了配过对的正式版
+         （deviceId 存在 App 自己的 SharedPreferences 里，卸载即抹 ⇒ 只能重新配对）。
+         而日常真机联调用的是 `assembleProdDebug`——它的 applicationId 与线上包**完全相同**
+         （com.soul2soul.app），桌面名再一样就等于同一个图标两颗雷：
+         签名不同使 `install -r` 直接报 INSTALL_FAILED_UPDATE_INCOMPATIBLE，
+         而那句报错的标准"解法"是先卸载——数据正是那一刻没了的。
+         桌面上的名字必须自带「这个可以删/这个不能删」的信号，这一点不能只靠人记住。 -->
+    <string name="app_name">陪着你·调试</string>
+</resources>

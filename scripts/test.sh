@@ -250,14 +250,19 @@ PY
   # 用户真机后桌面出现两个同名图标，用户按名字删掉了**真正配对过的正式版**（deviceId 在 App
   # SharedPreferences 里，卸载即抹，重装换号 ⇒ 服务器那条配对变陈旧、必须重新配对）。
   # 测试 flavor 的名字必须自带"可删"信号，且这个不变式不能只靠人记得。
-  if ! (
-    grep -qF '<string name="app_name">' "$ROOT/app/app/src/emu/res/values/strings.xml" &&
-    [ "$(sed -n 's/.*<string name="app_name">\(.*\)<\/string>.*/\1/p' "$ROOT/app/app/src/emu/res/values/strings.xml")" != \
-        "$(sed -n 's/.*<string name="app_name">\(.*\)<\/string>.*/\1/p' "$ROOT/app/app/src/main/res/values/strings.xml")" ]
-  ); then
-    echo '静态检查: emu flavor 必须有独立的桌面名（src/emu/res/values/strings.xml 的 app_name ≠ 正式版），测试包不许和正式版同名'
-    fail=1
-  fi
+  # 覆盖两个源集而不是只有 emu（10-19 补的半边）：日常真机联调走的是 `assembleProdDebug`，
+  # 它的 applicationId 与线上包**相同**（com.soul2soul.app），签名证书不同 ⇒ `install -r` 报
+  # INSTALL_FAILED_UPDATE_INCOMPATIBLE，而那句报错的常见"解法"是先卸载——数据正是那一刻没的。
+  # 所以 debug 构建类型也必须有独立桌面名（src/debug/res），四种变体里只有 release+prod 保留正式名。
+  local main_name ss_name sset
+  main_name=$(sed -n 's/.*<string name="app_name">\(.*\)<\/string>.*/\1/p' "$ROOT/app/app/src/main/res/values/strings.xml")
+  for sset in emu debug; do
+    ss_name=$(sed -n 's/.*<string name="app_name">\(.*\)<\/string>.*/\1/p' "$ROOT/app/app/src/$sset/res/values/strings.xml" 2>/dev/null)
+    if [ -z "$ss_name" ] || [ "$ss_name" = "$main_name" ]; then
+      echo "静态检查: src/$sset/res/values/strings.xml 必须有独立桌面名且不等于正式版（当前 '$ss_name' vs '$main_name'）——同名图标=用户无法区分=迟早删错"
+      fail=1
+    fi
+  done
   # v0.2.57 生产日志复盘实锤：[relay] 把 paired.token（长期重连凭证，16 条）与
   # pair.code（六位配对码，12 条）原样落盘。隐私名单收在 logpolicy.js，
   # index.js 必须走它——把 send() 改回内联 quiet 判定就是拆线，必须红。
