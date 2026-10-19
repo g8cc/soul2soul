@@ -292,10 +292,15 @@ class WebRtcClient(
             object : android.media.projection.MediaProjection.Callback() {
                 // 用户在系统隐私提示里"停止"录屏：授权被撤销，会话必须体面结束而非黑屏挂着
                 override fun onStop() {
-                    // 只记状态、不另发事件：这条路径已经通过 onEnded("projection_stopped") 变成
-                    // diag.session.reason 了，再发一条就是同一件事两个真值来源
                     projectionState = "stopped"
-                    if (!closed) listener.onEnded("projection_stopped")
+                    // 必须先 noteEnd 再交出去：ScreenShareService.stopSession 收尾会补一条
+                    // local_stop，而 noteEnd 是 first-wins。不占位就会被"她按了停止"覆盖掉，
+                    // 系统撤销授权与被按停止在服务器日志里就成同一个原因（0.2.60 生产日志实锤）。
+                    // 只占这一格、不另发事件：同一件事发两条就是两个真值来源。
+                    if (!closed) {
+                        noteEnd("projection_stopped")
+                        listener.onEnded("projection_stopped")
+                    }
                 }
             },
         )

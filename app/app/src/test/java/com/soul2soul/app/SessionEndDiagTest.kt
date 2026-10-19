@@ -142,4 +142,19 @@ class SessionEndDiagTest {
             source("app/src/main/java/com/soul2soul/app/session/PresenceService.kt")
                 .any { it.contains("DiagBacklog.flush(") })
     }
+
+    // D10：系统撤销录屏 ≠ 她按了停止。0.2.60 生产日志里两次 14~16 秒的"连上就断"都报成
+    // reason=local_stop，根因是 onStop 只交出去不占位，收尾那条 local_stop 把真因盖掉了。
+    @Test
+    fun `revoked projection claims its own end reason`() {
+        val cb = window(webrtc(), "MediaProjection.Callback()", 12)
+        val claimed = cb.indexOfFirst { it.contains("noteEnd(\"projection_stopped\")") }
+        val handed = cb.indexOfFirst { it.contains("listener.onEnded(\"projection_stopped\")") }
+        assertTrue("撤销授权必须先 noteEnd 占位，否则 diag.session.reason 只能是 local_stop", claimed >= 0)
+        assertTrue("noteEnd 必须早于交出去（first-wins，晚了就白写）", handed > claimed)
+        // 覆盖方仍在——去掉上面那条占位，local_stop 就会重新赢，这条锁才会真的变红
+        assertTrue("收尾仍会补 local_stop（这是本锁存在的理由，不许顺手删掉它）",
+            window(share(), "private fun stopSession(", 40)
+                .any { it.contains("webRtc?.noteEnd(\"local_stop\")") })
+    }
 }
