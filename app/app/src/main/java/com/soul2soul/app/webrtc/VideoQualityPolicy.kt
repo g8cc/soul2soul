@@ -19,6 +19,16 @@ internal object VideoQualityPolicy {
         val lossPercent: Double,
         val availableBitrateBps: Long,
         val outboundFps: Double = -1.0,
+        /**
+         * `availableOutgoingBitrate` 是否已经脱离了带宽估计器的爬坡期。
+         * 建会头几秒它钉在 **300kbps 的估计初值**上而不是实测值：v0.2.62 双模拟器实测
+         * 连续两条 tick 都是 `q_15_s-s_300_…`、`q_54_s-s_300_…`，而触发降档那一刻
+         * logcat 打印的同一列已经是 `available=5382666`（rtt 18ms）⇒ 3 连拍攒的是爬坡期初值，
+         * 决策时读数早就不坏了。300k < 3.5M×72% 因此会在 6s 内必然触发一次降档，
+         * 而降档要点开采集重启（见 WebRtcClient.applyCaptureLongEdge，Android 14+ 上是致命的）。
+         * 爬坡期只按 rtt/丢包/帧率判——不拿一个还没测准的带宽去动画质。
+         */
+        val bandwidthSettled: Boolean = true,
     )
 
     data class Decision(val targetEdge: Int?, val highStreak: Int, val lowStreak: Int)
@@ -110,6 +120,7 @@ internal object VideoQualityPolicy {
         if (metrics.lossPercent >= BAD_LOSS_PERCENT) return true
         if (metrics.outboundFps >= 0.0 && metrics.outboundFps < 18.0) return true
         val available = metrics.availableBitrateBps
+        if (!metrics.bandwidthSettled) return false
         return available > 0 && available < requiredBitrateBps(currentEdge) * 72 / 100
     }
 
@@ -118,6 +129,9 @@ internal object VideoQualityPolicy {
         if (metrics.lossPercent >= 0 && metrics.lossPercent >= GOOD_LOSS_PERCENT) return false
         if (metrics.outboundFps >= 0.0 && metrics.outboundFps < 24.0) return false
         val available = metrics.availableBitrateBps
+        // 爬坡期的低带宽既不该判坏，也不该被"available<=0 当作未知→放行"当成好：
+        // 未知才放行，读得到但还没稳的不计回升条件。
+        if (!metrics.bandwidthSettled) return available <= 0
         return available <= 0 || available >= requiredBitrateBps(preferredEdge) * 115 / 100
     }
 }

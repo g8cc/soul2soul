@@ -211,6 +211,12 @@ class WebRtcClient(
     private var previousAudioQualityCounters: RtpQualityWindow.Counters? = null
     private var previousVideoQualityCounters: RtpQualityWindow.Counters? = null
 
+    // 帧率的累计计数（只在 rttHandler 线程读写）：Android 版 libwebrtc 的
+    // outbound-rtp/inbound-rtp 没有 framesPerSecond，只能按区间相减算，见 RtpQualityWindow.framesFps
+    private var previousOutboundVideoFrames = -1L
+    private var previousInboundVideoFrames = -1L
+    private var videoFramesAtMs = 0L
+
     /**
      * 最近一个 10s 诊断窗口的读数与选路（v0.2.59）。
      * 这些数字此前只存在于 `S2S_QOS` 那行 logcat，而每个值都是轮询里的局部变量 ⇒
@@ -267,6 +273,21 @@ class WebRtcClient(
     /** 用户意图档位（观看端高清/流畅设定）：弱网自动降档后，网络好转回升到这里 */
     @Volatile
     private var preferredLongEdge = VideoQualityPolicy.DEFAULT_EDGE
+
+    /**
+     * 画质档：码率上限跟着它走，自适应阶梯也在它上面爬。
+     *
+     * Android 13 及以下它与 [captureLongEdge]（真实采集尺寸）同步移动；**Android 14 起它单独移动**——
+     * 那一版开始 MediaProjection 的 token 是一次性的，改分辨率只能 `stopCapture()`+`startCapture()`，
+     * 系统把第二次开采集判为越权并撤销授权（双模拟器实测 `SecurityException: Don't re-use the resultData`
+     * → `MediaProjection.onStop` → 会话在 4.5s 死掉，reason=projection_stopped）。所以 14+ 只降码率、
+     * 不动采集尺寸：画质让路，会话保住。
+     */
+    @Volatile
+    private var qualityLongEdge = VideoQualityPolicy.DEFAULT_EDGE
+
+    /** 唯一允许重启采集的门槛（见 [qualityLongEdge] 的 Android 14 语义） */
+    private val captureRestartSupported = android.os.Build.VERSION.SDK_INT < ANDROID_14
 
     /** 临时协助授权期间为 true：锁低档+保帧率，收回授权恢复（仅共享端会置位） */
     @Volatile
@@ -435,13 +456,25 @@ class WebRtcClient(
                 edgeBeforeControl = -1
             }
             videoSender?.let { applyBitrate(it) } // 立即切换保分辨率/保帧率偏好
-            Log.d(TAG, "control mode video profile: on=$on edge=$captureLongEdge")
+            Log.d(TAG, "control mode video profile: on=$on edge=$qualityLongEdge " +
+                "cap=${captureWidth}x${captureHeight} restartAllowed=$captureRestartSupported")
         }
     }
 
     private fun applyCaptureLongEdge(edge: Int) {
         val normalized = VideoQualityPolicy.normalizeEdge(edge)
         val capturer = capturer ?: return
+        if (!captureRestartSupported) {
+            // Android 14+：token 一次性，重启采集 = 系统撤销录屏授权（实测 SecurityException
+            // "Don't re-use the resultData … createVirtualDisplay multiple times" → 整通会话当场死）。
+            // 所以这一版起档位只动码率上限，采集尺寸留在建会那一档。
+            qualityLongEdge = normalized
+            videoSender?.let { applyBitrate(it) }
+            Log.d(TAG, "quality edge=$normalized (bitrate only; capture size stays " +
+                "${captureWidth}x${captureHeight} — restart is forbidden on API " +
+                "${android.os.Build.VERSION.SDK_INT})")
+            return
+        }
         val (w, h) = captureSize(normalized)
         if (captureLongEdge == normalized && captureWidth == w && captureHeight == h) {
             videoSender?.let { applyBitrate(it) }
@@ -458,6 +491,7 @@ class WebRtcClient(
         }.isSuccess
         if (switched) {
             captureLongEdge = normalized
+            qualityLongEdge = normalized
         } else {
             Log.w(TAG, "resolution switch failed; restoring ${oldWidth}x${oldHeight}")
             captureLongEdge = oldEdge
@@ -494,7 +528,7 @@ class WebRtcClient(
                 else
                     RtpParameters.DegradationPreference.MAINTAIN_RESOLUTION
                 params.encodings[0].maxBitrateBps =
-                    VideoQualityPolicy.requiredBitrateBps(captureLongEdge).toInt()
+                    VideoQualityPolicy.requiredBitrateBps(qualityLongEdge).toInt()
                 params.encodings[0].maxFramerate = CAPTURE_FPS
                 sender.parameters = params
             }
@@ -822,6 +856,9 @@ class WebRtcClient(
         previousRemoteVideoLost = -1L
         previousRemoteVideoReceived = -1L
         previousOutboundVideoSent = -1L
+        previousOutboundVideoFrames = -1L
+        previousInboundVideoFrames = -1L
+        videoFramesAtMs = 0L
         rttHandler.post(object : Runnable {
             override fun run() {
                 val pc = pc ?: return
@@ -838,6 +875,8 @@ class WebRtcClient(
                     var remoteVideoLost = -1L
                     var remoteVideoReceived = -1L
                     var outboundVideoSent = -1L
+                    var outboundVideoFrames = -1L
+                    var inboundVideoFrames = -1L
                     var outboundVideoFps = -1.0
                     var inboundVideoFps = -1.0
                     var inboundAudioQuality: RtpQualityWindow.Counters? = null
@@ -893,12 +932,13 @@ class WebRtcClient(
                         if (isSharer && stats.type == "outbound-rtp" && mediaKind == "video") {
                             outboundVideoSent =
                                 (stats.members["packetsSent"] as? Number)?.toLong()?.coerceAtLeast(0L) ?: -1L
-                            outboundVideoFps =
-                                (stats.members["framesPerSecond"] as? Number)?.toDouble() ?: -1.0
+                            // 累计已发送帧数（这一版没有 framesPerSecond，帧率靠区间相减）
+                            outboundVideoFrames =
+                                (stats.members["framesSent"] as? Number)?.toLong()?.coerceAtLeast(0L) ?: -1L
                         }
                         if (!isSharer && stats.type == "inbound-rtp" && mediaKind == "video") {
-                            inboundVideoFps =
-                                (stats.members["framesPerSecond"] as? Number)?.toDouble() ?: -1.0
+                            inboundVideoFrames =
+                                (stats.members["framesReceived"] as? Number)?.toLong()?.coerceAtLeast(0L) ?: -1L
                             inboundVideoQuality = RtpQualityWindow.Counters(
                                 packetsLost = (stats.members["packetsLost"] as? Number)?.toLong() ?: -1L,
                                 packetsReceived = (stats.members["packetsReceived"] as? Number)?.toLong() ?: -1L,
@@ -915,6 +955,21 @@ class WebRtcClient(
                             )
                         }
                     }
+                    // 帧率只能按区间算：这一版 libwebrtc 的 outbound/inbound-rtp 没有
+                    // framesPerSecond（实测 videoFps=x），而"读不到"绝不能顺手当成"0 帧"——
+                    // 0.2.55~0.2.61 的 6 条 video_stall 全来自 `inboundVideoFps <= 0.0` 把 -1 判成卡死。
+                    val framesNowMs = android.os.SystemClock.elapsedRealtime()
+                    val framesWindowMs =
+                        if (videoFramesAtMs > 0L) framesNowMs - videoFramesAtMs else -1L
+                    outboundVideoFps = RtpQualityWindow.framesFps(
+                        previousOutboundVideoFrames, outboundVideoFrames, framesWindowMs,
+                    )
+                    inboundVideoFps = RtpQualityWindow.framesFps(
+                        previousInboundVideoFrames, inboundVideoFrames, framesWindowMs,
+                    )
+                    if (outboundVideoFrames >= 0L) previousOutboundVideoFrames = outboundVideoFrames
+                    if (inboundVideoFrames >= 0L) previousInboundVideoFrames = inboundVideoFrames
+                    videoFramesAtMs = framesNowMs
                     best = if (selectedRtt >= 0) selectedRtt else fallbackRtt
                     availableOutgoingBps =
                         if (selectedAvailable >= 0) selectedAvailable else fallbackAvailable
@@ -942,7 +997,6 @@ class WebRtcClient(
                             when {
                                 stats.type == "outbound-rtp" && mediaKind == "video" -> {
                                     val impl = stats.members["encoderImplementation"]?.toString() ?: "?"
-                                    val fps = (stats.members["framesPerSecond"] as? Number)?.toDouble() ?: 0.0
                                     val sent = (stats.members["bytesSent"] as? Number)?.toLong() ?: 0L
                                     // avgEncodeMs 高 / limitationReason=cpu → 软编瓶颈；
                                     // =bandwidth → 带宽瓶颈（操控模式低清档正是在解这个）
@@ -952,7 +1006,7 @@ class WebRtcClient(
                                         stats.members["qualityLimitationReason"]?.toString() ?: "?"
                                     Log.d(
                                         TAG,
-                                        "ENC impl=$impl fps=${formatMetric(fps)} " +
+                                        "ENC impl=$impl fps=${formatMetric(outboundVideoFps)} " +
                                             "avgEncodeMs=${formatMetric(encodeMs)} " +
                                             "limitation=$limitation bytes=$sent",
                                     )
@@ -978,7 +1032,8 @@ class WebRtcClient(
                             TAG,
                             "S2S_QOS role=${if (isSharer) "sharer" else "viewer"} " +
                                 "ice=$latestIceState rttMs=$best path=$selectedPath " +
-                                "availableBps=$availableOutgoingBps edge=$captureLongEdge " +
+                                "availableBps=$availableOutgoingBps edge=$qualityLongEdge " +
+                                "cap=${captureWidth}x${captureHeight} " +
                                 "videoLossPct=${formatMetric(videoWindow.packetLossPercent)} " +
                                 "videoJitterMs=${formatMetric(videoWindow.jitterMs)} " +
                                 "videoFps=${formatMetric(videoFps)} " +
@@ -994,7 +1049,7 @@ class WebRtcClient(
                             path = selectedPath,
                             availableKbps =
                                 if (availableOutgoingBps >= 0) availableOutgoingBps / 1000 else -1L,
-                            edge = captureLongEdge.toLong(),
+                            edge = qualityLongEdge.toLong(),
                             videoLossPct = videoWindow.packetLossPercent,
                             videoJitterMs = videoWindow.jitterMs,
                             videoFps = videoFps,
@@ -1035,7 +1090,11 @@ class WebRtcClient(
                             if (localRenderPaused) {
                                 // 本端 surface 没了，停帧是自己造成的，与对端无关
                                 viewerZeroFpsStreak = 0
-                            } else if (inboundVideoFps <= 0.0) {
+                            } else if (inboundVideoFps < 0.0) {
+                                // 没读数（首拍、计数缺失）：既不清零也不加——0.2.55~0.2.61 就是把
+                                // 读不到的 -1 判成 0 帧，才产出那 6 条 `ice=CONNECTED rttMs=84/59/91`
+                                // 的假 video_stall
+                            } else if (inboundVideoFps == 0.0) {
                                 viewerZeroFpsStreak++
                                 if (viewerZeroFpsStreak == VIEWER_STALL_POLLS) {
                                     com.soul2soul.app.util.SelfCheck.reportEvent(
@@ -1077,12 +1136,15 @@ class WebRtcClient(
                         if (outboundVideoSent >= 0) previousOutboundVideoSent = outboundVideoSent
                         val decision = VideoQualityPolicy.step(
                             preferredLongEdge,
-                            captureLongEdge,
+                            qualityLongEdge,
                             VideoQualityPolicy.Metrics(
-                                best,
-                                lossPercent,
-                                availableOutgoingBps,
-                                outboundVideoFps,
+                                rttMs = best,
+                                lossPercent = lossPercent,
+                                availableBitrateBps = availableOutgoingBps,
+                                outboundFps = outboundVideoFps,
+                                // 估计器爬坡期（前 BANDWIDTH_SETTLE_POLLS 拍）的 300kbps 是初值不是实测，
+                                // 拿它判坏会在 6s 内必然攒出一次降档（v0.2.62 双模拟器实测）
+                                bandwidthSettled = statsPollCount > BANDWIDTH_SETTLE_POLLS,
                             ),
                             highRttStreak,
                             lowRttStreak,
@@ -1092,7 +1154,8 @@ class WebRtcClient(
                         decision.targetEdge?.let { target ->
                             Log.d(TAG, "adaptive video quality rtt=${best}ms " +
                                 "loss=${"%.1f".format(lossPercent)}% available=${availableOutgoingBps} " +
-                                "edge=${captureLongEdge}->${target}")
+                                "edge=${qualityLongEdge}->${target} cap=${captureWidth}x${captureHeight} " +
+                                "restartAllowed=$captureRestartSupported")
                             rttHandler.post { if (!closed) applyCaptureLongEdge(target) }
                             // 切档后重新积累连续样本，避免同一份坏指标在下一次轮询立即连降两档。
                             highRttStreak = 0
@@ -1435,7 +1498,12 @@ class WebRtcClient(
         private const val DISCONNECT_TIMEOUT_MS = 15_000L
         private const val ICE_RESTART_AFTER_MS = 6000L
         private const val ICE_RESTART_RETRY_MS = 1000L
-        // 连续 3 个诊断窗口（约 30 秒）零帧才算画面卡死：单窗口 0 帧可能只是静态画面没触发编码
+        // 连续 3 个诊断窗口（约 30 秒）零帧才算画面卡死：单窗口 0 帧可能只是静态画面没触发编码。
+        // v0.2.62 起帧率是区间相减的真读数（缺读数时为 -1，不参与判定），不再是"读不到=卡死"。
         private const val VIEWER_STALL_POLLS = 3
+        // 带宽估计器爬坡期：前 5 拍（10s）的 availableOutgoingBitrate 是初值不是实测，不参与降档判据
+        private const val BANDWIDTH_SETTLE_POLLS = 5
+        // Android 14 起 MediaProjection token 一次性：重启采集会被系统撤销授权
+        private const val ANDROID_14 = 34
     }
 }

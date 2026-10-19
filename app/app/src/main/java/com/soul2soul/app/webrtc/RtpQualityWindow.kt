@@ -45,4 +45,23 @@ internal object RtpQualityWindow {
     }
 
     private fun unavailable() = Metrics(-1.0, -1.0, -1.0)
+
+    /** 短于这个窗口的帧计数差算不出有意义的帧率（2s 轮询抖动会把它放大成 ±30%）。 */
+    private const val MIN_FPS_WINDOW_MS = 1000L
+
+    /**
+     * 区间帧率。Android 版 libwebrtc 的 `outbound-rtp`/`inbound-rtp` **不提供**
+     * `framesPerSecond`（v0.2.62 双模拟器实测 `videoFps=x`），所以帧率只能由累计
+     * `framesSent`/`framesReceived` 除以这段区间的真实时长得到。
+     *
+     * 返回 -1 = **这一段没读数**（缺计数、计数回退、或窗口太短）。调用方必须把 -1 当
+     * "测不到"而不是"0 帧"：把"读不到"判成"卡死"就是线上那 6 条假 `video_stall`
+     * （`ice=CONNECTED`、`rttMs=84/59/91`、链路明明是好的）的唯一成因。
+     */
+    fun framesFps(previousFrames: Long, currentFrames: Long, elapsedMs: Long): Double {
+        if (previousFrames < 0 || currentFrames < 0) return -1.0
+        if (currentFrames < previousFrames) return -1.0
+        if (elapsedMs < MIN_FPS_WINDOW_MS) return -1.0
+        return (currentFrames - previousFrames) * 1000.0 / elapsedMs
+    }
 }

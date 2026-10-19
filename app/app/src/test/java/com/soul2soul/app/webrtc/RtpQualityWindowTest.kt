@@ -37,4 +37,24 @@ class RtpQualityWindowTest {
         assertEquals(-1.0, metrics.jitterMs, 0.001)
         assertEquals(-1.0, metrics.concealedMs, 0.001)
     }
+
+    // v0.2.62：这一版 libwebrtc 的 outbound/inbound-rtp 没有 framesPerSecond，帧率只能区间相减。
+    // 关键是"算不出"必须返回 -1（没读数），绝不能返回 0——0 会被观看端判成画面卡死。
+    @Test
+    fun `帧率由累计计数与真实窗口算出`() {
+        assertEquals(30.0, RtpQualityWindow.framesFps(100, 400, 10_000), 0.001)
+        assertEquals(0.5, RtpQualityWindow.framesFps(0, 1, 2_000), 0.001)
+    }
+
+    @Test
+    fun `帧率算不出时返回未知而不是零帧`() {
+        assertEquals(-1.0, RtpQualityWindow.framesFps(-1, 300, 10_000), 0.001)
+        assertEquals(-1.0, RtpQualityWindow.framesFps(300, -1, 10_000), 0.001)
+        assertEquals("计数回退（流重建）不折算成 0 帧", -1.0,
+            RtpQualityWindow.framesFps(400, 100, 10_000), 0.001)
+        assertEquals("窗口太短（第一拍没有基准）不算帧率", -1.0,
+            RtpQualityWindow.framesFps(100, 130, 500), 0.001)
+        assertEquals("真·零帧：计数没涨但窗口够长，这才是 0.0", 0.0,
+            RtpQualityWindow.framesFps(100, 100, 10_000), 0.001)
+    }
 }

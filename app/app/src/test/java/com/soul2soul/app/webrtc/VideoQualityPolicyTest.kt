@@ -154,4 +154,56 @@ class VideoQualityPolicyTest {
         // 非法值先归一再判：低于 960 的请求归到最低档 → 无需切换
         assertNull(VideoQualityPolicy.controlEnterEdge(600))
     }
+
+    // v0.2.62：带宽估计器爬坡期的 300kbps 是初值不是实测，不许拿它动画质（双模拟器实测：
+    // 建会头两拍都读 300，触发降档那一刻同一列已是 5.38Mbps）
+    @Test
+    fun `爬坡期低带宽不累计降档连拍`() {
+        val ramping = VideoQualityPolicy.Metrics(
+            rttMs = 18, lossPercent = -1.0, availableBitrateBps = 300_000,
+            outboundFps = -1.0, bandwidthSettled = false,
+        )
+        val d = VideoQualityPolicy.step(1600, 1600, ramping, highStreak = 2, lowStreak = 0)
+        assertNull("爬坡期读到 300kbps 不能凑够 3 连拍触发降档", d.targetEdge)
+        assertEquals("爬坡期不判坏，连拍必须清零而不是继续累加", 0, d.highStreak)
+    }
+
+    @Test
+    fun `带宽已稳后同样的读数照常判坏`() {
+        val settled = rampMetrics(bandwidthSettled = true)
+        val d = VideoQualityPolicy.step(1600, 1600, settled, highStreak = 2, lowStreak = 0)
+        assertEquals("门槛放开后判据不能被一起删掉", 1280, d.targetEdge)
+    }
+
+    @Test
+    fun `爬坡期低带宽也不许被当成回升条件`() {
+        // available>0 又不是"未知"，isGood 里那条 available<=0 的放行不能顺手放过它
+        val d = VideoQualityPolicy.step(
+            1600, 1280, rampMetrics(bandwidthSettled = false), highStreak = 0, lowStreak = 9,
+        )
+        assertNull(d.targetEdge)
+        assertEquals("爬坡期不计回升连拍", 0, d.lowStreak)
+
+        val good = VideoQualityPolicy.step(
+            1600, 1280,
+            VideoQualityPolicy.Metrics(20, -1.0, 4_100_000, -1.0, bandwidthSettled = true),
+            highStreak = 0, lowStreak = 9,
+        )
+        assertEquals("带宽真够且已稳时照常回升", 1600, good.targetEdge)
+    }
+
+    @Test
+    fun `rtt与丢包在爬坡期照常参与判坏`() {
+        val hot = VideoQualityPolicy.Metrics(
+            rttMs = 400, lossPercent = -1.0, availableBitrateBps = 300_000,
+            outboundFps = -1.0, bandwidthSettled = false,
+        )
+        assertEquals("只挡带宽这一路，别把 rtt/丢包一起挡了", 1280,
+            VideoQualityPolicy.step(1600, 1600, hot, highStreak = 2, lowStreak = 0).targetEdge)
+    }
+
+    private fun rampMetrics(bandwidthSettled: Boolean) = VideoQualityPolicy.Metrics(
+        rttMs = 18, lossPercent = -1.0, availableBitrateBps = 300_000,
+        outboundFps = -1.0, bandwidthSettled = bandwidthSettled,
+    )
 }
