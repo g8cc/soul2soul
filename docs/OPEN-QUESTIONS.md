@@ -83,6 +83,8 @@
 
     发版动作＝`./scripts/publish-release.sh 0.2.61 61`（clean → assembleProdRelease → scp → 写 `version.json` → 远端校验）。它会推到她的更新通道，所以等你点头；不点头我就只把 61 装在米10 上做双端复现。
 
+    **⚠️ 但"发上去"不等于"有读数"——10-19 10:01 的 `repro-capture check` 实测：她今天 09:39 仍报 `code=58 name=0.2.58 remote=60/0.2.60 update=true`**，也就是 59 和 60 她都还没装（通道上一直有包，她没点更新）。所以 61 发完之后，这一版的全部产出仍然系于"她点一次更新"这一个动作：App 打开会自动检查更新并提示，需要她（或你转告她）真的按下那一下。在此之前，`stop_tap`/`peer_gone`/`call_canceled`/`path`/`proj`/`aexit`/`heartbeat` 在她那条线上都是结构性零采样，日志里读不到 ≠ 埋点坏了。
+
 ## B. 你已经拍板的（不再变）
 
 | 决策点 | 结论 |
