@@ -42,10 +42,12 @@ class PeerSignalProbeTest {
     // P1：共享端收到 bye/peer.gone 时必须先取证再拆会话，且带上 ICE 实况
     @Test
     fun `sharer records ice state before tearing the session down`() {
-        val branch = window(share(), "\"bye\", \"peer.gone\" -> {", 12)
+        val branch = window(share(), "\"bye\", \"peer.gone\" -> {", 20)
         val report = branch.indexOfFirst { it.contains("\"peer_signal\"") }
         val teardown = branch.indexOfFirst { it.contains("stopSession(sendBye = false)") }
         assertTrue("分支里必须上报 peer_signal（信令离线被当成挂断的唯一取证点）", report >= 0)
+        assertTrue("窗口里找不到 stopSession（要么被删，要么窗口窄了——这时下面那条顺序断言会假绿）",
+            teardown >= 0)
         assertTrue("peer_signal 上报必须排在 stopSession 之前（之后 ice 只会是 CLOSED，证据没了）",
             report < teardown)
         val probe = branch.drop(report).take(4)
@@ -58,10 +60,12 @@ class PeerSignalProbeTest {
     // P2：观看端对称——PeerEnded 拆页面之前同样取证，且按 notice 区分两种来源
     @Test
     fun `viewer records ice state before finishing the activity`() {
-        val branch = window(session(), "is SignalRouter.SignalAction.PeerEnded -> {", 12)
+        val branch = window(session(), "is SignalRouter.SignalAction.PeerEnded -> {", 16)
         val report = branch.indexOfFirst { it.contains("\"peer_signal\"") }
-        val teardown = branch.indexOfFirst { it.contains("finishWithCleanup(sendBye = false") }
+        val teardown = branch.indexOfFirst { it.contains("finishWithCleanup(") }
         assertTrue("PeerEnded 分支必须上报 peer_signal", report >= 0)
+        assertTrue("窗口里找不到 finishWithCleanup（断行方式变了会让下面那条顺序断言假绿）",
+            teardown >= 0)
         assertTrue("peer_signal 上报必须排在 finishWithCleanup 之前", report < teardown)
         assertTrue("必须用 peer_lost 区分「信令掉线」与「对方挂断」",
             branch.any { it.contains("R.string.peer_lost") })

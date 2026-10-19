@@ -94,6 +94,13 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_STOP -> {
+                // 结束原因是 local_stop 只能说明"点了停止"，说不清点的是哪一个：App 内结束按钮与
+                // 通知栏动作走的是同一条 ACTION_STOP。这条事件记的是"哪个控件被点"这个输入事实，
+                // 不是第二个终止原因真值源（reason 仍只有 local_stop 一处）。
+                com.soul2soul.app.util.SelfCheck.reportEvent(
+                    this, "sharer", "stop_tap", webRtc?.iceStateName ?: "-",
+                    "src_" + (intent.getStringExtra(EXTRA_STOP_SRC) ?: "unknown"),
+                )
                 stopSession(sendBye = true)
                 return START_NOT_STICKY
             }
@@ -198,6 +205,10 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
                             webRtc?.iceStateName ?: "-",
                             "sig=" + if (json.optString("type") == "peer.gone") "gone" else "bye",
                         )
+                        // 占位必须在 stopSession 之前：收尾的 close() 会当场读 endReason 并上报，
+                        // 之后才写就来不及了（sendBye=false 那条 local_stop 守卫也进不去）。
+                        // 否则共享端被对方挂断时 diag.session.reason 只剩 local_close，"谁关的"要跨两行拼。
+                        webRtc?.noteEnd(if (json.optString("type") == "peer.gone") "peer_gone" else "remote_bye")
                         stopSession(sendBye = false)
                     }
                 }
@@ -506,7 +517,9 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
     private fun buildNotification(text: String): Notification {
         val stopIntent = PendingIntent.getService(
             this, 21,
-            Intent(this, ScreenShareService::class.java).setAction(ACTION_STOP),
+            Intent(this, ScreenShareService::class.java)
+                .setAction(ACTION_STOP)
+                .putExtra(EXTRA_STOP_SRC, "notify"),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
         val muteIntent = PendingIntent.getService(
@@ -564,6 +577,7 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
         const val ACTION_SET_CTL = "com.soul2soul.app.action.SET_CTL"
         const val EXTRA_CTL_ON = "ctl_on"
         const val EXTRA_PROJECTION = "projection"
+        const val EXTRA_STOP_SRC = "stop_src"
         private const val CTL_ERROR_THROTTLE_MS = 2_000L
 
         /** 操控授权状态机（会话级）：通知按钮与授权对话框都经它读写，跨 Activity/Service 共享 */
@@ -598,9 +612,16 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
             }
         }
 
-        /** 悬浮气泡的结束按钮回调 */
-        fun stopFromOverlay(ctx: Context) {
-            ctx.startService(Intent(ctx, ScreenShareService::class.java).setAction(ACTION_STOP))
+        /**
+         * 用户从 App 内点"结束"（MainActivity 共享中卡片）。src 进 stop_tap 的 detail，
+         * 因为通知栏动作与它是同一条 ACTION_STOP，日志要能分清她点的是哪一个。
+         */
+        fun stopSharing(ctx: Context, src: String) {
+            ctx.startService(
+                Intent(ctx, ScreenShareService::class.java)
+                    .setAction(ACTION_STOP)
+                    .putExtra(EXTRA_STOP_SRC, src),
+            )
         }
     }
 }

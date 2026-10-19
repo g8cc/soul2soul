@@ -279,6 +279,31 @@ if [ "$ICE" != "OK" ]; then
   fi
 fi
 
+# ---------- T4-3b 共享端"结束"必须自报入口（stop_tap） ----------
+# 共享端有两条结束入口走的是同一条 ACTION_STOP（App 内按钮、FGS 通知栏动作），日志里原本
+# 只留下同一个 reason=local_stop；这一条证"点了哪一个"确实进了报文体。
+# 时机是本机最难的一格：ICE 在本机结构性 FAILED，而 A 的会话会在 ice_failed 后约 13 秒被
+# 对端的 bye 拆掉（10-19 09:23:43→09:23:56 实测），所以必须 once 单点、不重试——默认重试模式
+# 光 dump 就要 30 秒，点下去时按钮早没了（上一版就是这么 FAIL 的）。
+# 抢输了不谎报：A 已经收尾（有 diag.session 而没 stop_tap）就记 SKIP(环境)，
+# 因为那一刻根本没有可点的"结束"按钮，这条断言在结构上不可执行。
+# 诚实边界：通知栏那条要点系统 UI，本机证不了 ⇒ src_notify 仍是零采样，只能等真机。
+if [ "$ICE" != "OK" ]; then
+  ui tap "$S1" "结束" once >/dev/null 2>&1 || true
+  STOPTAP=0
+  for i in 1 2 3 4; do
+    [ "$(count_log "$S1" '"event":"stop_tap".*"detail":"src_main_page"')" -gt 0 ] && { STOPTAP=1; break; }
+    sleep 1.5
+  done
+  if [ "$STOPTAP" = 1 ]; then
+    ck "共享端点结束时报文体里带 src_main_page" 1
+  elif [ "$(count_log "$S1" 'diag.session')" -gt 0 ]; then
+    echo "  SKIP(环境) 共享端点结束时报文体里带 src_main_page：对端先把 A 的会话拆了，没有可点的「结束」"
+  else
+    ck "共享端点结束时报文体里带 src_main_page" 0
+  fi
+fi
+
 # ---------- T4-4 屏幕共享验证：A 打开设置页，B 应同步显示相同画面 ----------
 sleep 5
 "$ADB" -s "$S1" shell am start -a android.settings.SETTINGS >/dev/null

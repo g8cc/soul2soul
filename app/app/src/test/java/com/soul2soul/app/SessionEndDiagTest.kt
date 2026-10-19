@@ -1,12 +1,15 @@
 package com.soul2soul.app
 
 import java.io.File
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
  * 断连可解释性锁定（v0.2.55）：服务器只看得到信令帧，WebRTC 媒体与界面生命周期在它眼里是黑的。
  * "米15 发起后 4~6 秒即断""观看端解锁后黑屏"这两类问题，此前只能靠猜，根因就是本端没有自报终止原因。
+ * D10/D11/D12 是同一件事的另一半：报了原因还不够，得保证它不被收尾的 local_stop 覆盖、
+ * 并且"点了哪个停止入口"本身也留得下痕迹。
  * 回滚下面任何一条，服务器日志会重新退化成"没有原因的 local_close"，用例必须变红。
  */
 class SessionEndDiagTest {
@@ -69,12 +72,13 @@ class SessionEndDiagTest {
             branch.none { it.contains("postDelayed") })
     }
 
-    // D4：观看端挂断/被对方挂断也要有名分（否则服务器看到 local_close 无从区分谁关的）
+    // D4：观看端挂断/被对方挂断也要有名分（否则服务器看到 local_close 无从区分谁关的）。
+    // D14 把"名字由调用方给"锁成整类，这里只守兜底那一半：本端主动挂断仍叫 user_hangup。
     @Test
     fun `viewer hangup names its end reason`() {
-        assertTrue("finishWithCleanup 必须按 sendBye 区分 user_hangup / remote_bye",
+        assertTrue("finishWithCleanup 的兜底必须按 sendBye 区分 user_hangup / remote_bye",
             window(session(), "private fun finishWithCleanup(", 16)
-                .any { it.contains("noteEnd(if (sendBye) \"user_hangup\" else \"remote_bye\")") })
+                .any { it.contains("endReason ?: if (sendBye) \"user_hangup\" else \"remote_bye\"") })
     }
 
     // D5：黑屏排查依赖 surface 生命周期自报，不能只靠视频轨回调
@@ -174,5 +178,56 @@ class SessionEndDiagTest {
         }
         assertTrue("交出去却没占位的结束路径（真因会被 local_stop/local_close 覆盖）: " + offenders,
             offenders.isEmpty())
+    }
+
+    // D12：`stop_tap` 的判据全靠"每个结束入口都自报身份"。少一个入口，日志里那条就退化成
+    // src_unknown，而 src_unknown 与"她没点、是系统撤的"在 reason 上又撞回同一个 local_stop。
+    @Test
+    fun `every stop entry point names itself`() {
+        val share = share()
+        val senders = share.count { it.contains("setAction(ACTION_STOP)") }
+        val taggers = share.count { it.contains("putExtra(EXTRA_STOP_SRC") }
+        assertEquals("每一个能投递 ACTION_STOP 的入口都必须带 src（少了就等于回到 src_unknown）",
+            senders, taggers)
+        assertTrue("结束入口至少要有通知栏与 App 内两处（少一处说明入口被删，本锁口径要一起改）",
+            senders >= 2)
+        assertTrue("App 内入口必须把自己报名字传进去",
+            source("app/src/main/java/com/soul2soul/app/MainActivity.kt")
+                .any { it.contains("stopSharing(this, \"main_page\")") })
+        val branch = window(share, "ACTION_STOP ->", 10)
+        assertTrue("收到 ACTION_STOP 必须先报 stop_tap 再收尾（收尾会关 socket，之后发不出去）",
+            branch.indexOfFirst { it.contains("\"stop_tap\"") } in 0 until branch.indexOfFirst { it.contains("stopSession(") })
+    }
+
+    // D13：共享端被对方挂断也要有名分。t4 实测（0.2.60，08:58:44）：收到 bye 后走
+    // stopSession(sendBye=false)，那条 local_stop 守卫进不去 ⇒ reason 退化成 local_close。
+    @Test
+    fun `sharer side remote hangup claims its own end reason`() {
+        val branch = window(share(), "\"bye\", \"peer.gone\" ->", 16)
+        val claim = branch.indexOfFirst { it.contains("noteEnd(") }
+        val stop = branch.indexOfFirst { it.contains("stopSession(sendBye = false)") }
+        assertTrue("被对方挂断必须先占位（close() 会当场读 endReason 上报，之后写就来不及）", claim in 0 until stop)
+        assertTrue("bye 与 peer.gone 是两种死法，不许合成一个名字",
+            branch.any { it.contains("\"peer_gone\"") } && branch.any { it.contains("\"remote_bye\"") })
+    }
+
+    // D14：观看端对称的那半——名字不能从 sendBye 布尔值反推。三个 sendBye=false 的入口里
+    // "她挂断""信令掉线""授权阶段反悔"是三种死法，全叫 remote_bye 时"连上几秒被挂断"这一格
+    // 会出现假阳性（10-19 数生产日志时就是这么误读的）。
+    @Test
+    fun `viewer side end reason is named by the caller not by the boolean`() {
+        val src = code(session())
+        assertTrue("finishWithCleanup 必须接受 endReason（否则远程结束只能按布尔值取名）",
+            src.any { it.contains("fun finishWithCleanup(") && it.contains("endReason") })
+        assertTrue("noteEnd 只能把布尔值当兜底，不能当唯一来源",
+            src.any { it.contains("noteEnd(endReason ?:") })
+        val peerEnded = window(session(), "is SignalRouter.SignalAction.PeerEnded -> {", 16)
+        assertTrue("PeerEnded 必须显式交出名分，且 bye 与 peer.gone 分开",
+            peerEnded.any { it.contains("endReason =") } &&
+                peerEnded.any { it.contains("\"peer_gone\"") } &&
+                peerEnded.any { it.contains("\"remote_bye\"") })
+        assertTrue("主叫在授权阶段反悔不许伪装成 remote_bye（那一通从没连通过）",
+            window(session(), "SignalAction.CanceledAfterAccept -> {", 8)
+                .any { it.contains("\"call_canceled\"") })
     }
 }

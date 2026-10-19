@@ -244,7 +244,7 @@ class MainActivity : AppCompatActivity() {
         findViewById<View>(R.id.btnScan).setOnClickListener { onScanClicked() }
         findViewById<View>(R.id.btnRecall).setOnClickListener { onRecallClicked() }
         findViewById<View>(R.id.btnEndSharing).setOnClickListener {
-            ScreenShareService.stopFromOverlay(this)
+            ScreenShareService.stopSharing(this, "main_page")
             boxSharing.postDelayed({ updateUi() }, 500)
         }
         btnCall.setOnClickListener { onCallClicked() }

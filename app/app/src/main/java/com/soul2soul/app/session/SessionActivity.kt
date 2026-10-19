@@ -623,14 +623,16 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
             SignalRouter.SignalAction.DispatchMedia -> dispatchToClient(json)
             is SignalRouter.SignalAction.PeerEnded -> {
                 endedRemotely = true
+                val gone = action.noticeRes == R.string.peer_lost
                 // 与共享端同一条判据：先记 ICE 实况再拆页面。peer.gone 只是对端**信令**掉线
                 // （HyperOS 冻结后台套接字 → 服务器 pong 超时广播），ICE=CONNECTED 的 peer_signal
                 // 就等于「会话被信令假死拆掉」，是"米15 发起后几秒即断"的头号候选。
-                viewerEvent(
-                    "peer_signal",
-                    if (action.noticeRes == R.string.peer_lost) "sig=gone" else "sig=bye",
+                viewerEvent("peer_signal", if (gone) "sig=gone" else "sig=bye")
+                finishWithCleanup(
+                    sendBye = false,
+                    notice = action.noticeRes,
+                    endReason = if (gone) "peer_gone" else "remote_bye",
                 )
-                finishWithCleanup(sendBye = false, notice = action.noticeRes)
             }
             SignalRouter.SignalAction.CallerCanceledBeforeAccept -> {
                 callInvalidated = true
@@ -642,7 +644,9 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
                 // 主叫在授权阶段反悔: 别让人对着"连接中"数 30 秒
                 endedRemotely = true
                 android.widget.Toast.makeText(this, R.string.peer_canceled, android.widget.Toast.LENGTH_SHORT).show()
-                finishWithCleanup(sendBye = false)
+                // 这与"她挂断已建立的会话"是两种死法：这一通从没连通过，混成 remote_bye
+                // 就会把"授权阶段反悔"读成"连上几秒被挂断"——正是我们要查的那一格的假阳性。
+                finishWithCleanup(sendBye = false, endReason = "call_canceled")
             }
         }
     }
@@ -844,7 +848,7 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
 
     // ---------- 生命周期 ----------
 
-    private fun finishWithCleanup(sendBye: Boolean, notice: Int? = null) {
+    private fun finishWithCleanup(sendBye: Boolean, notice: Int? = null, endReason: String? = null) {
         callInvalidated = true
         if (notice != null) {
             android.widget.Toast.makeText(this, notice, android.widget.Toast.LENGTH_SHORT).show()
@@ -853,8 +857,10 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
             byeSent = true
             Presence.client.send("bye")
         }
-        // 本端收尾也要有名字：否则服务器只看到一个没有原因的 local_close
-        client?.noteEnd(if (sendBye) "user_hangup" else "remote_bye")
+        // 本端收尾也要有名字：否则服务器只看到一个没有原因的 local_close。
+        // 名字必须由调用方给出而不是从 sendBye 反推——"她挂断""信令掉线""授权阶段反悔"
+        // 三种都走 sendBye=false，全叫 remote_bye 就等于没埋（first-wins，上游真因仍不被覆盖）。
+        client?.noteEnd(endReason ?: if (sendBye) "user_hangup" else "remote_bye")
         finish()
     }
 
