@@ -153,7 +153,17 @@ bash scripts/test.sh --coverage
 ## 6. T4（E2E）前置
 
 - `adb devices` ≥ 2 台且均已 boot（当前常态是 Mi5 + Mi15 真机或模拟器双开）；
-- 服务器可跑（T4 自带起服逻辑时遵循 S2S_DATA_FILE）；
+- **本机 dev 信令服务器必须在跑**——`e2e.sh` 自己不起服务，而 emu flavor 把信令地址写死成 `ws://10.0.2.2:8080`（=笔记本本身）：
+
+  ```bash
+  cd server && S2S_DATA_FILE=/tmp/s2s-emu-run/pairings.json nohup node src/index.js >> /tmp/s2s-emu-run/server.log 2>&1 &
+  curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8080/health   # 200 才算起来
+  ```
+
+  `S2S_DATA_FILE` 不能省：默认值是 `server/data/pairings.json`（AGENTS 规定测试绝不写它）。
+  它没起来时 t4 的第一条断言就是 `FAIL A 生成配对码 (NONE)`，且失败截图上写着「连接断开，正在重试…」——
+  这是**前置条件缺失**，不是产品 bug，别拿它去改客户端。（10-19 实测：把这台常在跑的 dev server 当成
+  "上一轮被 Ctrl-C 的孤儿进程"清理掉，于是整轮 t4 白跑一次。）
 - 不满足时 test.sh 报 SKIP 而非 FAIL——SKIP ≠ 通过，发版前人工确认。
 
 弱网恢复与语音质量采样步骤、日志字段说明和建议矩阵见 [NETWORK-QUALITY.md](NETWORK-QUALITY.md)；当前未完成的真机事项及维护记录见 [VALIDATION-TODO.md](VALIDATION-TODO.md)。没有两台真机结果时，只能报告单测/协议测试通过，不能声称弱网恢复或语音听感已验证。
