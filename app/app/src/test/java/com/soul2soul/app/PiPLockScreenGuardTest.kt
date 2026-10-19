@@ -43,6 +43,13 @@ class PiPLockScreenGuardTest {
         return lines.subList(i, j)
     }
 
+    /** 锚点行之前的 n 行。用来判"这条上报挂在哪个分支里"——整文件 any 判不出分支（见 L4 注释） */
+    private fun before(lines: List<String>, anchor: String, n: Int): List<String> {
+        val hits = lines.indices.filter { lines[it].contains(anchor) }
+        assertTrue("锚点应恰好出现一次，实际 ${hits.size} 次：$anchor", hits.size == 1)
+        return lines.drop(hits[0] - n).take(n)
+    }
+
     // L1：锁屏/息屏引起的 onUserLeaveHint 不许进小窗（进小窗会拆 surface，且没人重挂）
     @Test
     fun `leave hint does not enter PiP while screen is off`() {
@@ -85,15 +92,34 @@ class PiPLockScreenGuardTest {
             webrtcCatch.any { it.contains("noteEnd(\"webrtc_start_failed\")") })
     }
 
-    // L4：信令断/续要能区分"媒体还活着只是信令掉了"，且无会话时不产噪声
+    // L4：信令断/续在**会话期与待机期都要报**。历史顺序是反的：0.2.58 之前只有会话期报
+    // ⇒「待机 socket 死了多久」在服务器侧是整格空白（10-18 那 9 次 pong 超时只能从服务端日志反推）。
+    // 而这条用例的名字与判据是那个旧世界留下的，成了**反向的假锁**：
+    // `src.any { it.contains("signaling_down") }` 会被待机那一条满足 ⇒ 把会话期那一条整个删掉照样绿。
+    // 现在按分支钉死：会话期那条必须挂在 `Presence.sessionBusy` 下且**无门**（会话中每次断都要看见），
+    // 待机那条必须挂在 `standbySigDown` 边沿门下（Doze 里每 30s 一次退避重连不许刷成噪声）。
     @Test
-    fun `signaling drop and recovery are reported only during a session`() {
+    fun `signaling drop and recovery are reported on both branches, standby edge-gated`() {
         val src = presence()
-        assertTrue("断线必须报 signaling_down", src.any { it.contains("\"signaling_down\"") })
-        assertTrue("重连必须报 signaling_up", src.any { it.contains("\"signaling_up\"") })
-        val onState = window(src, "override fun onState(connected: Boolean)", 24)
-        assertTrue("上报必须以 Presence.sessionBusy 为门（待机期每次重连都报就是噪声）",
-            onState.any { it.contains("Presence.sessionBusy") })
+        val onState = between(src, "override fun onState(connected: Boolean)", "先建立总线订阅")
+        mapOf(
+            "会话期·复活" to "reportSignaling(\"signaling_up\", reconnectAttempt, down, signalRole())",
+            "会话期·掉线" to "reportSignaling(\"signaling_down\", reconnectAttempt, 0L, signalRole())",
+            "待机期·复活" to "reportSignaling(\"signaling_up\", reconnectAttempt, down, \"standby\")",
+            "待机期·掉线" to "reportSignaling(\"signaling_down\", reconnectAttempt, 0L, \"standby\")",
+        ).forEach { (name, anchor) ->
+            val guarded = name.startsWith("待机期·")
+            val block = before(src, anchor, 2)
+            assertTrue(
+                "$name 的上报必须挂在 ${if (guarded) "边沿门" else "sessionBusy"} 分支里（整文件 any 判不出分支，见本条注释）",
+                block.any {
+                    if (guarded) it.contains("} else if (${if (name.endsWith("掉线")) "!" else ""}standbySigDown)")
+                    else it.contains("Presence.sessionBusy")
+                },
+            )
+            // 名字锚必须在 onState 内：挪到别处（比如只在新会话建立时报）就不再是 socket 状态的自报
+            assertTrue("$name 的锚点落在 onState 之外", onState.any { it.contains(anchor) })
+        }
     }
 
     // L4c：signaling_down 按定义发生在 socket 已断时，SelfCheck.sendDiag 要求 isConnected 才发，
