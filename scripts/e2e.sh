@@ -270,12 +270,12 @@ if [ "$ICE" != "OK" ]; then
     # 只有"ICE 确实跑过检查并 FAILED、且一帧都没出"才符合上面①②的结构性环境失败特征
     echo "  !! 媒体段本机不可判定：ICE 未连通（FAILED=${FAILED} 次），原因见上方注释①②"
     echo "     媒体/笔迹结论一律以真机双端为准（docs/TESTING.md T4 段），此处按 SKIP 记账，不算通过。"
-    ENV_SKIP=2
+    # 这里**不**加 ENV_SKIP：计数单位是"哪几条断言没判定"，由下面每条 SKIP(环境) 分支自己 +1
+    # （写死 =2 的时候 stop_tap 那条也打了 SKIP 却没进账，汇总行 2 而屏上 3 行，10-19 复核发现）。
   else
     echo "  FAIL 媒体段异常：ICE=$ICE FAILED=${FAILED:-0}/viewer-ready=${LIVEB:-0} 不符合" >&2
     echo "     「模拟器不可路由」的特征（gathering 卡死、进程被杀、握手没发都可能），需人工查日志" >&2
     FAIL=$((FAIL + 1))
-    ENV_SKIP=1
   fi
 fi
 
@@ -307,6 +307,7 @@ if [ "$ICE" != "OK" ]; then
     ck "共享端点结束时报文体里带 src_main_page" 1
   elif [ "$(count_log "$S1" 'diag.session')" -gt 0 ]; then
     echo "  SKIP(环境) 共享端点结束时报文体里带 src_main_page：对端先把 A 的会话拆了（点前屏上有「结束」=${BTN}）"
+    ENV_SKIP=$((ENV_SKIP + 1))
   else
     ck "共享端点结束时报文体里带 src_main_page" 0
   fi
@@ -339,6 +340,7 @@ EOF
   ck "B 看到了 A 的屏幕(设置页画面同步)" "$SIMILAR"
 else
   echo "  SKIP(环境) B 看到了 A 的屏幕(ICE 未连通)"
+  ENV_SKIP=$((ENV_SKIP + 1))
 fi
 
 # ---------- T4-5 标注：B 上画一笔，A 悬浮层应出现笔迹 ----------
@@ -362,6 +364,7 @@ if [ "$ICE" = "OK" ]; then
   ck "B 的笔迹出现在 A 屏幕" $([ "$DIFF" -gt 5 ] 2>/dev/null && echo 1 || echo 0)
 else
   echo "  SKIP(环境) B 的笔迹出现在 A 屏幕(ICE 未连通)"
+  ENV_SKIP=$((ENV_SKIP + 1))
 fi
 
 # ---------- T4-6 挂断 ----------
@@ -383,7 +386,9 @@ ck "挂断后 B 焦点回到 MainActivity(会话页已退出)" "$ENDED"
 
 echo "== E2E: PASS=$PASS FAIL=$FAIL SKIP_ENV=$ENV_SKIP =="
 if [ "$FAIL" -gt 0 ]; then exit 1; fi
-# 媒体段被环境挡住时整层记 SKIP(2)，test.sh 不会把它写成 PASS；发版说明必须如实写"媒体未本机验证"。
+# 每条被环境挡掉的断言自己 +1（10-19 修正：原先写死 =2，而 stop_tap 那条打了 SKIP 却没进账，
+# 汇总行说 2、屏上实际 3 行——"跳过了几条"必须等于"打了几个 SKIP(环境)"）。
+# test.sh 据此把整层记为 SKIP 而不是 PASS；发版说明必须如实写"媒体未本机验证"。
 if [ "$ENV_SKIP" -gt 0 ]; then
   echo "!! T4 信令/UI 段全绿，媒体段本机不可判定（需真机双端）" >&2
   exit 2

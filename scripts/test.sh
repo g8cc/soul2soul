@@ -202,6 +202,14 @@ PY
     echo "静态检查: scripts/ui_selftest.py 未通过——ui.py 的 tap 重试/校验路径坏了，t4 会退化成点一次不校验（真机断言不可信）"
     fail=1
   fi
+  # SKIP_ENV 必须由被跳过的断言自己累加。10-19 复核 t4 输出：汇总行说 `SKIP_ENV=2` 而屏上打了
+  # 三行 SKIP(环境)——stop_tap 那条没进账；drive-test.sh 里两处 `ENV_SKIP=2` 还是覆盖不是累加
+  # （AC-6 那条明明写着"四条断言"）。发版说明要写"媒体未本机验证"，具体几条必须数得出来。
+  if grep -nE 'ENV_SKIP=[0-9]+' "$ROOT/scripts/e2e.sh" "$ROOT/scripts/drive-test.sh" 2>/dev/null \
+     | grep -vqE 'ENV_SKIP=0$'; then
+    echo '静态检查: SKIP_ENV 不许写死数字（只许 ENV_SKIP=0 初始化 + ENV_SKIP=$((ENV_SKIP + n)) 累加；写死会盖掉别处已记的账）'
+    fail=1
+  fi
   # v0.2.57 生产日志复盘实锤：[relay] 把 paired.token（长期重连凭证，16 条）与
   # pair.code（六位配对码，12 条）原样落盘。隐私名单收在 logpolicy.js，
   # index.js 必须走它——把 send() 改回内联 quiet 判定就是拆线，必须红。

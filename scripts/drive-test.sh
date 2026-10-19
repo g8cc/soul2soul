@@ -207,7 +207,7 @@ elif [ "${FAILED_A:-0}" -gt 0 ] && [ "${LIVEB:-0}" -eq 0 ]; then
   echo "  SKIP(环境) ICE 连接成功 / B 连通进入画面：ICE 跑过检查但 FAILED=${FAILED_A} 次且零帧，"
   echo "             符合模拟器不可路由(见上方①)——媒体结论只能到真机双端取，不计通过也不计失败。"
   [ "$ANR" -gt 0 ] && echo "             本轮还叠加了 ANR/杀进程 ${ANR} 次（负载①之外的②）"
-  ENV_SKIP=2
+  ENV_SKIP=$((ENV_SKIP + 2))   # 两条：ICE 连接成功 + B 连通进入画面
   MEDIA_LIVE=0
 else
   echo "  FAIL ICE 未连通但不符合「模拟器不可路由」特征(FAILED=${FAILED_A:-0}/viewer-ready=${LIVEB:-0}/ANR=${ANR})" >&2
@@ -243,6 +243,7 @@ if [ "$MEDIA_LIVE" = "1" ]; then
   ck "笔迹跨端到达 A" $([ "${RED:-0}" -gt 3 ] && echo 1 || echo 0)
 else
   echo "  SKIP(环境) 笔迹跨端到达 A(ICE 未连通，画不出回显)"
+  ENV_SKIP=$((ENV_SKIP + 1))
 fi
 
 # 7) 锁屏保活 (AC-6，v0.2.56 反转：锁屏=画面暂停·语音继续，绝不结束会话)
@@ -265,12 +266,13 @@ else
   echo "             自接通以来双端累计会话结束日志 ${WIN} 条。"
   echo "             本机 ICE 未连通时会话被失败看门狗提前结束，锁屏保活只能到真机双端验（不计通过也不计失败）。"
   $ADB -s $S1 shell input keyevent 82 >/dev/null 2>&1 || true
-  ENV_SKIP=2
+  ENV_SKIP=$((ENV_SKIP + 4))   # 上面那条 SKIP 行说的是"四条断言"，账上就得是 4
 fi
 
 echo "== DRIVE: PASS=$P FAIL=$F SKIP_ENV=${ENV_SKIP:-0} =="
 if [ "$F" -gt 0 ]; then exit 1; fi
-# 媒体段被环境挡住时整层记 2（SKIP），与 test.sh/e2e.sh 同一口径：SKIP 永远不等于通过。
+# 被环境挡掉的断言逐条累加（原先写死 =2：既盖掉了前一段的累加，又和屏上实际打的 SKIP 行对不上）。
+# 整层仍记 SKIP 而不是 PASS，与 test.sh/e2e.sh 同一口径：SKIP 永远不等于通过。
 if [ "${ENV_SKIP:-0}" -gt 0 ]; then
   echo "!! 信令/UI 段全绿，媒体段本机不可判定（需真机双端）" >&2
   exit 2
