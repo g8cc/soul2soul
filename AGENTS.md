@@ -19,8 +19,11 @@ export JAVA_HOME=/Users/wardonguo/tools/jdk17/jdk-17.0.2.jdk/Contents/Home
 - 版本 bump 必须配合 `clean`：Kotlin 会内联 BuildConfig 常量（v0.2.12 实锤 hasUpdate 焊死）。`publish-release.sh` 已内置 clean。
 - **签名口令不入库**：`app/app/build.gradle.kts` 只读 `app/keystore.properties`（`.gitignore` 覆盖；模板 `app/keystore.properties.example`）。缺该文件时 release 不配置签名，
   `packageProdRelease` 直接报 `SigningConfig "release" is missing required property "storeFile"`（10-19 实测 rc=1，不会悄悄产出未签名包）。
-  ⚠️ 这条是 10-19 才补的：**口令的旧值仍明文躺在 git 历史与 GitHub 上**（`git log --all -S` 命中 3 个提交），移出 HEAD 不等于撤回——
-  真要闭合只能 `keytool -storepasswd/-keypasswd` 换口令（证书不变 ⇒ 老设备仍可覆盖安装），历史改写是另一件事。
+  **泄露已于 10-19 闭合：口令轮换过（`keytool -storepasswd`）**，旧值只剩在 git 历史里（`git log --all -S` 那 3 个提交）且已无任何文件能用它打开（实测 `keytool -list` rc=1 `password was incorrect`）。
+  换的时候三个必须知道的点：① **`app/keystore/*.jks` 实际是 PKCS12**（`file` 报 data、头 4 字节是 DER SEQUENCE `30 82 …` 而不是 JKS 魔数 `feedfeed`；扩展名骗人），
+  PKCS12 **只有一个口令** ⇒ `keytool -keypasswd` 直接 `UnsupportedOperationException`，正确做法是 `storePassword`/`keyPassword` 写成轮换后的**同一个值**；
+  ② `keytool` 是系统 stub，必须先 `export JAVA_HOME=/Users/wardonguo/tools/jdk17/…`，否则报 `Unable to locate a Java Runtime`——它**确实返回 rc=1**（实测），失败信号一直在，是我用 `keytool … | grep` 加 `${PIPESTATUS[0]}` 把它丢了（`PIPESTATUS` 是 bash 专有，Agent 侧 `/bin/zsh` 里展开为空，于是链尾的写文件照样执行）：**结果是"keystore 仍旧口令、配置文件已改成新口令"的半执行状态**，口令没换而构建配置坏了，见 `docs/TESTING.md` ㉞；取退出码要么不接管道、要么 `$?`；
+  ③ 验收 = 证书指纹逐位不变（`keytool -printcert -jarfile` 与 `apksigner verify --print-certs` 都是 `AE:7F…3E:4F`）+ `apksigner` 报 v1/v2 双签为 true ⇒ 已装手机仍能覆盖安装。改口令前的 `.jks` 备份在 `app/keystore/soul2soul-release.jks.bak-20261019`（`keystore/` 整个被忽略）。
   t0 两条守卫盯着：构建脚本里出现 `storePassword = "…"` 字面量即红、`.gitignore` 少了 `keystore.properties` 那行即红。
 
 ## 测试（必读）
