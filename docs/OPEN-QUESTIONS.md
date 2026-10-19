@@ -69,7 +69,19 @@
     - **`SessionTiming` 拿到第一条真机读数**（AUDIT-MATRIX §"终止原因可追溯"因此可从 ⬜ 转 PASS）：viewer `ice=DISCONNECTED … setupMs=748 liveMs=14195`、sharer `setupMs=443 liveMs=14074`——ICE 在挂断瞬间已 DISCONNECTED 而 liveMs 仍是正的 14 秒。同文件 0.2.55 的对照读数 `setupMs=1135965 liveMs=0`（§A.7 ③ 的坏读数形态）证明这个修正在真机上确实改变了结论。
     - **`DiagBacklog` 仍是零采样，且这次零得更有信息量**：全文件 `detail=at_` 命中 0 条。会话期没掉线→0 条属预期；但同日 **11:40:46（pong 超时，aliveFor=104317ms）与 11:42:11（裸 1006，aliveFor=17356ms）两次已确认的米15 standby 掉线，也是 0 条**。根因不是通路坏，而是**那两次根本没有可排队的事件**：`screen_off/screen_on` 只在 `ScreenShareService.kt:69/76` 里发，是会话期事件；待机锁屏时客户端一句话都不说。→ "待机期补一条心跳事件"值不值得进 0.2.59，这就是依据（仍未点头）。
     - **快 1006 在 0.2.58 上没消失**：米15 全天 16 次 `[ws] close` 全是 code=1006，`aliveFor` 从 1.8s 到 104s 都有，每次向对端广播 `peer.gone`。所以 `#51/#55` 的主线不变：**信令抖动与媒体无关，能治的是客户端收到 `peer.gone` 先探 ICE 再拆**，升级版本不解决它。
-    - **⬜ 新缺陷（比 #55 好治，但仍需你点头才动代码）**：`diag.session` 的 `path` 与 `proj` **恒为 `_`**——`SelfCheck.reportSession()` 从未 put 这两个键，而服务器照打（`index.js:635-643`）。含义：这通会话到底走了 P2P 还是 TURN 转发，**日志里读不出来**（候选里确实有 relay 型，但选中哪条没记）。选路其实早就算好了：`WebRtcClient.kt:795-835` 的 `selectedPath` 只写进 logcat（`:931`/`:952`），而米15 无 adb=logcat 对它不存在。最小修法=把 `path`（顺带 `proj`=MediaProjection 当时在不在）透传进 `reportSession`，纯客户端、服务器零改动。
+    - ✅ **上面这条已于 0.2.59 修掉**（`SelfCheck.reportSession` 现在 put 两参，值来自 `WebRtcClient.lastQos.path` 与 `projectionState`，服务器零改动）。历史事实保留：修之前这两个键从未被 put、而服务器照打（`index.js:635-643`），线上两天全是 `_` ⇒ "这通走 P2P 还是 TURN 转发"在日志里读不出来，而选路其实早就算好了（`WebRtcClient` 的 `selectedPath` 只进 logcat），米15 接不了 adb ⇒ logcat 这条路对它不存在。本机 t4 的通路证据：`role=sharer … path=- proj=live`——`ice=FAILED` 的会话从没选路过，`-` 是正当答案不是缺陷，`_` 才是"没发"。⬜ `path` 的**真读数**仍要等一次 established 的会话：本机 `.env` 里 TURN 是占位值、双模拟器 host candidate 互指 10.0.2.15，结构性打不通，所以"P2P 还是 TURN 转发"这一格未采样。
+
+13. **【待你点头】发版 v0.2.61（code 61）**——10-19 你问"服务器上的日志足够定位到问题吗"，答案是**不够**，而缺的不是传感器、是`reason` 在撒谎。
+
+    **日志抓到了的**（米15 作共享端那两通"连上十几秒就断"：11:43 `liveMs=14074`、15:21 `liveMs=16075`）：两端 `ice=CONNECTED`、`bye` 由她发出、她侧全程零 ICE 异常、反向 Mi10 作共享端同机同网撑了 155 秒、候选里有 3 条 `typ=relay` ⇒ 生产和 TURN 都没坏，媒体在断线那一刻是健康的，"网络差"这条被排除。
+
+    **日志读不出来的**：两通都报 `reason=local_stop`。根因是 `MediaProjection.Callback.onStop()`（系统撤销录屏授权那条路）只把原因交给 `listener.onEnded` 而**没占 first-wins 的槽**，收尾 `stopSession(sendBye=true)` 补的 `local_stop` 因此赢下来 ⇒ **"她按了停止"与"HyperOS 撤了录屏"在 ≤0.2.60 的所有日志里是同一个字符串**。那两通是 0.2.58、`proj=_`，**这一格对它们永久无法判**。
+
+    顺着同一类缺陷又挖出三处同形撒谎，repo 里已全修并各配"抽掉即红"的锁（t0–t3 全绿）：① 撤销授权现在自己占位（D10/D11，D11 锁的是整类：任何绕开 `notifyEnded` 直接 `listener.onEnded(` 的交出去路径都必须先占位）；② 新增 `stop_tap detail=src_main_page|src_notify`，回答"她点的是哪一个停止入口"（D12，两种抽法各自实测变红）；③ 共享端被对方挂断现在自己报 `remote_bye`/`peer_gone`，不再退化成要跨两行拼的 `local_close`（D13）；④ 观看端 `finishWithCleanup` 的原因原来是拿 `sendBye` 布尔值反推的，而"对端结束"与"主叫在授权阶段反悔"都走 `sendBye=false` ⇒ 全叫 `remote_bye` 会把"从没连过的反悔"读成"连上几秒被挂断"，正好是查这一格时的假阳性来源，现在由调用方显式交出 `endReason`、新增 `call_canceled`（D14）。
+
+    **装上 61 之后她那边只需要正常用一次**，判据变成三条读法：有 `stop_tap` ⇒ 她确实点了停止（`src_` 指出哪一处）；无 `stop_tap` 而 `reason=projection_stopped` ⇒ 系统撤了录屏授权（对策方向是省电白名单/后台采集豁免，不是恢复看门狗）；`reason=peer_gone` 而 `liveMs>0` ⇒ 会话是被信令假死拆的、不是她关的。⬜ 唯一还读不出来的是"她为什么撤/ROM 为什么撤"，那要 `aexit` 与 `doze/bucket` 的待机差分配合，也都在 61 里。
+
+    发版动作＝`./scripts/publish-release.sh 0.2.61 61`（clean → assembleProdRelease → scp → 写 `version.json` → 远端校验）。它会推到她的更新通道，所以等你点头；不点头我就只把 61 装在米10 上做双端复现。
 
 ## B. 你已经拍板的（不再变）
 
