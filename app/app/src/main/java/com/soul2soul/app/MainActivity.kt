@@ -296,7 +296,10 @@ class MainActivity : AppCompatActivity() {
                 maybeShowRomGuide() // 配对完成才是引导保活的合理时机（首启连弹两窗太吵）
                 updateUi()
             }
-            "pair.failed" -> toast(R.string.pair_failed)
+            "pair.failed" -> toast(
+                com.soul2soul.app.util.PairFailMessages.messageRes(
+                    json.optString("reason").takeIf { it.isNotEmpty() })
+            )
             "pair.recall_sent" -> toast(R.string.recall_sent)
             "pair.recall_failed" -> toast(
                 when (json.optString("reason")) {

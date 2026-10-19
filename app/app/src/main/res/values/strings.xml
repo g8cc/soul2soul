@@ -29,6 +29,16 @@
     <string name="cancel">取消</string>
     <string name="paired_done">配对成功！</string>
     <string name="pair_failed">配对失败，请检查配对码是否正确</string>
+    <!-- 服务器的 pair.failed 本来就带 reason，v0.2.63 之前全被上面这一句盖掉了：
+         "码打错了"和"TA 还绑着一台旧设备"是两件完全不同的事，后者不给出路就是一条死路
+         （10-19 实测：重装 App 会换设备号，服务器仍认为 TA 已配对 ⇒ 只能让 TA 先解除）。 -->
+    <string name="pair_fail_code_invalid">配对码不对，或已经过期了。让 TA 重新点一次「显示我的配对码」，把新码输进来</string>
+    <string name="pair_fail_already_paired">TA 的手机上还绑着一台旧设备（换过手机或重装过这个 App 就会这样）。让 TA 打开「陪着你」点「解除配对」，然后你再输一次这个码就好</string>
+    <string name="pair_fail_too_many_attempts">这个码输错太多次，已经作废了。让 TA 重新点一次「显示我的配对码」</string>
+    <string name="pair_fail_too_fast">点得太快了，等几秒钟再试一次</string>
+    <string name="pair_fail_unavailable">服务器这会儿发不出配对码，过一会儿再试</string>
+    <string name="pair_fail_self_pair">这是你自己手机上的码。要输的是 TA 手机上显示的那个</string>
+    <string name="pair_fail_server_storage">服务器没能保存这次配对，过几秒再试一次；还是不行就说明服务器在维护</string>
     <string name="status_unpaired">先和对方完成配对吧</string>
     <string name="status_paired_online">对方在线，想 TA 就点下面 ❤️</string>
     <string name="status_paired_offline">TA 现在不在线——打开过 App 才能收到召唤哦</string>

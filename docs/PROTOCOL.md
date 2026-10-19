@@ -47,7 +47,7 @@
 | `peer.online` | — | 对端上线（本端已配对时） |
 | `error` | `reason`: `bad_device_id` / `bad_token` | hello 校验失败；`bad_token` 后紧跟 close 4001 |
 | `pair.code` | `code`(6位数字串) | pair.request 成功 |
-| `pair.failed` | `reason`: `too_fast` / `too_many_attempts` / `code_invalid` / `self_pair` | 配对各类失败 |
+| `pair.failed` | `reason`: `too_fast` / `unavailable` / `too_many_attempts` / `code_invalid` / `self_pair` / `already_paired` / `server_storage` | 配对各类失败。**客户端必须逐条给文案**：`already_paired` 的意思是"对方手机还绑着一台旧设备"（换机/重装 App 会换 deviceId），出路只有让对方先点「解除配对」，和"码打错了"完全相反（`PairFailMessagesTest` 与服务器源码对账，漏一条即红）。 |
 | `paired` | `token`(32hex), `peerOnline` | 配对成功，双方各发一条；token 由客户端持久化用于后续 hello。找回确认/互摇直绑成功也走这条（bindPair 单一路径）。 |
 | `pair.recall_sent` | — | 找回请求已转发给对方，等待确认（60s 有效） |
 | `pair.recall_ask` | `from`(发起方 deviceId) | 老搭档发起找回请求，被召回端弹窗确认 |

@@ -58,6 +58,7 @@
 | 扫码 | ⬜ 同 #43 | 同左 | N-A | N-A |
 | 解绑 unpaired | N-A | PASS 清 paired/token/InboxStore（PresenceService handleSignal） | — | 同左 |
 | 进程重启/断线 | ⬜ 自启动+电池豁免在真机 ROM 下存活率（同 §4） | — | — | PASS 重连指数退避 3→30s 上限（onState 路径） |
+| 输入配对码撞上 `already_paired`（换机/重装后重新配对） | **已修（v0.2.63，10-19 本机）**：重装 App 会换 deviceId（`util/Prefs.kt:12-17` 存在 App 自己的 SharedPreferences，卸载即抹），服务器仍认为对方"已配对"⇒`pair.enter` 直接 `already_paired`（`server/src/pairing.js:70`）。此前客户端把七个 reason 全 toast 成「请检查配对码是否正确」⇒用户按那句话再输三遍仍是死路；现在 `util/PairFailMessages.kt` 逐条给"原因+下一步"（这一条给出路=让**对方**点「解除配对」）。锁定 `PairFailMessagesTest` 5 条，其中 reason 全集是从 `server/src/pairing.js` + `index.js` 的 `pair.failed` 字面量**扫出来对账**的（服务器加 reason 而客户端没跟上即红）。⬜ 四格全空：`too_many_attempts`/`server_storage`/`unavailable` 真机零采样；且"她那侧点解除配对→重新输码"这条完整出路**没在真机上走过一遍**（10-19 是借这次误删才看见的死路） | N-A 新设备号在服务器上必然没有 history，找回通道结构上帮不上（`hasHistory=false`） | N-A enter 阶段就走不通，召回是另一条消息 | N-A 本机已配对时不会去输码 |
 | 配对成功即换 token 重连 | N-A | N-A | N-A | ⬜ **实测有抖动**：双模拟器 18:34:10.244 `paired` → .262/.492 服务器对两端各广播一次 `peer.gone`（旧 socket 关闭，2ms 后新 socket registered）→ 对端状态胶囊会闪一下"对方离线"。服务器加宽限期（peer.gone 延后 2~3s 且期间同 deviceId 重连则不发）属高风险区，需用户批准；先在真机确认肉眼可见与否 |
 
 ## 4. 权限引导（通知/麦克风/悬浮窗/无障碍）
