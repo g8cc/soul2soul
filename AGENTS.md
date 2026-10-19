@@ -118,7 +118,11 @@ v0.2.44 悬浮球丢失后立的规矩——多轮"稳定性审计"仍漏了一�
 - **"待机为什么断"要两条读数一起定：最后一条 `heartbeat` 的时刻 + 复活时那条 `aexit` 的 `a=`**，只看 socket 的 `code=1006` 会把被杀误读成断网。
   10-19 Mi10 实测：锁屏静置 2.5h 里心跳 33 条准点 `+300`（`w_1 s_1 b_5`，即锁在、socket 在、档没动），21:07 之后整夜零读数，
   复活时 `aexit r_10_i_125_a_596` 与 ROM 侧 `dumpsys activity exit-info` 的 `21:07:09 reason=10 (USER REQUESTED)` 到分钟对齐
-  ⇒ 死因是 MIUI 省电杀进程，而不是 pong 超时也不是换网。心跳一直准、却突然断崖，本身就是"被杀"的形状。
+  ⇒ 结论停在**"框架被要求停止进程"这一层**（不是 pong 超时、不是换网）。心跳一直准、却突然断崖，本身就是"被杀"的形状。
+- **`aexit` 的 `r=10` 判不到是谁下的手**：10-19 在模拟器上做补报实验时执行 `adb shell am force-stop`，复活报的就是同一条
+  `r_10`。所以 adb force-stop、她从最近任务划掉、ROM 省电代劳，三种来源在 AEI 里都是 `reason=10 (USER REQUESTED)`。
+  上面 Mi10 那次能归因到省电，靠的是**另一侧的 `am_kill … due to AutoPowerKill` dump**；米15 接不了 adb，
+  **单凭 `r=10` 不许写"被 ROM 杀了"**，那一格保持 `⬜`。
 - **模拟器出数只算"通路证据"，不算"真机验证"**：`docs/AUDIT-MATRIX.md` §8 里 `PASS(模)` 是故意留的记号——
   它证明"这个埋点会出数、格式对"，不证明"HyperOS 上也会出数"。强制手段（`cmd deviceidle enter`、
   `am set-standby-bucket`、`svc wifi/data disable`）造出来的是**可达性测试**，ROM 的自然行为仍属未采样，

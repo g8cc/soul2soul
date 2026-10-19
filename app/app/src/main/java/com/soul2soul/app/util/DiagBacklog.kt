@@ -135,8 +135,10 @@ object DiagBacklog {
 
     /**
      * 分级淘汰后整表重写（淘汰规则在 `BacklogTiers`，纯函数、有 JVM 单测锁）。
-     * 条目上限（[BacklogTiers.MAX_ENTRIES]）比体积闸先到：一行 ~200 字节，200 行才 40KB < 96KB，
-     * 所以 TRIM_BYTES 只是"什么时候值得整表重写"的触发器，真正的容量控制是分级配额。
+     * 注意两条路径的先到条件**不一样**：入队路径只有 [TRIM_BYTES]（96KB）这一道闸，
+     * 一行 ~170 字节时 200 条才 34KB，所以断连期间队列可以长到 `[BacklogTiers.MAX_ENTRIES]`
+     * 之上而一条都不掉（掉是坏事，长在 96KB 内不是）；条目配额真正生效是在这里——
+     * 补报取走一批后余量仍超 200 条时，由 `trim` 收回到配额并插一条 `backlog_drop`。
      */
     private fun writeAll(ctx: Context, lines: List<String>) {
         runCatching {
