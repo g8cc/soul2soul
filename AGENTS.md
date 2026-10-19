@@ -127,6 +127,10 @@ v0.2.44 悬浮球丢失后立的规矩——多轮"稳定性审计"仍漏了一�
   同一事件可能在断网后既有一条实时、又有一条 `at_` 副本。数发生次数用 `总数 - 副本数`，
   或直接数不同的 `k=`（10-18 真机那轮 heartbeat 合并计数 4 条、其实只跳了 3 次）。
 - **`diag.*` 的 `screenOn` 列是"发送那一刻"的采样，不是事件时刻的状态**（`SelfCheck.kt:138-140` 读 `isInteractive`，事件名来自广播 action，两者可以差零点几秒）。10-19 09:01 实测过一条 `screen_off` 带 `screenOn=true`、0.73s 后紧跟同 `k` 的 `screen_on`＝MIUI 秒级闪灭。**判"当时屏灭没灭"要看事件序列本身**，不许拿这一列自证。
+- **两个 v0.2.59 传感器在 Android 7/8 上结构性缺席**（minSdk=23，Mi5=API24）：`bucket_*` 要 API 28、`aexit` 要 API 30，
+  源码各自起手早退。所以那台机器上"零 `bucket_`/零 `aexit`"是设计，不是通路坏了；更要紧的是心跳里的 `b=` 会恒为 `x`
+  （`lastBucket` 保持 -1）——`x` 是无读数，不许读成"0 档"或"档没变"。这条判据由 `StandbyTelemetryTest` S10 锁在**调用点所在函数体**上
+  （把闸门挪进别的函数实测变红）。
 - **待机/换网时 `signaling_down` 一直早于 `net_down`**（10-18/10-19 三次真机采样：早 52ms、54ms、4.86s，跨三个数量级）⇒ socket 层是更早的传感器，`net_*` 只是晚到的旁证，"断网杀了信令"这句在日志里从没被直接证实过。另外 0.2.58 起 `signaling_down` 自己也能经补报到达（`detail=at_`；10-18 18:35 Mi10 第一次，10-19 又两轮含灭屏那次），0.2.56 那格"到不了服务器"的死角已闭合。
 - **补报队列的分级是"默认保护"，不是 P0 白名单**：`BacklogTiers.tierOf` 只把 `heartbeat`(P1) 与
   `qos_tick`(P2) 降级，**其余一切事件名（含 `signaling_down`/`screen_off`/`probe_start`/`video_stall`/`stop_tap`）都是 P0**，

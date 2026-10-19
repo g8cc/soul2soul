@@ -317,4 +317,55 @@ class StandbyTelemetryTest {
         assertTrue("两次时机必须共用同一个去重标记（同一会话至多一条）",
             helper.any { it.contains("if (gatherReported) return") })
     }
+
+    /**
+     * 调用点所在函数体。闸门必须挂在**同一个函数**里才算：
+     * "这个文件别处有 SDK_INT"是假绿——Android 7 上崩的是那一次调用，不是那一行声明。
+     */
+    private fun functionBody(lines: List<String>, callIdx: Int): List<String> {
+        val funHead = Regex("""^\s*(\w+\s+)*fun\s[\w`<(]""")
+        val header = (0..callIdx).reversed().firstOrNull { funHead.containsMatchIn(lines[it]) }
+            ?: error("行 ${callIdx + 1} 不在任何函数内，扫描口径需重看")
+        val pad = " ".repeat(lines[header].takeWhile { it == ' ' }.length)
+        val nextFun = Regex("""^$pad(\w+\s+)*fun\s""")
+        val end = ((header + 1)..lines.lastIndex).firstOrNull { i ->
+            lines[i] == "${pad}}" || nextFun.containsMatchIn(lines[i])
+        } ?: lines.lastIndex
+        return lines.subList(header, end)
+    }
+
+    // S10：高于 minSdk 的系统 API 必须各自带版本闸门（审计第 5 维度「降级老机型」）。
+    // 现网最低端是 Mi5＝Android 7（API 24），而 v0.2.59 这批探针里 `appStandbyBucket` 要 28、
+    // `getHistoricalProcessExitReasons` 要 30：闸门漏了不是"少一条读数"，是**低端机直接崩在信令回调上**，
+    // 而崩溃会让那台手机此后一条遥测都发不出来（比没埋点更糟）。
+    // 表里每条都必须**有命中**——把调用改名/删掉而忘了更新这张表，用例直接红，不许悄悄变成空判。
+    @Test
+    fun `higher-api probe surfaces sit behind their own version guard`() {
+        val minSdk = source("app/build.gradle.kts")
+            .first { it.contains("minSdk =") }.substringAfter("=").trim().toInt()
+        val required = listOf(
+            "appStandbyBucket" to 28,
+            "getHistoricalProcessExitReasons" to 30,
+        )
+        for ((symbol, api) in required) {
+            assertTrue("$symbol 的 API 门槛($api)不大于 minSdk($minSdk)，这条闸门是空判", api > minSdk)
+            val lines = probe()
+            val hits = lines.indices.filter { idx ->
+                val t = lines[idx].trim()
+                !t.startsWith("//") && !t.startsWith("*") && lines[idx].contains(symbol)
+            }
+            assertTrue("源码里找不到 $symbol 的调用：要么改名了要么删了，请把这张表一起更新",
+                hits.isNotEmpty())
+            for (idx in hits) {
+                val body = functionBody(lines, idx)
+                assertTrue(
+                    "$symbol(行 ${idx + 1})所在函数缺 SDK_INT 闸门——minSdk=$minSdk 的机器上这行会抛",
+                    body.any {
+                        Regex("""Build\.VERSION\.SDK_INT\s*[<>]=?\s*$api\b""").containsMatchIn(it) ||
+                            Regex("""Build\.VERSION\.SDK_INT\s*[<>]=?\s*VERSION_CODES\.[A-Z]+""").containsMatchIn(it)
+                    },
+                )
+            }
+        }
+    }
 }
