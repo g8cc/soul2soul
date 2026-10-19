@@ -230,7 +230,10 @@ class AuditRound2WiringTest {
     @Test
     fun `offline reason errors do not enter message funnel`() {
         // L5：too_fast/not_authed 属主叫侧问题，只 toast，绝不进留言漏斗
-        val block = linesAfter(mainSource(), { it.contains("\"peer.offline\" ->") }, 24)
+        // 范围＝整个 peer.offline 分支（本文件上面那条注释说的是同一件事，10-19 实测这条曾是空锁：
+        // 往分支尾部加 4 行注释再接 startActivity(MessageActivity)，24 行窗口切在第 24 行，
+        // `tests=19 failures=0`）
+        val block = between(mainSource(), "\"peer.offline\" -> {", "\"msg.inbox\" ->")
         val elseArm = block.dropWhile { !it.contains("} else {") }
         assertTrue("非空 reason 分支必须落回 NONE + 轻量 toast",
             elseArm.any { it.contains("OutgoingPhase.NONE") } &&

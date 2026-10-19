@@ -91,12 +91,15 @@ class StandbyTelemetryTest {
     }
 
     // S3：会话结束那条必须真的带上选路与投影，否则服务器两列继续恒 `_`
+    // 判据范围＝`diag.session` 那个 JSONObject 本身，而不是"reportSession 往后 40 行"——
+    // 10-19 实测过窗口版是**空锁**：把这两行从 diag.session 摘掉、原封不动塞进窗口内下一个方法
+    // （reportEvent 的 body），用例照样绿（`tests=13 failures=0`，XML mtime 逐轮核过是真跑不是残留）。
     @Test
     fun `diag session carries path and proj instead of printing underscores`() {
-        val put = window(selfCheck(), "fun reportSession(", 40)
-        assertTrue("SelfCheck 必须把 path 写进 diag.session", put.any { it.contains("put(\"path\"") })
-        assertTrue("SelfCheck 必须把 proj 写进 diag.session", put.any { it.contains("put(\"proj\"") })
-        val end = window(webrtc(), "private fun reportSessionEnd(", 30)
+        val payload = between(selfCheck(), "\"diag.session\", JSONObject()", "fun reportEvent(")
+        assertTrue("SelfCheck 必须把 path 写进 diag.session 报文", payload.any { it.contains("put(\"path\"") })
+        assertTrue("SelfCheck 必须把 proj 写进 diag.session 报文", payload.any { it.contains("put(\"proj\"") })
+        val end = functionBody(webrtc(), "private fun reportSessionEnd(")
         assertTrue(
             "会话结束必须传真实选路（取不到就留默认 -，不许编）",
             end.any { it.contains("path = if (lastSelectedPath ==") },
@@ -106,9 +109,12 @@ class StandbyTelemetryTest {
             end.any { it.contains("DiagDetail.pathCode(lastSelectedPath)") },
         )
         assertTrue("会话结束必须传投影状态", end.any { it.contains("proj = projectionState") })
+        // 禁令范围＝整个 onStop()。6 行窗口版是实测过的空锁：`onStop()` 实际 11 行，
+        // 在第 8 行（`if (!closed)` 里）插一条 reportEvent，`tests=13 failures=0`。
         assertTrue(
             "隐私停止时只能改状态、不能再发一条事件（同一件事两个真值来源）",
-            window(webrtc(), "override fun onStop() {", 6).none { it.contains("reportEvent(") },
+            code(functionBody(webrtc(), "override fun onStop() {"))
+                .none { it.contains("reportEvent(") },
         )
     }
 
@@ -332,6 +338,13 @@ class StandbyTelemetryTest {
             lines[i] == "${pad}}" || nextFun.containsMatchIn(lines[i])
         } ?: lines.lastIndex
         return lines.subList(header, end)
+    }
+
+    /** 按锚点取整个函数体（含签名行、不含收尾 `}`）；锚点必须唯一，否则"判据落在哪一段"说不清 */
+    private fun functionBody(lines: List<String>, anchor: String): List<String> {
+        val hits = lines.indices.filter { lines[it].contains(anchor) }
+        assertEquals("锚点应恰好出现一次，实际 ${hits.size} 次：$anchor", 1, hits.size)
+        return functionBody(lines, hits[0])
     }
 
     // S10：高于 minSdk 的系统 API 必须各自带版本闸门（审计第 5 维度「降级老机型」）。

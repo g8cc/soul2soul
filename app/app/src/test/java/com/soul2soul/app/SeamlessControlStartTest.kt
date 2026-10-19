@@ -31,7 +31,7 @@ class SeamlessControlStartTest {
         assertTrue("找不到 accepted 分支", start >= 0)
         val end = lines.withIndex().drop(start + 1)
             .firstOrNull { it.value.contains("\"call.canceled\"") }?.index
-            ?: (start + 30)
+            ?: error("找不到终点锚点 \"call.canceled\"：分支要是改名了，这里的判据就落在别处，不许沉默地退化成 30 行窗口")
         return lines.subList(start, end)
     }
 

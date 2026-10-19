@@ -41,6 +41,40 @@ class SessionEndDiagTest {
         t.startsWith("//") || t.startsWith("/*") || t.startsWith("*")
     }
 
+    /**
+     * 整个函数体（含签名行，不含收尾 `}`）。**否定式**判据（"这条函数里不许出现 X"）必须用它，
+     * 不能用固定行数窗口——窗口比函数短，就等于把禁令只贴在函数的前半段上。
+     * 10-19 实测过这种假绿：D7 原窗口 18 行而 `reportSessionEnd()` 实际 27 行，
+     * 在尾部（第 28 行）重新使用 `connectedSinceMs`，`SessionEndDiagTest` 仍 `failures=0`。
+     */
+    private fun functionBody(lines: List<String>, anchor: String): List<String> {
+        val hits = lines.indices.filter { lines[it].contains(anchor) }
+        assertEquals("锚点应恰好出现一次，实际 ${hits.size} 次：$anchor", 1, hits.size)
+        val header = hits[0]
+        val pad = " ".repeat(lines[header].takeWhile { it == ' ' }.length)
+        val nextFun = Regex("""^$pad(\w+\s+)*fun\s""")
+        val end = ((header + 1)..lines.lastIndex).firstOrNull { i ->
+            lines[i] == "${pad}}" || nextFun.containsMatchIn(lines[i])
+        } ?: lines.lastIndex
+        return lines.subList(header, end)
+    }
+
+    /**
+     * 某条 `when` 分支的**整个块**（含收尾 `}`），按缩进找闭合，不许用魔法行数。
+     * 10-19 实测过短窗口的假绿：D3 原窗口 12 行正好只盖到分支本体最后一行，
+     * 往尾部加两行注释再接一句 `postDelayed { stopSession(true) }`，
+     * `SessionEndDiagTest` 仍 `tests=14 failures=0`——被禁的"锁屏 15 秒自动结束"就这么无声回来了。
+     */
+    private fun branchBlock(lines: List<String>, anchor: String): List<String> {
+        val hits = lines.indices.filter { lines[it].contains(anchor) }
+        assertEquals("分支锚点应恰好出现一次，实际 ${hits.size} 次：$anchor", 1, hits.size)
+        val header = hits[0]
+        val pad = " ".repeat(lines[header].takeWhile { it == ' ' }.length)
+        val end = ((header + 1)..lines.lastIndex).firstOrNull { lines[it] == "${pad}}" }
+            ?: error("分支 $anchor 找不到同缩进的收尾 }，扫描口径需重看")
+        return lines.subList(header, end + 1)
+    }
+
     // D1：close() 必须把终态报出去——所有本地/远端结束路径都汇流到这里
     @Test
     fun `close reports session end to server`() {
@@ -48,7 +82,7 @@ class SessionEndDiagTest {
         assertTrue("close() 必须调用 reportSessionEnd()，否则断连原因永远只留在 logcat",
             body.any { it.contains("reportSessionEnd()") })
         assertTrue("reportSessionEnd 必须走 SelfCheck.reportSession",
-            window(webrtc(), "private fun reportSessionEnd()", 20)
+            functionBody(webrtc(), "private fun reportSessionEnd()")
                 .any { it.contains("SelfCheck.reportSession(") })
     }
 
@@ -63,7 +97,7 @@ class SessionEndDiagTest {
     // D3：锁屏只走 DataChannel（服务器看不见），且 v0.2.56 起不再结束会话——必须自报事件、不得自杀
     @Test
     fun `sharer lock screen is reported without ending the session`() {
-        val branch = window(share(), "ACTION_SCREEN_OFF -> if (live)", 12)
+        val branch = code(branchBlock(share(), "ACTION_SCREEN_OFF -> if (live)"))
         assertTrue("锁屏必须上报 screen_off 事件",
             branch.any { it.contains("\"screen_off\"") })
         assertTrue("锁屏不得结束会话（语音要继续）：SCREEN_OFF 分支里不能出现 stopSession",
@@ -108,7 +142,7 @@ class SessionEndDiagTest {
     // D7：时长上报不得复用被闪断清零的字段（0.2.55 生产日志 liveMs 失真的根因）
     @Test
     fun `session end timing ignores the outage-cleared field`() {
-        val body = code(window(webrtc(), "private fun reportSessionEnd()", 18))
+        val body = code(functionBody(webrtc(), "private fun reportSessionEnd()"))
         assertTrue("reportSessionEnd 不许再用 connectedSinceMs：ICE 闪断会把它清零，时长就归 0",
             body.none { it.contains("connectedSinceMs") })
         assertTrue("setupMs/liveMs 必须走 SessionTiming（纯函数，有单测锁）",
