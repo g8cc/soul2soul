@@ -85,6 +85,15 @@
 
     **⚠️ 但"发上去"不等于"有读数"——10-19 10:01 的 `repro-capture check` 实测：她今天 09:39 仍报 `code=58 name=0.2.58 remote=60/0.2.60 update=true`**，也就是 59 和 60 她都还没装（通道上一直有包，她没点更新）。所以 61 发完之后，这一版的全部产出仍然系于"她点一次更新"这一个动作：App 打开会自动检查更新并提示，需要她（或你转告她）真的按下那一下。在此之前，`stop_tap`/`peer_gone`/`call_canceled`/`path`/`proj`/`aexit`/`heartbeat` 在她那条线上都是结构性零采样，日志里读不到 ≠ 埋点坏了。
 
+14. **【待你点头，二选一】"连上之后"那一格（`qos_tick` / 真 `path` / `rtt`）本机为什么至今拿不到，以及拿到它的两条路**
+
+    现状：双模拟器的媒体段在本机**结构性打不通**——`server/.env` 里 TURN 是占位值 `YOUR_SERVER_PUBLIC_IP`（`server/src/index.js:23`），而两台模拟器各自的 `10.0.2.15` 不在同一张可路由网里，于是既没有 srflx 也没有 relay。10-19 t4 的 `gather_done h=6 s=0 r=0 p=0` 就是这条判据的第一手形状（6 条 host、0 条 srflx、0 条 relay）。所以 `qos_tick`/`qos_bad`/`path` 只有 `ice_failed` 与 `-`，established 之后的读数一条都没有。两条出路都要你点头，因为它们各自要动一样不该我单方面动的东西：
+
+    - **A（改本机环境，不动手机）**：把生产 TURN 的 host/port/**secret** 写进本机 `server/.env`，让本地 dev server 签出真凭证 ⇒ 模拟器走 relay 建立会话，`path=r-r` + 每 10s 一条 `qos_tick` 当场出数，t4 媒体段从此可判定。代价=那枚 HMAC 密钥会落到本机文件里（密钥落盘属于要你点头的动作），并且生产 TURN 会吃到一点开发流量。收益=这一格从 ⬜ 永久变成 `PASS(模)`，以后每次动媒体链都有真读数，不用再等她。
+    - **B（真机 established，但不许碰生产配对）**：米10↔米5 同一 WiFi 下 host candidates 本来就能直连，不需要 TURN。⬜ 但我**不**会在生产服务器上给它俩配对——我们是单配对模型，那样会把米10↔米15 这条主调查线的数据源直接换掉。真要走 B，正确做法是给这两台在本机 dev server 上单独建一对，而 `SIGNALING_URL` 是 BuildConfig 常量（`SignalingClient.kt:54-55`），所以要新增一个指向笔记本局域网 IP 的 flavor（AGENTS 已写明别用 `-P` 切 URL，那个会拿旧值）。
+
+    不点 A 也不点 B 的话，这一格就照实留着：`qos_tick` 的**格式**有 `QosAnomalyTest`/`DiagDetailTest` 锁（含 clamp 与 ≤64），**通路**有 10-18 的双模拟器 `ice_failed`/`gather_done` 作证，唯独"真会话上的真读数"只能等 61 装到她手机上那一次。
+
 ## B. 你已经拍板的（不再变）
 
 | 决策点 | 结论 |
