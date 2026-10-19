@@ -193,6 +193,15 @@ PY
     echo "静态检查: FLUSH_MAX_BATCHES 必须 ≥2（=1 就等于没有有界多批，只剩一个会骗人的名字）"
     fail=1
   }
+  # t4 harness 自身的自检：`ui tap` 的"点完确认消失、没消失就重试"是防 input tap 被吞的
+  # 唯一机制，而它坏起来没有静态形状可看：6c0facb(10-17) 写这段时列表推导引用了未绑定的名字，
+  # 运行时抛 NameError → ui.py 退出 3 → e2e 里全是 `ui tap … || true` ⇒ 从那天起真机断言
+  # 静默退化成"点一次不校验"（点击本身仍落在 clickable 节点上，所以 t4 一直绿），
+  # 10-19 手跑 ui.py 才看见那行 ERROR。只有真的跑一遍这条路径才能区分"在保护"和"已废"。
+  if ! python3 "$ROOT/scripts/ui_selftest.py" >/dev/null 2>&1; then
+    echo "静态检查: scripts/ui_selftest.py 未通过——ui.py 的 tap 重试/校验路径坏了，t4 会退化成点一次不校验（真机断言不可信）"
+    fail=1
+  fi
   # v0.2.57 生产日志复盘实锤：[relay] 把 paired.token（长期重连凭证，16 条）与
   # pair.code（六位配对码，12 条）原样落盘。隐私名单收在 logpolicy.js，
   # index.js 必须走它——把 send() 改回内联 quiet 判定就是拆线，必须红。

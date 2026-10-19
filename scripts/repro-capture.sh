@@ -232,6 +232,7 @@ summary() {
       esac
       if [ "${k:0:1}" = "?" ]; then undoc=$((undoc + 1)); printf '    ! %4s  %s（不在 PROTOCOL 清单里）\n' "$v" "${k:1}"
       elif [ "$v" = "0" ]; then n_silent=$((n_silent + 1)); echo "    ·    0  $k"
+      elif [ "$k" = "backlog_drop" ]; then printf '    ✓ %4s  %s  (唯一投递：这条本身就是溢出时造出来的，只可能走补报路径，没有实时副本可减)\n' "$v" "$k"
       elif [ "${b:-0}" -gt 0 ]; then printf '    ✓ %4s  %s  (其中 %s 条是补报副本)\n' "$v" "$k" "$b"
       else printf '    ✓ %4s  %s\n' "$v" "$k"; fi
     done <<< "$rows"

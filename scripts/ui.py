@@ -151,7 +151,7 @@ def tap_text(ser, pattern, verify=True):
         if not verify:
             return True
         if clickable:
-            if not [b for _, _, c in _match(ser, pattern) if c]:
+            if not any(c for _, _, c in _match(ser, pattern)):
                 return True
         elif not find_nodes(ser, pattern):
             return True
