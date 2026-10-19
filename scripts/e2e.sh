@@ -306,7 +306,7 @@ if [ "$ICE" != "OK" ]; then
   if [ "$STOPTAP" = 1 ]; then
     ck "共享端点结束时报文体里带 src_main_page" 1
   elif [ "$(count_log "$S1" 'diag.session')" -gt 0 ]; then
-    echo "  SKIP(环境) 共享端点结束时报文体里带 src_main_page：对端先把 A 的会话拆了（点前屏上有「结束」=$BTN）"
+    echo "  SKIP(环境) 共享端点结束时报文体里带 src_main_page：对端先把 A 的会话拆了（点前屏上有「结束」=${BTN}）"
   else
     ck "共享端点结束时报文体里带 src_main_page" 0
   fi
