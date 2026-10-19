@@ -143,8 +143,9 @@ class SessionEndDiagTest {
                 .any { it.contains("DiagBacklog.flush(") })
     }
 
-    // D10：系统撤销录屏 ≠ 她按了停止。0.2.60 生产日志里两次 14~16 秒的"连上就断"都报成
-    // reason=local_stop，根因是 onStop 只交出去不占位，收尾那条 local_stop 把真因盖掉了。
+    // D10：系统撤销录屏 ≠ 她按了停止。10-18 生产日志（app=0.2.58）里两次 14~16 秒的
+    // "连上就断"都报成 reason=local_stop，根因是 onStop 只交出去不占位，收尾那条
+    // local_stop 把真因盖掉了。
     @Test
     fun `revoked projection claims its own end reason`() {
         val cb = window(webrtc(), "MediaProjection.Callback()", 12)
@@ -156,5 +157,22 @@ class SessionEndDiagTest {
         assertTrue("收尾仍会补 local_stop（这是本锁存在的理由，不许顺手删掉它）",
             window(share(), "private fun stopSession(", 40)
                 .any { it.contains("webRtc?.noteEnd(\"local_stop\")") })
+    }
+
+    // D11：D10 是同一类缺陷的第一个实例，所以锁整类——任何"绕开 notifyEnded 直接交出去"
+    // 的新路径都必须自己占 first-wins 槽，否则它的原因永远不会出现在 diag.session.reason 里。
+    @Test
+    fun `no hand-off skips the first-wins slot`() {
+        val lines = code(webrtc())
+        val notifyStart = lines.indexOfFirst { it.contains("private fun notifyEnded(") }
+        assertTrue("找不到 notifyEnded（本锁的前提是它仍然是唯一收口）", notifyStart >= 0)
+        val offenders = lines.mapIndexedNotNull { i, l ->
+            if (!l.contains("listener.onEnded(")) return@mapIndexedNotNull null
+            if (i in notifyStart until notifyStart + 20) return@mapIndexedNotNull null
+            val ahead = lines.drop(maxOf(0, i - 3)).take(3)
+            if (ahead.any { it.contains("noteEnd(") }) null else i to l.trim()
+        }
+        assertTrue("交出去却没占位的结束路径（真因会被 local_stop/local_close 覆盖）: " + offenders,
+            offenders.isEmpty())
     }
 }
