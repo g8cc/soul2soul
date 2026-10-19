@@ -514,6 +514,35 @@ PY
   else
     echo "静态检查: SKIP aexit 号—名表校验（缺 javap 或 ${jar}；SKIP 不等于通过）"
   fi
+  # 否定式判据（`.none {}`）的作用域必须是完整函数/完整分支，不许取固定行数窗口（TESTING 坑㉚）。
+  # 10-19 一轮里实测到四条这种空锁：窗口比被禁的那段短，禁令就只贴在开头几行上，
+  # 把"锁屏 15 秒自动结束"那种被废掉的代码原样写回分支尾部，用例照旧绿。
+  # 这里按"同一文件内 val X = window(...)/linesAfter(...) 且后面出现 X.none"配对，避免跨文件同名误伤。
+  local negwin neginline negdefault tdir
+  tdir="$ROOT/app/app/src/test/java"
+  negwin=$(awk '
+    /^[[:space:]]*@Test/ { for (k in win) delete win[k] }   # 局部 val 只在同一个用例方法内有意义（否则同名变量跨方法误伤=恒红）
+    /^[[:space:]]*(val|var)[[:space:]]+[A-Za-z0-9_]+[[:space:]]*=[[:space:]]*(code\([[:space:]]*)?(window|linesAfter)\(/ {
+      s=$0; sub(/^[[:space:]]*(val|var)[[:space:]]+/, "", s); sub(/[[:space:]]*=.*$/, "", s)
+      win[FILENAME, s]=1
+    }
+    { for (k in win) { if (split(k, a, SUBSEP) && a[1]==FILENAME && index($0, a[2] ".none") > 0)
+        print FILENAME ":" FNR ": " $0 } }
+  ' $(find "$tdir" -name '*.kt') 2>/dev/null)
+  neginline=$(grep -rnE '(window|linesAfter)\([^)]*\)[[:space:]]*\.none[[:space:]]*\{' "$tdir" 2>/dev/null || true)
+  # 扫描器找不到锚点时不许退回"一个恰好够用的数字"：那是 fail-open，锚点腐烂没人知道
+  negdefault=$(grep -rEn '\?:[[:space:]]*\(?[0-9]+|\?:[[:space:]]*\([a-zA-Z_]+[[:space:]]*\+[[:space:]]*[0-9]+' "$tdir" 2>/dev/null || true)
+  if [ -n "$negwin" ] || [ -n "$neginline" ]; then
+    echo "静态检查: 否定式判据（.none{}）的作用域用了固定行数窗口，禁令只贴在函数前半段=假绿（TESTING 坑㉚）:" >&2
+    [ -n "$negwin" ] && echo "$negwin" >&2
+    [ -n "$neginline" ] && echo "$neginline" >&2
+    fail=1
+  fi
+  if [ -n "$negdefault" ]; then
+    echo "静态检查: 源码扫描器的锚点兜底写成了数字或「起点+魔法行数」（fail-open，锚点一改名判据就静默变短），要 ?: error(...) 而不是 ?: (start + 30):" >&2
+    echo "$negdefault" >&2
+    fail=1
+  fi
   [ "$fail" -eq 0 ]
 }
 

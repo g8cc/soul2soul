@@ -31,6 +31,8 @@ export JAVA_HOME=/Users/wardonguo/tools/jdk17/jdk-17.0.2.jdk/Contents/Home
   要改就先停掉这一轮再重启（10-19 复跑 t4 时踩过一次，那轮直接作废重跑）。
 - 测试**绝不**写 `server/data/pairings.json`（T3 自动用 `S2S_DATA_FILE=$(mktemp)`）。
 - 浮点边界断言前用 `node -e "Math.fround(...)"` 复核单精度。
+- **否定式判据（`.none {}` / `! grep -q`）的扫描范围必须是完整函数或完整文件，不许用魔法行数窗口**（10-19 一轮扫出四条同族空锁，详见 `docs/TESTING.md` 坑㉚）：窗口比被禁的那段短，禁令就只贴在开头几行，实测能放着"锁屏 15 秒自动结束"那种已废代码写回去而用例照绿。取段用 `functionBody`（按声明缩进找收尾 `}`）/ `between`（下一个兄弟 case 标签）/ 整文件。
+  同一族还有两个方向要防：配对判据要**按用例方法**作用域（按文件同名 `val` 会误伤成恒红），扫描器找不到锚点时兜底必须是 `?: error(...)` 而不是 `?: (start + 30)`（数字兜底＝静默变短）。这两条已由 t0 守卫盯着。
 
 ## 审计（必读，docs/AUDIT.md）
 
