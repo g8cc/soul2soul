@@ -88,6 +88,16 @@ v0.2.44 悬浮球丢失后立的规矩——多轮"稳定性审计"仍漏了一�
 ## 真机联调速记
 
 - 测试机：用户的 Mi5（Android 7，`adb devices` 序列 be2552f6）；对方手机是 Mi15（不在本机，走 App 内更新通道拿新版）。
+  ⚠️ **Mi5 驱动不了 UI**：MIUI 8 拒绝 shell 注入，`input tap/swipe/text` 每次都
+  `InputDispatcher: Permission denied: injecting event from pid … uid 2000 to window … owned by uid 10012`（只在 logcat 里，**adb 的 rc 仍是 0——别把"没报错"当成"点到了"**，10-20 我在它上面白按十几下才去翻 logcat）。
+  那台机器只能**人工点**，或先在开发者选项开「USB 调试（安全设置）」（要小米账号+SIM 才允许开）。
+  受影响的格子一律只能留 `⬜`：Android 7 那条通知是否仍是 3 个动作、隐形命中区在真机上点不点得到、真机编码帧率。
+  反过来说 `settings put system user_rotation`、`dumpsys`、`exec-out screencap`、`am start` 这些**都不受这条限制**——转屏往返那一格就是靠 `user_rotation` 量出来的。
+- **双模拟器这台测量平台有一个明确的时间分辨率上限，别拿它量 150ms 级的东西**：两台模拟器之间的视频段实测 ≈0.5fps（`qos_tick` 里码率爬到 4.1Mbps、cap=738x1600 也还是这个数），
+  而单帧 `exec-out screencap -p` 是 0.6s（机器一忙、并发两条流就劣化到 1.1~4.4s，10-20 两次都量到过）。
+  于是"笔迹在视频里第几帧出现""两条墨有没有同时可见 ≤150ms""混跑时她等成什么样子"这几条**结构上不可分辨**——
+  量不到就是量不到，写 `⬜` 并附原因，不许写成"看起来没问题"，也不许用 `screenrecord` 绕（那台机器上它只有 ~1.2fps）。
+  能在这台上落的判据只有：像素级"有没有墨"（走廊内粉度增量）、窗口 `mAttrs`、`dumpsys` 动作数、以及 `echo_ack` 这类设备自己报的时刻。
 - **日志里的 deviceId ≠ adb 序列号，也 ≠ 物理机**，认领机器前先对这张表（10-18 差点把 Mi10 的真机读数认成米15；10-19 又发现同一台 Mi10 上挂着两个身份）：
   线上生产 `soul.lumi666.cloud` 是**两台机器、三个身份**——
   `106db351-fec1-…`（0.2.59）与 `1a1d64ea-18c4-…`（0.2.63）**同在**本机 Mi10（adb `7c6a9986`，HyperOS/Android 12），
