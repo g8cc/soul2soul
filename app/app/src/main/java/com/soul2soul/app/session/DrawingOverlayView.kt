@@ -272,7 +272,7 @@ class DrawingOverlayView @JvmOverloads constructor(
                 canvas.drawCircle(only.first, only.second, paint.strokeWidth / 2f, paint)
             }
         }
-        // 只有 alpha 真在变的笔迹才值得逐帧；等待交棒的那 1.5 秒 alpha 恒定，
+        // 只有 alpha 真在变的笔迹才值得逐帧；等待交棒的兜底期 alpha 恒定，
         // 逐帧空转 + 悬浮层重排就是"笔迹一直飘"的老坑，改成到点醒一次。
         if (snaps.any { it.fading }) postInvalidateOnAnimation() else scheduleNextWake(now)
 

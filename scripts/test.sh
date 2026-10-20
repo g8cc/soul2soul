@@ -608,7 +608,7 @@ PY
     echo "静态检查: BALL_DIM_ALPHA 不是 0f（悬浮球一进采集画面=她看到两个铅笔）"; fail=1
   fi
   # (c) echo_ack 两头成对：发送点（ScreenShareService 的 k="a"）与接收分支（SignalRouter 的 "a" ->）。
-  #     只埋不接＝观看端永远不交棒，本地副本只能靠 1500ms 兜底淡出（重影窗口回到旧尺寸）；
+  #     只埋不接＝观看端永远不交棒，本地副本只能靠兜底（HANDOVER_FALLBACK_MS）淡出（重影窗口回到旧尺寸）；
   #     只接不埋＝遥测整段静默，而 summary 会把它读成"这版没埋"。
   local acksend ackroute
   acksend=$(grep -Fc 'put("k", "a")' "$ROOT/app/app/src/main/java/com/soul2soul/app/session/ScreenShareService.kt" || true)

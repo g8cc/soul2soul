@@ -113,7 +113,9 @@ class OverlayGestureEngineTest {
     fun handover_constantsAreTheContract() {
         // 淡出必须显著短于兜底：否则"白等 ack"变成"永远看不见交棒"
         assertEquals(150L, OverlayGestureEngine.HANDOVER_FADE_MS)
-        assertEquals(1500L, OverlayGestureEngine.HANDOVER_FALLBACK_MS)
+        // 600 = 0.2.64 的 GHOST_FADE_MS：升级期"新观看端 + 旧共享端"（旧版不回 ack）时，
+        // 两份墨重叠窗口由这个常量封顶，取它 ⇒ 混跑不比旧版差。改大就是拿她俩的观感赌实测。
+        assertEquals(600L, OverlayGestureEngine.HANDOVER_FALLBACK_MS)
         assertTrue(OverlayGestureEngine.HANDOVER_FADE_MS < OverlayGestureEngine.HANDOVER_FALLBACK_MS)
     }
 
@@ -127,25 +129,25 @@ class OverlayGestureEngineTest {
         assertEquals(1, at2400.size)
         assertEquals(255, at2400[0].alpha)
         assertTrue("等待交棒期间 alpha 不变，不许逐帧重画", !at2400[0].fading)
-        assertEquals(1, e.visibleStrokes(3499).size) // 兜底前一瞬仍在
+        assertEquals(1, e.visibleStrokes(2599).size) // 兜底前一瞬仍在
 
-        assertTrue(e.onRemoteCommit(id, 3500))
-        val acked = e.visibleStrokes(3500)
+        assertTrue(e.onRemoteCommit(id, 2500))
+        val acked = e.visibleStrokes(2500)
         assertEquals(255, acked[0].alpha)
         assertTrue(acked[0].fading) // 从这一刻起才需要续帧
-        assertEquals(127, e.visibleStrokes(3575)[0].alpha)
-        assertTrue(e.visibleStrokes(3650).isEmpty()) // 恰 150ms：淡完即回收
+        assertEquals(127, e.visibleStrokes(2575)[0].alpha)
+        assertTrue(e.visibleStrokes(2650).isEmpty()) // 恰 150ms：淡完即回收
     }
 
     @Test
     fun handover_lostAckFallsBackNeverSticksForever() {
         val e = engine()
         strokeUpAt2000(e)
-        assertTrue(e.visibleStrokes(3499).isNotEmpty())
-        val due = e.visibleStrokes(3500)
+        assertTrue(e.visibleStrokes(2599).isNotEmpty())
+        val due = e.visibleStrokes(2600)
         assertEquals(1, due.size)
         assertTrue("兜底时刻一到就进入淡出", due[0].fading)
-        assertTrue(e.visibleStrokes(3650).isEmpty())
+        assertTrue(e.visibleStrokes(2750).isEmpty())
     }
 
     @Test
@@ -168,7 +170,7 @@ class OverlayGestureEngineTest {
         now = 2000
         assertNull("书写期间靠笔点驱动，不需要定时唤醒", e.nextWakeAt(2000))
         e.onUp(0)
-        assertEquals("等 ack 期间只排一次：兜底时刻", 3500L, e.nextWakeAt(2000))
+        assertEquals("等 ack 期间只排一次：兜底时刻", 2600L, e.nextWakeAt(2000))
         val id = e.visibleStrokes(2000)[0].id
         e.onRemoteCommit(id, 2100)
         assertEquals("进入淡出后唤醒点=淡完", 2250L, e.nextWakeAt(2100))
