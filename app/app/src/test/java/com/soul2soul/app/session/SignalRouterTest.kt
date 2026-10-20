@@ -195,4 +195,18 @@ class SignalRouterTest {
             SignalRouter.routeData("", controlMode = true, live = true),
         )
     }
+
+    @Test
+    fun `k=a 交棒 ack 只按 id 认`() {
+        assertEquals(
+            SignalRouter.DataAction.EchoAck("s1"),
+            SignalRouter.routeData("a", controlMode = false, live = true, id = "s1"),
+        )
+        // 空 id 的 ack 什么都不认：认了就等于把"猜最新一笔"写进协议——
+        // 交棒是按 id 命中的，猜错会把还没落墨的那条本地副本提前淡掉
+        assertEquals(
+            SignalRouter.DataAction.None,
+            SignalRouter.routeData("a", controlMode = true, live = true, id = ""),
+        )
+    }
 }

@@ -33,13 +33,18 @@ object BacklogTiers {
      * 被丢掉的是死亡现场（`ice_failed`/`net_down`/`aexit`），而 stall 的时间线本来就能从
      * `qos_tick` 第 7 格（原始帧率）复原，重复那几条不携带新信息。档内仍按"保最新"淘汰，
      * 于是断连前最后一次 stall 一定活着——那才是需要它的那一条。
+     *
+     * `echo_ack`（0.2.65 交棒遥测）降级的理由与 stall 同一条口径：**它是重复采样**。
+     * 每条只报"最近一次 e / 本轮最大 x / miss m / 还在等 p"四个标量，客户端本身已经 5s 节流；
+     * p50/p90 由整条序列给出，断连时丢掉其中几条不丢结论（这一列的用途是给观看端 150ms 的
+     * 交棒淡出做下界校验，不是现场证据）。留在 P0 反而会把死亡现场挤出配额。
      */
     fun tierOf(line: String): Int {
         val event = runCatching {
             JSONObject(line).optJSONObject("b")?.optString("event")
         }.getOrNull() ?: return TIER_QOS
         return when (event) {
-            "heartbeat", "video_stall" -> TIER_GAP
+            "heartbeat", "video_stall", "echo_ack" -> TIER_GAP
             "qos_tick" -> TIER_QOS
             else -> TIER_DEATH
         }

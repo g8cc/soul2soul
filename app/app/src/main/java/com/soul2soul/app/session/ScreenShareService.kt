@@ -91,6 +91,25 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
         runCatching { webRtc?.sendControl(json) }
     }
 
+    /**
+     * 交棒 ack 的装载（与 unbindStrokeAck 成对）。共享端 0.2.65 起把观看端的笔迹缓冲到收笔才落墨，
+     * 落墨这一刻必须告诉观看端——观看端的本地副本正等着这个信号才敢淡掉，
+     * 没有它就只能靠兜底超时（本地白留 1.5s）。
+     *
+     * 走 anno 而不是 ctl 是刻意的：这一跳要测的就是"笔迹经过的那条队列"的排队+往返
+     * （`EchoLatency` → `diag.event echo_ack`）。改走可靠通道会量到另一条队列，
+     * 得出"回显很快"的假读数。旧版观看端收到 k="a" 走 `SignalRouter` 的 else 分支，无害。
+     */
+    private fun bindStrokeAck() {
+        AnnotationOverlayService.onStrokeCommitted = { id ->
+            runCatching { webRtc?.sendAnnotation(JSONObject().put("k", "a").put("id", id)) }
+        }
+    }
+
+    private fun unbindStrokeAck() {
+        AnnotationOverlayService.onStrokeCommitted = null
+    }
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -257,6 +276,7 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
             pendingSignals.forEach { dispatchSignal(client, it) }
             pendingSignals.clear()
             startService(Intent(this, AnnotationOverlayService::class.java))
+            bindStrokeAck()
         } catch (e: Exception) {
             Log.e("ScreenShareService", "start WebRTC failed", e)
             com.soul2soul.app.util.SelfCheck.reportEvent(
@@ -288,6 +308,7 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
         Presence.sessionBusy = false
         com.soul2soul.app.util.WifiKeeper.release()
         pendingSignals.clear()
+        unbindStrokeAck()
         webRtc?.close()
         webRtc = null
         audioRoute?.stop()
@@ -502,6 +523,7 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
         if (sendBye) Presence.client.send("bye")
         // 没有任何上游终止原因时才落到 local_stop：用户点停止/连接失败会先 noteEnd
         if (sendBye) webRtc?.noteEnd("local_stop")
+        unbindStrokeAck() // 拆在 close 之前：ack 出口绝不能指向一个已关闭的 client
         val client = webRtc
         webRtc = null
         client?.close()

@@ -76,6 +76,11 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
     private var live = false
     /** 共享端报过 videooff 且还没报 videoon：解锁不许把横幅收起来（画面仍然停着） */
     private var remoteVideoPaused = false
+    /**
+     * 「我收笔 → 她画布落墨」这一跳的账本。两个时刻都取本机 uptimeMillis，
+     * 同一台设备可直接相减，不需要时钟同步。
+     */
+    private val echoLedger = EchoLatency { android.os.SystemClock.uptimeMillis() }
     private var elapsedBase = 0L
     private var audioRoute: AudioRouteController? = null
 
@@ -207,7 +212,13 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
         overlay.sink = object : DrawingOverlayView.StrokeSink {
             override fun onStroke(json: JSONObject) {
                 // 操控手势走可靠 ctl 通道，其余（笔迹/表情/指令）走容忍丢包的 anno 通道
-                if (json.optString("k") == "g") client?.sendControl(json)
+                val k = json.optString("k")
+                if (k == "e") {
+                    // 收笔时刻进账本（主线程，与 ack 侧同一线程 ⇒ 不需要锁）。
+                    // 补发的那一条同 id：账本 first-wins，不会把延迟读小
+                    echoLedger.onStrokeSent(json.optString("id"))
+                }
+                if (k == "g") client?.sendControl(json)
                 else client?.sendAnnotation(json)
             }
         }
@@ -726,9 +737,18 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
             // 判据（controlMode/live）与 UI 更新同在主线程：与提取前的读取时序一致
             when (val action = SignalRouter.routeData(
                 json.optString("k"), overlay.controlMode, live, json.optString("reason"),
-                remoteVideoPaused
+                remoteVideoPaused, json.optString("id")
             )) {
                 SignalRouter.DataAction.None -> Unit
+                is SignalRouter.DataAction.EchoAck -> {
+                    // 交棒：她那边这一笔已经落墨，本地副本从这一刻起才淡（150ms），
+                    // 视频里的成品与本地消失重叠在同一个短窗口内 ⇒ 任何时刻只有一条线
+                    overlay.onRemoteCommit(action.id)
+                    val sample = echoLedger.onAck(action.id)
+                    if (sample != null && echoLedger.shouldLog()) {
+                        viewerEvent("echo_ack", echoLedger.detail())
+                    }
+                }
                 SignalRouter.DataAction.PeerScreenOff -> {
                     tvState.visibility = View.VISIBLE
                     tvState.setText(R.string.peer_screen_off)
@@ -830,6 +850,8 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
             btnBall.visibility = View.VISIBLE
             overlay.visibility = View.VISIBLE // 接听并连通前不显示/不响应画笔层
             live = true
+            // 新一通从干净的账本开始：上一通没配上 ack 的笔迹绝不能带进来当 miss
+            echoLedger.reset()
             micGranted = checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) ==
                 android.content.pm.PackageManager.PERMISSION_GRANTED
             refreshMicChip()

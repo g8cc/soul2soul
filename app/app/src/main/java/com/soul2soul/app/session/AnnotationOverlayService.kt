@@ -81,6 +81,8 @@ class AnnotationOverlayService : Service() {
 
     override fun onDestroy() {
         hook = null
+        onStrokeCommitted = null
+        canvas?.onCommitted = null
         runCatching { sensorManager?.unregisterListener(shakeListener) }
         sensorManager = null
         mainHandler.removeCallbacksAndMessages(null)
@@ -96,6 +98,9 @@ class AnnotationOverlayService : Service() {
         if (!Settings.canDrawOverlays(this)) return
         val k = json.optString("k")
         val cv = canvas ?: OverlayCanvasView(this).also { canvas = it }
+        // 提交时刻→ack 的转发口每次都用当前值重挂：ScreenShareService 可能在画布已存在之后
+        // 才注入（会话重建），挂在创建分支上就会永久沉默
+        cv.onCommitted = { id -> onStrokeCommitted?.invoke(id) }
         when (k) {
             "emoji" -> cv.applyEmoji(json)
             "fx" -> cv.applyFx(json)
@@ -507,5 +512,13 @@ class AnnotationOverlayService : Service() {
         /** ScreenShareService 收到 DataChannel 消息时的入口（进程内单例转发） */
         @Volatile
         var hook: ((JSONObject) -> Unit)? = null
+
+        /**
+         * 共享端"这一笔已经落墨"的回程口（ScreenShareService 注入，发 k="a" 给观看端）。
+         * 与 hook 成对：hook 是消息进来，这条是 ack 出去，所以两者的生命周期必须一致——
+         * 会话结束还留着就是把发送口指向一个已关闭的 WebRtcClient。
+         */
+        @Volatile
+        var onStrokeCommitted: ((String) -> Unit)? = null
     }
 }

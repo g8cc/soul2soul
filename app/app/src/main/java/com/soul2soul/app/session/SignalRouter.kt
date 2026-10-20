@@ -35,6 +35,9 @@ object SignalRouter {
         object HideBanner : DataAction()     // 解锁且仍连通 → 收起状态条
         object RevokedBanner : DataAction()  // 操控中被收回授权 → 横幅说明原因
         data class ControlFailure(val messageRes: Int) : DataAction()
+
+        /** 共享端把这一笔落墨了（0.2.65 起笔迹缓冲到收笔）→ 观看端的本地副本可以交棒淡掉了 */
+        data class EchoAck(val id: String) : DataAction()
     }
 
     fun routeData(
@@ -43,9 +46,13 @@ object SignalRouter {
         live: Boolean,
         reason: String = "",
         remoteVideoPaused: Boolean = false,
+        id: String = "",
     ): DataAction = when (k) {
         "screenoff" -> DataAction.PeerScreenOff
         "videooff" -> DataAction.PeerVideoOff
+        // 空 id 的 ack 什么都不认：交棒是按 id 命中的，认了一条空 id 就等于把"最新一笔"
+        // 这种猜测写进协议
+        "a" -> if (id.isEmpty()) DataAction.None else DataAction.EchoAck(id)
         // 解锁 ≠ 画面回来了：她可能一直不点「重新开画面」。这一路必须什么都不做，
         // 否则 0.2.64 的保活会让横幅在画面仍然停着的时候先收起来，对方读成"好了"
         "screenon" -> if (live && !remoteVideoPaused) DataAction.HideBanner else DataAction.None
