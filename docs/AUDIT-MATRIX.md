@@ -17,7 +17,25 @@
 | 服务销毁（结束共享） | PASS 全窗拆除 | PASS exitDoodle+hideBall |
 | 悬浮窗权限会话中途被撤 | ⬜ 已挂窗是否被系统回收、下笔表现（L3-3，待真机） | ⬜ 同左（待真机） |
 | 前台是声明 `HIDE_OVERLAY_WINDOWS` 的 App（Android 12+ 框架行为；实测宿主=设置页） | ⬜ **球与笔迹层被框架整层强制隐藏**（10-19 双模拟器实形：`dumpsys window windows` 里 `mForceHideNonSystemOverlayWindow=true`、`isVisible=false`、`mDrawState=READY_TO_SHOW`——窗口建了、内容画了、合成时被扣住；把共享端顶回自己的 MainActivity，同一笔立刻出 4842 个变化像素 ⇒ 通路无罪，宿主藏层；**复跑确认**：10-19 15:07 那轮把"拍前顶回 MainActivity"写进脚本后，同一条断言出 **3058** 个变化像素，整层 `t4 PASS=14 FAIL=0 SKIP_ENV=0`——本仓库第一次媒体段既不 FAIL 也不 SKIP）。**待处置**：这不是本 App 能关掉的能力（那是系统给前台 App 的反 tapjacking 隐私开关），候选只有两条——①检测到"层没显示"时给观看端一句人话提示（需要能观测到窗口未合成，目前无公开 API），②共享端笔迹改走"画进采集帧"而不是悬浮窗（改动大、会污染她屏幕的原始画面）。未定案前不得声称"她画的你能看到"在所有前台应用下成立 | ⬜ 同左：自画层是同类型悬浮窗，被隐藏时共享端自己也看不到自己在画什么（比球更严重——等于盲画）。⬜ 本机只证到"设置页"这一个宿主，其余宿主（部分 ROM 桌面、银行类、系统弹窗）零采样 |
-| START_STICKY 重启（intent=null） | ⬜ 系统重建后 onStartCommand 还球，但共享会话已亡——球是否孤儿常驻（待核） | N-A |
+| START_STICKY 重启（intent=null） | ⬜ 系统重建后 onStartCommand 还球，但共享会话已亡——球是否孤儿常驻（待核）。⚠️ v0.2.65 起可正面判：`onStartCommand` 只在 `intent?.action == ACTION_TOGGLE_DOODLE` 分支里 toggle，null intent 只会 `showBall()+maybeShowEntryHint()`（OverlayBallWiringTest 锁：把 toggle 提到判定之前实测变红），"重启顺手把画笔打开"这一格已排除；孤儿球本身仍待真机 | N-A |
+| 球闲置（v0.2.65：完全隐形，不再淡化到 15%） | PASS `BALL_DIM_ALPHA = 0f`——t0 守卫 (b) + OverlayBallWiringTest。物理根因写进 PROTOCOL §3.2：这颗球是 `TYPE_APPLICATION_OVERLAY` 窗口，Android 没有"按窗口排除采集"的能力（`FLAG_SECURE` 只出黑块），**只要可见就会被采进视频** ⇒ 共享时她看到两个铅笔。alpha=0 仍参与触摸命中 ⇒ 命中区没缩小，不是新增死区 | N-A 自画模式球整体拆除 |
+| 触摸唤醒（按下那一刻必须重新看得见） | PASS `GestureDetector.onDown` → `wakeBall()`（OverlayBallWiringTest 锁，抽掉该行实测变红）；⬜ 真机手感零采样：**隐形命中区点得到吗、位置记得住吗**（拖动位已落盘 `Prefs.ballSpot`，恢复时重新 clamp） | N-A |
+| 通知栏「画笔」动作（第 4 个按钮） | ⬜ **HyperOS/MIUI 默认折叠 FGS 通知 ⇒ 这个按钮很可能根本看不见**。所以入口是三条并存（摇一摇 / 隐形命中区 / 通知动作），不许把"通知栏加了按钮"当成已解决的入口。Android 7（Mi5）结构性只放得下 3 个 ⇒ t0 守卫 (a) 按花括号配对数：守卫外 3 个 + `SDK_INT >= O` 块内 1 个，两条 mutation（多塞 / 拆守卫）实测各自变红 | N-A 球已拆，但通知动作走同一 `onStartCommand` 分派仍会开自画 |
+
+### 1.1 观看端笔迹的回显（v0.2.65 重影根治；单独建表，因状态轴与 §1 不同）
+
+状态：`书写中` / `收笔后·已交棒（ack 到达）` / `收笔后·ack 丢失` / `旧对端（≤0.2.64，不回 ack 也不发 k="a"）`
+
+| 事件＼状态 | 书写中 | 收笔后·已交棒 | 收笔后·ack 丢失 | 旧对端 |
+|---|---|---|---|---|
+| 观看端本地副本（唯一不被采集的 chrome：它是 Activity 内的 View，ViewerBallDragTest B4 锁） | PASS alpha 恒 255、跟手 0 延迟（OverlayGestureEngineTest `writingStroke_neverFades`） | PASS 交棒起点＝ack 时刻，`HANDOVER_FADE_MS=150` 淡到 0 并回收（三段生命周期用例） | PASS 兜底 `endAt + HANDOVER_FALLBACK_MS(1500)` 起淡，**绝不永久驻留**（用例：无 ack 到 1500ms） | PASS 与"ack 丢失"同一条路径——新代码不许假设对端会回 ack（PROTOCOL §3.1 已写明） |
+| 共享端画面上的墨 | PASS 笔点只压在 `SharerStrokeBuffer`，一个都不上屏（OverlayStrokeBufferTest 纯逻辑 ×10） | PASS 整笔一次性落墨 + 既有 2s 淡出 | PASS 静默 1200ms 兜底落墨（`e` 是可丢的小消息，丢了也不许丢整笔） | PASS 同左（缓冲在共享端，与对端版本无关） |
+| 「两份墨同时可见」窗口 | PASS 0（本地一份、视频里没有第二份） | ⬜ ≤150ms 的交叉淡出**无真机读数**（判据要拍在手指还按着时，晚于 2s 恒 diff=0） | ⬜ 理论上 1.5s 兜底窗口内本地与视频各一份；静止共享画面下是否肉眼可见，待真机截图对比 0.2.64↔0.2.65 | ⬜ 同左 |
+| 帧循环空转（隐形内容钉窗/笔迹飘） | PASS pending **不**计入 `needsAnotherFrame`（t1 源码锁：把 `buffer` 写进该函数实测变红）；兜底落墨靠一次 `postDelayed` | PASS `nextWakeAt` 到点重算一次（DrawingOverlayView 只在 fading 时续帧） | PASS 同左 | PASS 同左 |
+| 拆窗时机 | PASS `hasVisibleContent()` 含 pending（漏掉会在"上一笔淡出→新一笔首点"的空隙把画布从正在画的人手里抽走；t1 源码锁 + t0 无） | PASS 淡出回收用 `>=`，与 `needsAnotherFrame` 的 `<` 互斥闭合，不留隐形内容钉窗 | PASS 只落笔无点＝到龄直接丢弃，不钉窗（OverlayStrokeBufferTest） | PASS 同左 |
+| 交棒遥测 `echo_ack` | — | PASS `detail=e_<ms>,x_<ms>,m_<n>,p_<n>`（EchoLatencyTest ×10；档位 P1——重复采样，丢掉单条不丢结论）；⬜ **真机零读数**：现网两端都还没装 0.2.65 | PASS miss 计入 `m=`，`m>0` 时不许把样本当全量（AGENTS 口径） | ⬜ 旧版本既不发 ack 也不认 `k="a"`（`SignalRouter` 的 `else -> None`），这条读数缺席是**版本差**不是故障 |
+
+**同类项登记（防止下一轮又当 bug 翻出来）**：`emoji` / `fx` 也是"本地渲染 + 视频回显"两份，v0.2.65 **设计保留**、不并入本轮根治——理由是它们是满屏动画、两副各自随机位置，不会叠成"一条线的双影"，而且本地正反馈（她看到表情炸开）本来就是产品要的效果。要改的话是另一个产品决定，不是同一个 bug。
 
 ## 2. 共享会话（ScreenShareService / SessionActivity / PresenceService）
 
