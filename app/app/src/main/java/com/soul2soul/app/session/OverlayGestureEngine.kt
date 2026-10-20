@@ -22,9 +22,11 @@ class OverlayGestureEngine(
         const val GESTURE_MIN_MS = 60L
         const val GESTURE_MAX_PTS = 64
         const val GESTURE_TAIL_MS = 450L
-        // 本地笔迹收笔后的留存时长：只做落笔即时反馈的短驻留，
-        // 之后由共享端回显（真实位置、仅一份）接管，避免"一条线画成两条"。
-        const val GHOST_FADE_MS = 600L
+        // 交棒淡出时长：本地这一笔在对方画布落墨（收到 k="a"）之后用这么短的时间淡掉，
+        // 短到"两条线同时可见"的窗口肉眼读不成重影。刻意小于任何合理回显链路。
+        const val HANDOVER_FADE_MS = 150L
+        // ack 走的是容忍丢包的 anno 通道，可能永远不来：本地副本最多白留这么久，绝不永久驻留
+        const val HANDOVER_FALLBACK_MS = 1500L
         // 容忍丢包通道可能丢失收笔信号：补发一次（共享端幂等：endAt 只记一次）
         const val END_RESEND_MS = 300L
         private const val INVALID = -1
@@ -46,6 +48,8 @@ class OverlayGestureEngine(
         val colorIndex: Int,
         val points: List<Pair<Float, Float>>,
         val alpha: Int,
+        /** alpha 逐帧在变 → View 必须续帧；等待交棒（alpha 恒定）不算，那是定时唤醒的活 */
+        val fading: Boolean,
     )
 
     data class TrailSeg(val x1: Float, val y1: Float, val x2: Float, val y2: Float, val alpha: Int)
@@ -53,13 +57,16 @@ class OverlayGestureEngine(
     private class Stroke(val id: String, val colorIndex: Int) {
         val points = mutableListOf<Pair<Float, Float>>() // 视图内绝对坐标，便于本地绘制
         var endAt = 0L // 0 = 还在书写中。淡出从收笔才开始计
+
+        /** 对方画布落墨（ack）的时刻：0 = 还没交棒，本地继续全不透明顶着 */
+        var handoverAt = 0L
     }
 
     var colorIndex = 0
 
     /**
      * 持久笔迹（共享端自画模式）：收笔后不淡出、不回收，直到 clearStrokes。
-     * 观看端的短留存(GHOST_FADE_MS)是为了避免与视频回显叠成两条线；
+     * 观看端的短交棒淡出(HANDOVER_FADE_MS)是为了避免与视频回显叠成两条线；
      * 共享端自己就是"原画"，找茬类玩法需要圈选内容一直留在屏上。
      */
     var persistStrokes = false
@@ -279,24 +286,76 @@ class OverlayGestureEngine(
         return tx to ty
     }
 
+    /**
+     * 对方画布已落墨（echo_ack 到达）→ 本地这条可以交棒了。
+     * @return 是否命中一条正在等交棒的笔迹（重复 ack、迟到的 ack 一律 false，幂等）
+     */
+    fun onRemoteCommit(id: String, now: Long): Boolean {
+        val s = strokes.lastOrNull { it.id == id && it.endAt > 0L && it.handoverAt == 0L } ?: return false
+        s.handoverAt = now
+        return true
+    }
+
     // ---------- 渲染快照（onDraw 只读这些） ----------
 
-    /** 书写中永不淡出；收笔后本地笔迹只做短暂留存(GHOST_FADE_MS)，过期即回收。
+    /**
+     * 本地笔迹三段生命周期（重影根治的核心）：
+     *  1) 书写中 → 完整显示，永不淡出（他自己这条线必须 0 延迟）；
+     *  2) 收笔后、对方还没落墨 → 继续完整显示。共享端 0.2.65 起缓冲到收笔才上屏，
+     *     所以书写期间视频里根本没有副本，这一格不会造出双影；
+     *  3) 收到 ack（或白等到 [HANDOVER_FALLBACK_MS]）→ 用 [HANDOVER_FADE_MS] 淡出并回收，
+     *     持久的那一份交给视频里的回显（真实位置、全场唯一一份）。
+     * @return 0 = 还在满不透明显示
+     */
+    private fun fadeStartOf(s: Stroke, now: Long): Long = when {
+        s === current || s.endAt == 0L -> 0L
+        s.handoverAt > 0L -> s.handoverAt
+        now - s.endAt >= HANDOVER_FALLBACK_MS -> s.endAt + HANDOVER_FALLBACK_MS
+        else -> 0L
+    }
+
+    /** 书写中/等待交棒永不淡出；交棒后 [HANDOVER_FADE_MS] 内淡到 0 并回收。
      *  persistStrokes=true（共享端自画）时收笔也永久保留，alpha 恒为 255 */
     fun visibleStrokes(now: Long): List<StrokeSnapshot> {
         val out = ArrayList<StrokeSnapshot>(strokes.size)
         val iter = strokes.iterator()
         while (iter.hasNext()) {
             val s = iter.next()
-            if (!persistStrokes && s !== current && s.endAt > 0L && now - s.endAt > GHOST_FADE_MS) {
+            val fadeStart = fadeStartOf(s, now)
+            val fading = fadeStart > 0L && !persistStrokes
+            if (fading && now - fadeStart >= HANDOVER_FADE_MS) {
                 iter.remove()
                 continue
             }
-            val fade = if (persistStrokes || s === current || s.endAt == 0L) 1f
-            else (1f - (now - s.endAt).toFloat() / GHOST_FADE_MS).coerceIn(0f, 1f)
-            out.add(StrokeSnapshot(s.id, s.colorIndex, ArrayList(s.points), (255f * fade).toInt()))
+            val fade = if (persistStrokes || !fading) 1f
+            else (1f - (now - fadeStart).toFloat() / HANDOVER_FADE_MS).coerceIn(0f, 1f)
+            out.add(
+                StrokeSnapshot(
+                    s.id, s.colorIndex, ArrayList(s.points),
+                    (255f * fade).toInt(), fading,
+                )
+            )
         }
         return out
+    }
+
+    /**
+     * View 下一次需要自主重绘的时刻：正在淡出的笔迹=淡完那一刻，
+     * 等待交棒的笔迹=兜底时刻，书写中的笔迹=null（笔点消息自己会触发重绘）。
+     * 这条存在的意义就是**取消逐帧空转**：等 ack 的 1.5 秒里 alpha 恒定，
+     * 60fps 重画一条不变的线只会让全屏悬浮层抖动（"笔迹一直飘"的老坑）。
+     */
+    fun nextWakeAt(now: Long): Long? {
+        var next = Long.MAX_VALUE
+        for (s in strokes) {
+            if (persistStrokes) continue
+            val fadeStart = fadeStartOf(s, now)
+            val wake = if (fadeStart > 0L) fadeStart + HANDOVER_FADE_MS
+            else if (s !== current && s.endAt > 0L) s.endAt + HANDOVER_FALLBACK_MS
+            else continue
+            if (wake < next) next = wake
+        }
+        return if (next == Long.MAX_VALUE) null else next
     }
 
     /** 指尖光晕位置：手指还按着且有点才有 */

@@ -2,6 +2,7 @@ package com.soul2soul.app.session
 
 import com.soul2soul.app.session.OverlayGestureEngine.Action
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -97,24 +98,84 @@ class OverlayGestureEngineTest {
         assertEquals(OverlayGestureEngine.END_RESEND_MS, end.resendAt - 2500)
     }
 
-    // ---------- ghost 淡出 ----------
+    // ---------- 交棒（v0.2.65 重影根治） ----------
 
-    @Test
-    fun ghost_fadeBoundaries_599_600_601() {
-        assertEquals(600L, OverlayGestureEngine.GHOST_FADE_MS)
-        val e = engine()
+    /** 画一笔并在 2000 收笔，返回笔迹 id */
+    private fun strokeUpAt2000(e: OverlayGestureEngine): String {
         e.onDown(0, 0f, 0f)
         e.onMove(0, 100f, 100f)
         now = 2000
         e.onUp(0)
-        now = 2599 // 收笔后 599ms 仍在
-        assertEquals(1, e.visibleStrokes(now).size)
-        now = 2600 // 恰 600：仍保留（alpha 已归零）
-        val at600 = e.visibleStrokes(now)
-        assertEquals(1, at600.size)
-        assertEquals(0, at600[0].alpha)
-        now = 2601 // 超 600 即回收
-        assertTrue(e.visibleStrokes(now).isEmpty())
+        return (e.visibleStrokes(now)[0]).id
+    }
+
+    @Test
+    fun handover_constantsAreTheContract() {
+        // 淡出必须显著短于兜底：否则"白等 ack"变成"永远看不见交棒"
+        assertEquals(150L, OverlayGestureEngine.HANDOVER_FADE_MS)
+        assertEquals(1500L, OverlayGestureEngine.HANDOVER_FALLBACK_MS)
+        assertTrue(OverlayGestureEngine.HANDOVER_FADE_MS < OverlayGestureEngine.HANDOVER_FALLBACK_MS)
+    }
+
+    @Test
+    fun handover_keepsFullAlphaUntilAck() {
+        val e = engine()
+        val id = strokeUpAt2000(e)
+        // 收笔后本地这一笔继续顶着：共享端 0.2.65 起缓冲到收笔才落墨，书写期间视频里
+        // 根本没有副本，所以"顶着"不会造出双影；提前淡掉只会让观看端看见自己的画凭空消失
+        val at2400 = e.visibleStrokes(2400)
+        assertEquals(1, at2400.size)
+        assertEquals(255, at2400[0].alpha)
+        assertTrue("等待交棒期间 alpha 不变，不许逐帧重画", !at2400[0].fading)
+        assertEquals(1, e.visibleStrokes(3499).size) // 兜底前一瞬仍在
+
+        assertTrue(e.onRemoteCommit(id, 3500))
+        val acked = e.visibleStrokes(3500)
+        assertEquals(255, acked[0].alpha)
+        assertTrue(acked[0].fading) // 从这一刻起才需要续帧
+        assertEquals(127, e.visibleStrokes(3575)[0].alpha)
+        assertTrue(e.visibleStrokes(3650).isEmpty()) // 恰 150ms：淡完即回收
+    }
+
+    @Test
+    fun handover_lostAckFallsBackNeverSticksForever() {
+        val e = engine()
+        strokeUpAt2000(e)
+        assertTrue(e.visibleStrokes(3499).isNotEmpty())
+        val due = e.visibleStrokes(3500)
+        assertEquals(1, due.size)
+        assertTrue("兜底时刻一到就进入淡出", due[0].fading)
+        assertTrue(e.visibleStrokes(3650).isEmpty())
+    }
+
+    @Test
+    fun handover_duplicateOrLateOrUnknownAckIsIdempotent() {
+        val e = engine()
+        val id = strokeUpAt2000(e)
+        assertTrue(e.onRemoteCommit(id, 2100))
+        assertFalse("重复 ack（补发/重传）只算第一次", e.onRemoteCommit(id, 2200))
+        assertFalse("没见过的 id 不许动别的笔迹", e.onRemoteCommit("nope", 2300))
+        assertTrue(e.visibleStrokes(2249).isNotEmpty())
+        assertTrue("恰淡满 HANDOVER_FADE_MS 即回收", e.visibleStrokes(2250).isEmpty())
+        assertFalse("回收后迟到的 ack 只会得到 false", e.onRemoteCommit(id, 2300))
+    }
+
+    @Test
+    fun handover_awaitingIsScheduledOnceNotEveryFrame() {
+        val e = engine()
+        e.onDown(0, 0f, 0f)
+        e.onMove(0, 50f, 50f)
+        now = 2000
+        assertNull("书写期间靠笔点驱动，不需要定时唤醒", e.nextWakeAt(2000))
+        e.onUp(0)
+        assertEquals("等 ack 期间只排一次：兜底时刻", 3500L, e.nextWakeAt(2000))
+        val id = e.visibleStrokes(2000)[0].id
+        e.onRemoteCommit(id, 2100)
+        assertEquals("进入淡出后唤醒点=淡完", 2250L, e.nextWakeAt(2100))
+        assertTrue(e.visibleStrokes(2250).isEmpty())
+        assertNull(e.nextWakeAt(2250))
+        e.clearStrokes()
+        assertNull(e.nextWakeAt(3000))
     }
 
     @Test

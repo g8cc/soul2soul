@@ -29,6 +29,9 @@ class DrawingOverlayView @JvmOverloads constructor(
     /** Pointer IDs are stable across MotionEvent index reordering; always follow the first finger. */
     private var activePointerId = INVALID_POINTER_ID
 
+    /** 已排定的唤醒时刻（uptimeMillis），-1 = 没排 */
+    private var wakeAt = NOT_SCHEDULED
+
     interface StrokeSink {
         fun onStroke(json: JSONObject)
     }
@@ -81,7 +84,16 @@ class DrawingOverlayView @JvmOverloads constructor(
 
     fun clearAll() {
         engine.clearStrokes()
+        cancelWake()
         invalidate()
+    }
+
+    /**
+     * 对方画布已落墨（共享端 echo_ack 到达，SessionActivity 转发）：
+     * 本地这条从"顶着看"切换成"交棒淡出"，之后屏幕上持久的那一份只由视频回显提供。
+     */
+    fun onRemoteCommit(id: String) {
+        if (engine.onRemoteCommit(id, SystemClock.uptimeMillis())) invalidate()
     }
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
@@ -201,12 +213,50 @@ class DrawingOverlayView @JvmOverloads constructor(
         return RectF(r[0], r[1], r[2], r[3])
     }
 
+    /**
+     * 到点醒一次（等待交棒 / 兜底超时）。同一个唤醒点不重复排队——
+     * 每个笔点都会触发一次 onDraw，重排会把定时器一直往后推。
+     */
+    private fun scheduleNextWake(now: Long) {
+        val deadline = engine.nextWakeAt(now)
+        if (deadline == null) {
+            cancelWake()
+            return
+        }
+        val remaining = deadline - now
+        if (remaining <= 0L) {
+            postInvalidateOnAnimation()
+            return
+        }
+        if (wakeAt == deadline) return
+        cancelWake()
+        wakeAt = deadline
+        postDelayed(wakeRunnable, remaining)
+    }
+
+    private fun cancelWake() {
+        if (wakeAt == NOT_SCHEDULED) return
+        removeCallbacks(wakeRunnable)
+        wakeAt = NOT_SCHEDULED
+    }
+
+    private val wakeRunnable = Runnable {
+        wakeAt = NOT_SCHEDULED
+        invalidate()
+    }
+
+    override fun onDetachedFromWindow() {
+        cancelWake()
+        super.onDetachedFromWindow()
+    }
+
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
         val now = SystemClock.uptimeMillis()
-        // 书写中永不淡出；收笔后本地笔迹只做短暂留存(GHOST_FADE_MS)快速淡出。
-        // 持久的那一条交给「共享端悬浮层渲染→录屏→回灌本端视频」的回显，
-        // 它落在 TA 屏幕的真实位置且只有一份。本地留太长会与回显叠成"两条线"。
+        // 三段生命周期（引擎里判定，这里只画）：书写中全显 → 收笔后顶着等对方落墨 →
+        // 交棒（ack 或兜底超时）后 [OverlayGestureEngine.HANDOVER_FADE_MS] 内淡掉。
+        // 持久的那一条交给「共享端悬浮层渲染→录屏→回灌本端视频」的回显，它落在 TA 屏幕的
+        // 真实位置且只有一份。本地留太长（或与回显同时可见）就是用户报的"重影"。
         val snaps = engine.visibleStrokes(now)
         for (s in snaps) {
             paint.color = StrokeColors.COLORS[s.colorIndex.mod(StrokeColors.COLORS.size)]
@@ -222,7 +272,9 @@ class DrawingOverlayView @JvmOverloads constructor(
                 canvas.drawCircle(only.first, only.second, paint.strokeWidth / 2f, paint)
             }
         }
-        if (snaps.isNotEmpty()) postInvalidateOnAnimation()
+        // 只有 alpha 真在变的笔迹才值得逐帧；等待交棒的那 1.5 秒 alpha 恒定，
+        // 逐帧空转 + 悬浮层重排就是"笔迹一直飘"的老坑，改成到点醒一次。
+        if (snaps.any { it.fading }) postInvalidateOnAnimation() else scheduleNextWake(now)
 
         // 操控模式：指尖光晕 + 按点龄淡出的短尾迹。刻意不是"墨迹"——
         // 它只回答"手指正落在对方屏幕哪里"；真正的操作动画由共享端画面回显（唯一权威一份）
@@ -262,5 +314,6 @@ class DrawingOverlayView @JvmOverloads constructor(
 
     private companion object {
         const val INVALID_POINTER_ID = -1
+        const val NOT_SCHEDULED = -1L
     }
 }
