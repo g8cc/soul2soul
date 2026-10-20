@@ -132,9 +132,24 @@
   量的是**「我收笔 → 她画布落墨并回 ack」**，走的是与笔迹同一条 anno 队列（`k="a"`，见 §3.1）。
   它**不含**采集/编码/网络/解码/渲染，所以这一列不是"回显总延迟"，**不许**在文档或结论里写成 `echoMs`。
   它的用途是给观看端 `HANDOVER_FADE_MS=150` 做下界校验：ack 都到不了的话，视频里的成品更到不了。
-  两条读法：① `m`/`p` 大于 0 是**正常**的（anno 容丢包 + 客户端 5s 节流 ⇒ 这条是重复采样，
-  单条丢掉不丢结论，所以它降为 P1；整段缺失也不等于埋点坏了）；② 旧版对端（≤0.2.64）根本不发 `k="a"` ⇒
-  观看端只会走 1500ms 兜底，`m` 会一路涨，这是**版本差不是故障**。
+  三条读法：① **`0.2.65` 内部有"修 echo_ack 谎报积压"那个提交分界，两边口径不同**（见下条）；
+  ② 分界之后 `m`/`p` 大于 0 才是**正常且有意义**的（anno 容丢包 ⇒ `p`＝真的还在等的笔迹数；
+  旧版分界之前它被补发污染过，`p` 每笔 +1 是假积压）；整段缺失也不等于埋点坏了——客户端 5s 节流
+  ⇒ 这条是重复采样，单条丢掉不丢结论，所以它降为 P1；
+  ③ 旧版对端（≤0.2.64）根本不发 `k="a"` ⇒ 观看端只会走 1500ms 兜底，`p` 会一路涨到 32 之后 `m` 才开始涨，
+  这是**版本差不是故障**。
+  ⚠️ **已修（0.2.65 内的分界，未单独占版本号）**：18:36~18:39 双模拟器那轮实测到 `p` 从 0 单调涨到 14、
+  而 `e` 每笔都是新鲜值、`m` 恒 0——**这不是"丢包"，是账本自己造出来的积压**：ack 到达时条目已被
+  `remove`，300ms 后的收笔补发 `{k:"e",id}` 在 `putIfAbsent` 上"重新登记成功"，而共享端那一笔早已提交
+  （`SharerStrokeBuffer.end` 幂等返回 null ⇒ 不会有第二个 ack），于是每画一笔留下一条永久配不上的记录，
+  到 `CAP=32` 之后还会开始把真正还在等的笔迹挤出账本、把 `m` 读成假故障。
+  修法是账本里记一张同样有界的"已 ack id"表（`acked`＝LinkedHashSet 保插入序，超过 CAP=32 从迭代头淘汰最旧；
+  补发只晚 300ms，不可能被 32 条别的 ack 挤出去），`onStrokeSent` 与 `onAck` 两处都要摘/记，`reset()` 一起清
+  ——只记不摘会把还在等的算成已交棒，只摘不记就是这次的真机现象（补发把它复活成一条永久等待）。
+  两条用例盯住：`resendAfterAckDoesNotReopenTheEntry`（单条）+
+  `consecutiveStrokesLeaveNothingWaiting`（连画 40 笔 > CAP，`p=0,m=0`）；实测把 `id in acked` 抽掉即红。
+  取证时**这条分界与版本号无关**：同是 `app=0.2.65`，看到 `p` 一笔一涨就说明那台跑的是修前的包，
+  判"交棒遥测坏了"之前先对提交 `1da0158`。
   **`ice_failed` 与 `ice_outage` 必须在日志里分得开**：`ice_outage`（DISCONNECTED）会等恢复、`ice_failed` 是打洞彻底失败（detail 带 `established=`、`restarts=`、`path=` 的缩码）。取证必须排在恢复策略判定之前，否则 `established` 已被改掉。
   下面这一行是**机器读的**：`DiagEventRegistryTest` 把它与 main 源码扫出的事件名逐一比对，两个方向都不许有差（新增事件名不写进来，t1 直接红；写了没在发，也直接红）。以 `_` 结尾的是前缀项——`bucket_` 覆盖 `bucket_act`/`bucket_wset`/`bucket_freq`/`bucket_rare`/`bucket_rst`。上面那些散文段落是会腐烂的，这行不会。
   <!-- DIAG-EVENT-NAMES: screen_off/screen_on/capture_ok/capture_fail/ice_outage/ice_recovered/ice_failed/video_stall/video_resumed/viewer_paused/viewer_resumed/surface_created/surface_size/surface_destroyed/sink_attached/fgs_start_failed/webrtc_start_failed/leave_hint_screen_off/pip_enter/pip_exit/peer_signal/gather_done/qos_tick/qos_bad/stop_tap/signaling_down/signaling_up/app_exit/probe_start/heartbeat/net_up/net_down/net_type/doze_on/doze_off/bucket_/wake_ok/wake_off/wake_fail/aexit/session_end/backlog_drop/projection_revoked/projection_resumed/projection_reopen_fail/echo_ack -->
