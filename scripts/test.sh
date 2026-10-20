@@ -558,6 +558,64 @@ PY
     echo "$negdefault" >&2
     fail=1
   fi
+  # ── v0.2.65 重影/双铅笔根治（计划步骤⑤的三条 t0 锁）──────────────────
+  # (a) 通知动作数量：Android 7 只放得下 3 个（v0.2.46 真机实锤"按钮时有时无"），
+  #     第 4 个「画笔」必须整体关在 SDK_INT >= O 的块里。守卫漏了不是"少一个按钮"，
+  #     是老机型整条常驻通知的动作区溢出——而这台机器（Mi5）正是我们唯一的 Android 7 样本。
+  python3 - "$ROOT/app/app/src/main/java/com/soul2soul/app/session/ScreenShareService.kt" <<'PY' || fail=1
+import re, sys
+p = sys.argv[1]
+src = open(p, encoding='utf-8').read()
+try:
+    i = src.index('private fun buildNotification(')
+except ValueError:
+    print('静态检查: 找不到 buildNotification（守卫锚点腐烂，不是通过）'); sys.exit(1)
+depth = 0
+end = None
+for j in range(src.index('{', i), len(src)):
+    if src[j] == '{':
+        depth += 1
+    elif src[j] == '}':
+        depth -= 1
+        if depth == 0:
+            end = j + 1
+            break
+body = src[i:end]
+g = re.search(r'if \(Build\.VERSION\.SDK_INT >= Build\.VERSION_CODES\.O\) \{', body)
+if not g:
+    print('静态检查: buildNotification 里没有 SDK_INT >= O 守卫（第 4 个通知动作失去闸门）'); sys.exit(1)
+gs, gd, d = g.end(), None, 1
+for k in range(gs, len(body)):
+    if body[k] == '{':
+        d += 1
+    elif body[k] == '}':
+        d -= 1
+        if d == 0:
+            gd = k
+            break
+hits = [m.start() for m in re.finditer(r'\.addAction\(', body)]
+inside = [h for h in hits if gs <= h < gd]
+outside = [h for h in hits if not (gs <= h < gd)]
+if len(outside) != 3 or len(inside) != 1:
+    print(f'静态检查: 通知动作应为「守卫外 3 个 + 守卫内 1 个」，实际守卫外 {len(outside)}、守卫内 {len(inside)}'
+          f'（Android 7 兜不住第 4 个；HyperOS 折叠态另有 ⬜ 格待真机采）'); sys.exit(1)
+PY
+  # (b) 共享端入口球闲置透明度：必须是 0f。旧值 0.15f 的"淡化"在她那边不算消失——
+  #     这颗球是 TYPE_APPLICATION_OVERLAY 窗口，只要可见就被采进视频 ⇒ 第二个铅笔。
+  local ballf
+  ballf="$ROOT/app/app/src/main/java/com/soul2soul/app/session/AnnotationOverlayService.kt"
+  if ! grep -qE 'BALL_DIM_ALPHA[[:space:]]*=[[:space:]]*0f' "$ballf"; then
+    echo "静态检查: BALL_DIM_ALPHA 不是 0f（悬浮球一进采集画面=她看到两个铅笔）"; fail=1
+  fi
+  # (c) echo_ack 两头成对：发送点（ScreenShareService 的 k="a"）与接收分支（SignalRouter 的 "a" ->）。
+  #     只埋不接＝观看端永远不交棒，本地副本只能靠 1500ms 兜底淡出（重影窗口回到旧尺寸）；
+  #     只接不埋＝遥测整段静默，而 summary 会把它读成"这版没埋"。
+  local acksend ackroute
+  acksend=$(grep -Fc 'put("k", "a")' "$ROOT/app/app/src/main/java/com/soul2soul/app/session/ScreenShareService.kt" || true)
+  ackroute=$(grep -Fc '"a" ->' "$ROOT/app/app/src/main/java/com/soul2soul/app/session/SignalRouter.kt" || true)
+  if [ "${acksend:-0}" -lt 1 ] || [ "${ackroute:-0}" -lt 1 ]; then
+    echo "静态检查: echo_ack 发送点/接收分支缺一（send=${acksend} route=${ackroute}，两者必须同时存在）"; fail=1
+  fi
   [ "$fail" -eq 0 ]
 }
 

@@ -1,6 +1,7 @@
 package com.soul2soul.app
 
 import java.io.File
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -64,4 +65,18 @@ class ViewerBallDragTest {
 
     private fun List<String>.containsAllTwo(a: String, b: String) =
         any { it.contains(a) } && any { it.contains(b) }
+
+    // B4（v0.2.65 重影/双铅笔根治的物理前提）：观看端这颗球必须是 Activity 内的 View。
+    // 她的屏幕就是镜头——只要改成 WindowManager 挂出去，它就进了采集画面，
+    // 共享时又会看见两个铅笔（共享端那颗已经为此改成闲置即隐形）。整文件扫描，不用行数窗口。
+    @Test
+    fun `viewer ball stays an in-activity view so it is never captured`() {
+        val activity = source("app/src/main/java/com/soul2soul/app/session/SessionActivity.kt")
+            .joinToString("\n")
+        val layout = source("app/src/main/res/layout/activity_session.xml").joinToString("\n")
+        assertTrue("btnBall 必须写在 Activity 布局里（不被采集的唯一形态）",
+            layout.contains("btnBall") || layout.contains("btn_ball"))
+        assertFalse("观看端球不许改用 WindowManager 挂出（那会被采进视频=第二个铅笔）",
+            Regex("""addView\s*\([^)]*(ball|Ball)""").containsMatchIn(activity))
+    }
 }
