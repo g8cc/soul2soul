@@ -37,18 +37,13 @@ class OverlayCanvasView @JvmOverloads constructor(
     attrs: AttributeSet? = null,
 ) : View(context, attrs) {
 
+    /** 已落墨的笔迹：能构造出这个类的东西都已经收笔，所以只有 endAt 一个时刻 */
     private class Stroke(
         val id: String,
         val color: Int,
-        val bornAt: Long,
+        val endAt: Long,
     ) {
         val points = mutableListOf<PointF>() // 归一化坐标 0..1
-
-        /** 收笔时刻（0 = 还在书写中）。淡出从收笔才开始计——网络延迟不影响显示 */
-        var endAt = 0L
-
-        /** 最后一个笔点的到达时刻：收笔信号丢失时的兜底依据 */
-        var lastPointAt = 0L
     }
 
     private class Emoji(
@@ -73,6 +68,21 @@ class OverlayCanvasView @JvmOverloads constructor(
     private val strokes = mutableListOf<Stroke>()
     private val emojis = mutableListOf<Emoji>()
     private val fx = mutableListOf<Fx>()
+
+    /**
+     * 观看端来的笔迹先进这里攒着，收笔才落墨（重影根治，见 [SharerStrokeBuffer]）。
+     * 共享端自己的自画走 SharerDoodleView，不经过本视图——她是原画，不需要缓冲。
+     */
+    private val buffer = SharerStrokeBuffer(
+        clock = { SystemClock.uptimeMillis() },
+        silenceMs = STROKE_SILENCE_MS,
+    )
+
+    /** 一笔真正落墨时回调一次（Service 注入：发 echo_ack 让观看端知道"该交棒了"） */
+    var onCommitted: ((String) -> Unit)? = null
+
+    /** 兜底落墨的唯一唤醒器：一条 delayed invalidate，不是逐帧循环 */
+    private var pendingWake: Runnable? = null
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
         strokeCap = Paint.Cap.ROUND
@@ -116,32 +126,56 @@ class OverlayCanvasView @JvmOverloads constructor(
                 strokes.clear()
                 emojis.clear()
                 fx.clear()
+                buffer.clear()
+                cancelPendingWake()
             }
-            "s" -> {
-                // 幂等：同 id 重复落笔（极端重发场景）不产生双笔画
-                if (strokes.none { it.id == id }) strokes.add(
-                    Stroke(
-                        id,
-                        StrokeColors.COLORS[json.optInt("c", 0).mod(StrokeColors.COLORS.size)],
-                        SystemClock.uptimeMillis(),
-                    )
-                )
-            }
-            "p" -> {
-                // 自愈：容忍丢包通道丢了落笔"s"时，凭笔点现场建笔，整笔不再凭空消失
-                val s = strokes.lastOrNull { it.id == id }
-                    ?: Stroke(id, StrokeColors.COLORS[0], SystemClock.uptimeMillis()).also { strokes.add(it) }
-                s.points.add(
-                    PointF(
-                        json.optDouble("x", 0.5).toFloat().coerceIn(0f, 1f),
-                        json.optDouble("y", 0.5).toFloat().coerceIn(0f, 1f),
-                    )
-                )
-                s.lastPointAt = SystemClock.uptimeMillis()
-            }
-            "e" -> strokes.lastOrNull { it.id == id }?.let { if (it.endAt == 0L) it.endAt = SystemClock.uptimeMillis() }
+            "s" -> buffer.begin(
+                id,
+                StrokeColors.COLORS[json.optInt("c", 0).mod(StrokeColors.COLORS.size)],
+            )
+            "p" -> buffer.point(
+                id,
+                json.optDouble("x", 0.5).toFloat(),
+                json.optDouble("y", 0.5).toFloat(),
+            )
+            "e" -> buffer.end(id)?.let { commit(it) }
         }
+        schedulePendingWake()
         invalidate()
+    }
+
+    /** 落墨：缓冲里攒完的一笔进入可见列表，从此刻起开始既有的"2 秒淡出"生命周期 */
+    private fun commit(p: SharerStrokeBuffer.Pending) {
+        if (p.points.isEmpty()) return // 无点不落墨（也不发 ack——屏幕上什么都没发生）
+        val s = Stroke(p.id, p.color, SystemClock.uptimeMillis())
+        for ((x, y) in p.points) s.points.add(PointF(x, y))
+        strokes.add(s)
+        onCommitted?.invoke(p.id)
+    }
+
+    /**
+     * 兜底落墨只需要"到点醒一次"，不需要每帧检查：书写期间逐帧重绘就是新的
+     * 笔迹飘动（这条坑 v0.2.27 之前踩过一次，注释还留在 AnnotationOverlayService）。
+     */
+    private fun schedulePendingWake() {
+        cancelPendingWake()
+        val now = SystemClock.uptimeMillis()
+        val deadline = buffer.nextDeadline(now) ?: return
+        if (deadline - now <= 0L) {
+            invalidate() // onDraw 里 flushDue 会提交并重排下一次
+            return
+        }
+        val r = Runnable {
+            pendingWake = null
+            invalidate()
+        }
+        pendingWake = r
+        postDelayed(r, deadline - now)
+    }
+
+    private fun cancelPendingWake() {
+        pendingWake?.let { removeCallbacks(it) }
+        pendingWake = null
     }
 
     fun applyEmoji(json: JSONObject) {
@@ -195,20 +229,27 @@ class OverlayCanvasView @JvmOverloads constructor(
 
     fun hasEmojiOrFx(): Boolean = emojis.isNotEmpty() || fx.isNotEmpty()
 
+    /**
+     * 窗口存续判定。缓冲里的 pending **也算**内容：它还没上屏，但一笔正在画，
+     * 此时拆窗会在"上一笔淡出→新一笔首点"的空隙里把画布从正在画的人手里抽走，
+     * 提交时又得重新挂一次全屏窗口（v0.2.27 重排残影的同族风险）。
+     */
     fun hasVisibleContent(): Boolean =
-        strokes.any { it.points.isNotEmpty() } || emojis.isNotEmpty() || fx.isNotEmpty()
+        strokes.isNotEmpty() || emojis.isNotEmpty() || fx.isNotEmpty() || buffer.hasPending()
 
-    /** 动画循环唯一驱动源：有新点/表情才续帧；静默笔迹收笔后让循环自然熄灭，
-     *  不再每帧空转（空转 + bbox 窗口重排叠加 = 笔迹"一直飘"）。
-     *  兜底收笔判定与 hasVisibleContent 同口径，保证循环停前最后一帧一定把过期笔迹清掉 */
+    /** 动画循环唯一驱动源：淡出中的笔迹/表情/特效才续帧；循环停前最后一帧一定把过期笔迹清掉。
+     *  缓冲中的 pending 刻意不在这里——书写期间逐帧重绘就是"笔迹一直飘"，
+     *  它的兜底落墨由 [schedulePendingWake] 那一次 delayed invalidate 负责。 */
     private fun needsAnotherFrame(now: Long): Boolean {
         for (s in strokes) {
-            if (s.points.isEmpty()) continue
-            val aliveMs = if (s.endAt > 0L) now - s.endAt else now - s.lastPointAt
-            val budget = if (s.endAt > 0L) StrokeColors.FADE_MS else STROKE_SILENCE_MS + StrokeColors.FADE_MS
-            if (aliveMs < budget) return true
+            if (now - s.endAt < StrokeColors.FADE_MS) return true
         }
         return emojis.isNotEmpty() || fx.isNotEmpty()
+    }
+
+    override fun onDetachedFromWindow() {
+        cancelPendingWake()
+        super.onDetachedFromWindow()
     }
 
     override fun onDraw(canvas: Canvas) {
@@ -230,30 +271,21 @@ class OverlayCanvasView @JvmOverloads constructor(
             )
         }
 
-        // 笔迹生命周期：
-        //  1) 书写中（未收笔）→ 完整显示，永不消失
-        //  2) 收笔后 → 2 秒淡出
-        //  3) 收笔信号丢失（容忍丢包通道会丢小消息）→ 以"最后笔点后 1.2 秒无新点"判定收笔，兜底淡出
+        // 收笔信号丢失（容忍丢包通道会丢这条小消息）的兜底落墨：到龄的 pending 在此提交。
+        // 放在绘制开头而不是别处，是因为这是唯一保证"提交后立刻有一帧把它画出来"的时刻。
+        val due = buffer.flushDue(now)
+        if (due.isNotEmpty()) for (p in due) commit(p)
+        schedulePendingWake()
+
+        // 笔迹生命周期：能进这个列表的笔都已经落墨（缓冲阶段在 SharerStrokeBuffer 里，不上屏），
+        // 所以这里只有一条规则——从落墨时刻起 2 秒淡出。
+        // 边界用 >=：needsAnotherFrame 用 <，两者必须互斥闭合，否则"恰好 2000ms"那一帧之后
+        // 循环停、笔迹留在列表里 → hasVisibleContent 恒真 → 全屏窗口被一笔隐形内容永久钉住。
         val iter = strokes.iterator()
         while (iter.hasNext()) {
             val s = iter.next()
-            // 病态笔画自愈：只收到"s"而笔点/收笔全被丢包 → 到龄直接清除，
-            // 否则窗口会被一笔"隐形"内容永久钉住（全屏玻璃罩回归）
-            if (s.points.isEmpty()) {
-                if (now - s.bornAt > STROKE_SILENCE_MS) iter.remove()
-                continue
-            }
-            val fadeStart = when {
-                s.endAt > 0L -> s.endAt
-                s.lastPointAt > 0L && now - s.lastPointAt > STROKE_SILENCE_MS -> s.lastPointAt + STROKE_SILENCE_MS
-                else -> 0L // 仍在书写中：完整显示
-            }
-            if (fadeStart == 0L) {
-                paintStroke(canvas, s, 1f, strokeW)
-                continue
-            }
-            val sinceEnd = now - fadeStart
-            if (sinceEnd > StrokeColors.FADE_MS) {
+            val sinceEnd = now - s.endAt
+            if (sinceEnd >= StrokeColors.FADE_MS) {
                 iter.remove()
                 continue
             }
@@ -367,7 +399,7 @@ class OverlayCanvasView @JvmOverloads constructor(
         private const val BOMB_LIFE_MS = 1000L
         private const val ROCKET_LIFE_MS = 1200L
 
-        /** 收笔信号丢失的兜底：最后笔点后静默此时长即视为已收笔，开始淡出 */
-        const val STROKE_SILENCE_MS = 1200L
+        /** 收笔信号丢失的兜底静默时长。值只在 [SharerStrokeBuffer] 里定义一次，这里是别名 */
+        const val STROKE_SILENCE_MS = SharerStrokeBuffer.DEFAULT_SILENCE_MS
     }
 }
