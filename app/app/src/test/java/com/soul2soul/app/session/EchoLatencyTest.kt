@@ -75,6 +75,37 @@ class EchoLatencyTest {
     }
 
     @Test
+    fun resendAfterAckDoesNotReopenTheEntry() {
+        // v0.2.65 真机（双模拟器，20261020-182939）实测：p 每画一笔 +1、m 恒 0，
+        // 而 e 每笔都是新鲜值。根因＝ack 已经把条目 remove 掉，300ms 后的补发 `e`
+        // 在 putIfAbsent 上"重新登记成功"，而共享端那一笔早已提交（end 幂等返回 null，
+        // 不会再回第二个 ack）⇒ 这一条永远配不上。遥测自己造出积压，
+        // 且到 32 条后会把真正还在等的笔迹挤出账本
+        ledger.onStrokeSent("a1", 2000)
+        assertNotNull(ledger.onAck("a1", 2100))
+        ledger.onStrokeSent("a1", 2300) // 补发落在 ack 之后
+        assertEquals("补发不许把已交棒的笔迹重新算成在等：" + ledger.detail(),
+            "e=100,x=100,m=0,p=0", ledger.detail())
+        assertNull("补发也配不出第二个样本", ledger.onAck("a1", 2400))
+        assertEquals("e=100,x=100,m=0,p=0", ledger.detail())
+    }
+
+    @Test
+    fun consecutiveStrokesLeaveNothingWaiting() {
+        // 连画 40 笔（>CAP）：真实链路每笔都回了 ack 的话，p 与 m 都必须停在 0。
+        // 这条是上一条的规模化版本——旧实现到这里会报 p=32、m=8（假积压撑爆账本）
+        for (i in 1..40) {
+            val id = "s$i"
+            ledger.onStrokeSent(id, 2000L + i * 1000)
+            assertNotNull(ledger.onAck(id, 2100L + i * 1000))
+            ledger.onStrokeSent(id, 2300L + i * 1000) // 补发
+        }
+        val d = ledger.detail()
+        assertTrue("已 ack 的笔迹不许堆进在等：$d", d.contains("p=0"))
+        assertTrue("已 ack 的笔迹不许算成配不上：$d", d.contains("m=0"))
+    }
+
+    @Test
     fun emptyIdIsIgnoredBothWays() {
         ledger.onStrokeSent("", 2000)
         assertNull(ledger.onAck("", 2100))

@@ -17,6 +17,13 @@ class EchoLatency(private val clock: () -> Long) {
 
     /** id → 收笔时刻；LinkedHashMap 保序＝淘汰时丢的就是最旧那条 */
     private val sent = LinkedHashMap<String, Long>()
+    /**
+     * 已经配过对的 id（有界，只防 300ms 补发）。
+     * 少了这一张表：ack 到达时条目已被 remove，补发的那一条 `e` 会在 putIfAbsent 上"重新登记成功"，
+     * 而共享端那一侧早已提交（end 幂等返回 null，不会再回 ack）⇒ 这笔永远配不上，
+     * p 每画一笔 +1、到 32 条后开始把真正还在等的笔迹挤出账本——遥测自己造出积压。
+     */
+    private val acked = LinkedHashSet<String>()
     private var lastMs = -1L
     private var maxMs = -1L
     private var miss = 0
@@ -25,7 +32,7 @@ class EchoLatency(private val clock: () -> Long) {
 
     /** 收笔时登记。重复 id（300ms 补发的那一条）不覆盖首次时刻——首尾差会把样本读小 */
     fun onStrokeSent(id: String, penUpAt: Long = clock()) {
-        if (id.isEmpty()) return
+        if (id.isEmpty() || id in acked) return
         if (sent.putIfAbsent(id, penUpAt) != null) return
         while (sent.size > CAP) {
             val oldest = sent.keys.first()
@@ -37,6 +44,8 @@ class EchoLatency(private val clock: () -> Long) {
     /** @return 配上了才给样本；重复 ack 幂等（只算第一次），配不上的 id（已被淘汰/非本端笔迹）直接丢弃 */
     fun onAck(id: String, at: Long = clock()): Sample? {
         val penUpAt = sent.remove(id) ?: return null
+        acked.add(id)
+        while (acked.size > CAP) acked.remove(acked.iterator().next())
         val upMs = (at - penUpAt).coerceAtLeast(0L).coerceAtMost(MAX_MS)
         lastMs = upMs
         if (upMs > maxMs) maxMs = upMs
@@ -56,6 +65,7 @@ class EchoLatency(private val clock: () -> Long) {
 
     fun reset() {
         sent.clear()
+        acked.clear()
         lastMs = -1L
         maxMs = -1L
         miss = 0
