@@ -607,10 +607,11 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
                 .putExtra(CtlConsentActivity.EXTRA_AUTO_APPROVE, true),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
-        // 自画入口是摇一摇（见 AnnotationOverlayService）：通知按钮 Android 7 只放得下 3 个，
-        // 这里保持 静音/操控/结束 不变
-        // HyperOS/Android13+ 默认折叠 FGS 通知，动作按钮经常根本看不见——
-        // 把"点通知整体"变成授权对话框入口，授权路径不再依赖按钮可见性
+        // Android 7 只放得下 3 个动作按钮（静音/操控/结束），这一格从 v0.2.65 起仍不变——
+        // 第 4 个「画笔」只在 API 26+ 挂（见下方 build() 前的守卫），不许拿 Mi5 当验证机型。
+        // 入口球从 v0.2.65 起闲置即隐形（她屏幕被采进视频里时不能再有两个铅笔），
+        // 所以"看得见"的入口必须有备份：HyperOS 默认折叠 FGS 通知，按钮可能根本看不见 ⇒
+        // 摇一摇 + 隐形命中区 + 正文点按才是出口，本按钮只是第三条，不是已解决的证据
         val consentIntent = PendingIntent.getActivity(
             this, 24,
             Intent(this, CtlConsentActivity::class.java)
@@ -626,7 +627,13 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
-        return NotificationCompat.Builder(this, Notif.CH_SESSION)
+        val doodleIntent = PendingIntent.getService(
+            this, 26,
+            Intent(this, AnnotationOverlayService::class.java)
+                .setAction(AnnotationOverlayService.ACTION_TOGGLE_DOODLE),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+        val builder = NotificationCompat.Builder(this, Notif.CH_SESSION)
             .setSmallIcon(R.drawable.ic_heart)
             .setContentTitle(getString(R.string.sharing_title))
             .setContentText(text)
@@ -637,7 +644,10 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
             .addAction(R.drawable.ic_notif_mic, if (micMuted) getString(R.string.action_unmute) else getString(R.string.action_mute), muteIntent)
             .addAction(R.drawable.ic_notif_ctl, if (ctlAllowed) getString(R.string.ctl_disallow) else getString(R.string.ctl_allow), ctlIntent)
             .addAction(R.drawable.ic_notif_end, getString(R.string.action_end), stopIntent)
-            .build()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            builder.addAction(R.drawable.ic_notif_brush, getString(R.string.action_doodle), doodleIntent)
+        }
+        return builder.build()
     }
 
     private fun Intent.getProjectionExtra(name: String): Intent? =

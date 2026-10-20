@@ -69,6 +69,9 @@
     <string name="action_end">结束</string>
     <string name="action_mute">静音</string>
     <string name="action_unmute">取消静音</string>
+    <string name="action_doodle">画笔</string>
+    <!-- v0.2.65：入口球闲置即隐形（不再被采进她的画面），首次共享要说出三条入口 -->
+    <string name="overlay_entry_hint">想画就摇一摇手机，或点通知里的「画笔」，也能直接点屏幕右侧你放画笔的位置</string>
     <string name="sharing_muted">已静音（对方听不到你）</string>
     <string name="peer_offline">对方不在线</string>
     <string name="peer_declined">对方拒绝了</string>

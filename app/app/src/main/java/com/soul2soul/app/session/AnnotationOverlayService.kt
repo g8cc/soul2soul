@@ -70,13 +70,38 @@ class AnnotationOverlayService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (intent?.action == ACTION_TOGGLE_DOODLE) {
+            // 权限没给时不许静默失败：通知栏按钮点了没反应，用户只会以为功能坏了
+            if (!Settings.canDrawOverlays(this)) {
+                toast(R.string.overlay_permission_missing)
+                return START_NOT_STICKY
+            }
+            toggleDoodle()
+            return START_STICKY
+        }
         if (!Settings.canDrawOverlays(this)) {
             stopSelf()
             return START_NOT_STICKY
         }
-        // 会话期间球常驻（自画模式开启时临时拆除）
+        // 会话期间球常驻（自画模式开启时临时拆除）。
+        // ⚠️ START_STICKY 被系统重投递时 intent==null，只会落到这一支 ⇒
+        // "服务自己被重启"永远不会顺手把画笔模式打开（toggle 只认上面那个 action）
         showBall()
+        maybeShowEntryHint()
         return START_STICKY
+    }
+
+    private fun toast(res: Int) =
+        android.widget.Toast.makeText(this, res, android.widget.Toast.LENGTH_SHORT).show()
+
+    /**
+     * 入口球闲置即隐形之后，第一次共享必须说清"怎么开画笔"，否则她只会觉得按钮坏了。
+     * 一次性标记（她承认过一次就不再打扰），文案给出三条入口。
+     */
+    private fun maybeShowEntryHint() {
+        if (com.soul2soul.app.util.Prefs.overlayEntryHintShown(this)) return
+        com.soul2soul.app.util.Prefs.setOverlayEntryHintShown(this, true)
+        toast(R.string.overlay_entry_hint)
     }
 
     override fun onDestroy() {
@@ -392,8 +417,16 @@ class AnnotationOverlayService : Service() {
             PixelFormat.TRANSLUCENT,
         ).apply {
             gravity = Gravity.TOP or Gravity.START
-            x = sw - size - dp(6f)
-            y = (sh * BALL_INITIAL_Y).toInt()
+            // 命中区看不见之后，位置必须停在**她上次放的地方**：每次回默认右边中段＝让人猜
+            val spot = com.soul2soul.app.util.Prefs.ballSpot(this@AnnotationOverlayService)
+            if (spot != null) {
+                // 转屏/换分辨率后旧坐标可能已经出屏，恢复一律重新夹一次（宁可贴边也不许挂到屏外）
+                val (cx, cy) = DoodleBallPolicy.clamp(spot.first, spot.second, size, sw, sh)
+                x = cx; y = cy
+            } else {
+                x = sw - size - dp(6f)
+                y = (sh * BALL_INITIAL_Y).toInt()
+            }
         }
         val slop = android.view.ViewConfiguration.get(this).scaledTouchSlop
         val gd = android.view.GestureDetector(this,
@@ -444,7 +477,15 @@ class AnnotationOverlayService : Service() {
                     }
                     android.view.MotionEvent.ACTION_UP,
                     android.view.MotionEvent.ACTION_CANCEL -> {
-                        if (ballDragging) { ballDragging = false; scheduleBallDim() }
+                        if (ballDragging) {
+                            ballDragging = false
+                            // 拖动位落盘：球闲置即隐形（见 BALL_DIM_ALPHA），看不见入口的人
+                            // 只能靠"它一直在我放的那个位置"来记它
+                            com.soul2soul.app.util.Prefs.setBallSpot(
+                                this@AnnotationOverlayService, lp.x, lp.y
+                            )
+                            scheduleBallDim()
+                        }
                     }
                 }
                 true
@@ -494,6 +535,9 @@ class AnnotationOverlayService : Service() {
     }
 
     companion object {
+        /** 通知栏「画笔」动作：toggleDoodle 的唯一远程入口（球隐形后这是她看得见的按钮） */
+        const val ACTION_TOGGLE_DOODLE = "com.soul2soul.app.action.TOGGLE_DOODLE"
+
         private const val CONTENT_LIFE_MS = 2400L
         /** 满屏窗口在最后一笔后的存续预算：静默收笔 1200 + 淡出 2000 + 裕量 */
         private const val STROKE_LIFE_MS = 4000L
@@ -506,7 +550,15 @@ class AnnotationOverlayService : Service() {
         private const val BALL_SIZE_DP = 48f
         private const val BALL_IDLE_MS = 3000L
         private const val BALL_ACTIVE_ALPHA = 0.85f
-        private const val BALL_DIM_ALPHA = 0.15f
+        /**
+         * 闲置透明度＝**完全隐形**（0.2.65）。旧值 0.15f 的"淡化"在她那边根本不算消失：
+         * 这块球是 `TYPE_APPLICATION_OVERLAY` 窗口，Android 没有"按窗口把某一层排除出采集"的能力
+         * （`FLAG_SECURE` 只会让它变成黑块），所以只要它可见就会被采进视频 ⇒ 共享时她看到两个铅笔。
+         * 0f 不缩小命中区：`View.setAlpha(0f)` 仍然参与触摸命中（输入分发不看渲染透明度），
+         * 这块 48dp **今天已经在吃触摸**，改的只是"看不看得见"，不是新增死区（防下一轮审计误判）。
+         * 入口因此三条并存：摇一摇 / 通知栏「画笔」动作 / 这块隐形命中区。
+         */
+        private const val BALL_DIM_ALPHA = 0f
         private const val BALL_INITIAL_Y = 0.55f
 
         /** ScreenShareService 收到 DataChannel 消息时的入口（进程内单例转发） */

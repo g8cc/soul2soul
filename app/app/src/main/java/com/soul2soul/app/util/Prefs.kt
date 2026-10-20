@@ -57,4 +57,26 @@ object Prefs {
 
     fun setLastVideoSize(ctx: Context, w: Int, h: Int) =
         sp(ctx).edit().putInt("lastVideoW", w).putInt("lastVideoH", h).apply()
+
+    /**
+     * 共享端入口悬浮球的拖动位（像素，TOP|START 原点）。
+     * 0.2.65 起球闲置即隐形（不再"淡化到 15%"，因为那 15% 会被采集进视频=第二个铅笔），
+     * 命中区还在但看不见——位置若每次回到默认右边中段，用户只能靠猜。
+     * 返回 null＝从没拖过。
+     */
+    fun ballSpot(ctx: Context): Pair<Int, Int>? {
+        val sp = sp(ctx)
+        val x = sp.getInt("ballX", -1)
+        val y = sp.getInt("ballY", -1)
+        return if (x >= 0 && y >= 0) Pair(x, y) else null
+    }
+
+    fun setBallSpot(ctx: Context, x: Int, y: Int) =
+        sp(ctx).edit().putInt("ballX", x).putInt("ballY", y).apply()
+
+    /** 隐形命中区的人话提示只说一次（第一次共享时）；之后每次共享都打扰就成噪声 */
+    fun overlayEntryHintShown(ctx: Context): Boolean = sp(ctx).getBoolean("overlayEntryHintShown", false)
+
+    fun setOverlayEntryHintShown(ctx: Context, v: Boolean) =
+        sp(ctx).edit().putBoolean("overlayEntryHintShown", v).apply()
 }
