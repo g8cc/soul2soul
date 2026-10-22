@@ -741,6 +741,19 @@ class WebRtcClient(
     fun deviceAudioChannelOpen(): Boolean =
         runCatching { audChannel?.state() == DataChannel.State.OPEN }.getOrDefault(false)
 
+    /** SCTP 在途字节（只进 `aud_tick` 的 `q_`，不参与判定）；通道没建就报 0=无读数 */
+    fun deviceAudioBufferedBytes(): Int =
+        runCatching { audChannel?.bufferedAmount()?.toInt() ?: 0 }.getOrDefault(0)
+
+    /**
+     * 采集用的**那一个** MediaProjection 对象，交内录复用。
+     * 复用而不是再 `getMediaProjection()` 一次是硬约束：Android 14 起同一份 resultData
+     * 第二次换取会被系统拒（本仓库已实测 `Don't re-use the resultData` → 会话 4.5s 死）。
+     * 采集器换代（[restartCapture]）后这里自然指向新对象，重绑取到的就是新的。
+     */
+    fun sharerMediaProjection(): android.media.projection.MediaProjection? =
+        (capturer as? ScreenCapturerAndroid)?.mediaProjection
+
     /**
      * 内录音频帧出口（共享端 → 观看端）。返回 false 的一律是**丢掉这一帧**：
      * 通道没开、或 SCTP 发送缓冲已超预算（DeviceAudioPolicy.sendAdmission）。

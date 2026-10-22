@@ -38,6 +38,10 @@ object BacklogTiers {
      * 每条只报"最近一次 e / 本轮最大 x / miss m / 还在等 p"四个标量，客户端本身已经 5s 节流；
      * p50/p90 由整条序列给出，断连时丢掉其中几条不丢结论（这一列的用途是给观看端 150ms 的
      * 交棒淡出做下界校验，不是现场证据）。留在 P0 反而会把死亡现场挤出配额。
+     *
+     * `aud_tick`（FR-16 内录通路的心跳，10s 一条）与 `qos_tick` 是同一族：**重复标量、且发射点就在
+     * 采集线程里**——它一断就是"内录停了"，而停这件事由紧随其后的 `aud_stopped`（P0，受保护）说，
+     * 不需要靠数 tick 的缺口。留着 P0 的代价是：一通 20 分钟共享能灌 120 条，把 P0 配额整个占满。
      */
     fun tierOf(line: String): Int {
         val event = runCatching {
@@ -45,7 +49,7 @@ object BacklogTiers {
         }.getOrNull() ?: return TIER_QOS
         return when (event) {
             "heartbeat", "video_stall", "echo_ack" -> TIER_GAP
-            "qos_tick" -> TIER_QOS
+            "qos_tick", "aud_tick" -> TIER_QOS
             else -> TIER_DEATH
         }
     }

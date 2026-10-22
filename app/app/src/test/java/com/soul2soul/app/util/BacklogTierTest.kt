@@ -158,7 +158,9 @@ class BacklogTierTest {
             .flatMap { Regex(""""([a-z_]+)"""").findAll(it).map { m -> m.groupValues[1] } }
             .toSet()
         assertTrue("扫描器没抓到 heartbeat 的降级分支＝它坏了，这条对账等于没对", "heartbeat" in demoted)
-        assertEquals(setOf("heartbeat", "video_stall", "echo_ack", "qos_tick"), demoted)
+        // `aud_tick`（FR-16 内录通路心跳，10s 一条）的理由与 qos_tick 同一条：重复标量，
+        // 而"内录停了"由 P0 的 aud_stopped 说，不靠数 tick 缺口
+        assertEquals(setOf("heartbeat", "video_stall", "echo_ack", "qos_tick", "aud_tick"), demoted)
         assertTrue("默认分支不见了", Regex("""else\s*->\s*TIER_DEATH""").containsMatchIn(text))
     }
 

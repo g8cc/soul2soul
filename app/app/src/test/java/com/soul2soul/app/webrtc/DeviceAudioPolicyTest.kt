@@ -74,6 +74,21 @@ class DeviceAudioPolicyTest {
         }
     }
 
+    /**
+     * `maxAbsSample` 是静音判定的唯一读数来源：判错一次＝整段被读成"对方 App 禁止录制"。
+     * `len` 的口径是**样本个数**且必须夹到数组长度——采集线程给半帧时不许读到上一帧的尾巴，
+     * 那条尾巴会让"全零"变成"非零"（或反过来），正是最容易在真机上复现不了的错。
+     */
+    @Test
+    fun maxAbsSample_measuresAbsoluteAmplitude() {
+        assertEquals(0, DeviceAudioPolicy.maxAbsSample(ShortArray(4), 4))          // 全零 ⇒ 0
+        assertEquals(7, DeviceAudioPolicy.maxAbsSample(shortArrayOf(1, -7, 3, 2), 4)) // 负样本取绝对值
+        assertEquals(32768, DeviceAudioPolicy.maxAbsSample(shortArrayOf(0, Short.MIN_VALUE), 2)) // 取反不许溢出成负数
+        assertEquals(5, DeviceAudioPolicy.maxAbsSample(shortArrayOf(0, 5, 9, 9), 2))  // len 之后的样本不许看见
+        assertEquals(5, DeviceAudioPolicy.maxAbsSample(shortArrayOf(0, 5), 99))       // len 越界不许数组越界
+        assertEquals(0, DeviceAudioPolicy.maxAbsSample(shortArrayOf(5), -1))          // 负 len ⇒ 无样本可读
+    }
+
     @Test
     fun jitterBuffer_dropsOldestAtHardCap() {
         val delay = DeviceAudioPolicy.AUD_PLAYOUT_DELAY_MS

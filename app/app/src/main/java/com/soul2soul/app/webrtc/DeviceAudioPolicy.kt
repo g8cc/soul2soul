@@ -90,6 +90,25 @@ object DeviceAudioPolicy {
         if (maxAbsSample == 0) streak + 1 else 0
 
     /**
+     * PCM16 一帧里的最大绝对值（判定用的唯一读数）。
+     * `len` 是**样本个数**（不是字节数），越界一律不读——采集线程给半帧时不许越界读到上一帧的尾巴。
+     * 全零返回 0；空输入也返回 0，但调用方**不许**把"没读到东西"喂进来当静音（那是无读数，
+     * 与 `video_stall` 那 6 条假警同族的错法）。
+     */
+    fun maxAbsSample(pcm: ShortArray, len: Int): Int {
+        var max = 0
+        val n = minOf(len, pcm.size)
+        var i = 0
+        while (i < n) {
+            val v = pcm[i].toInt()
+            val a = if (v < 0) -v else v   // Short.MIN_VALUE 取反在 Int 里不溢出（32768）
+            if (a > max) max = a
+            i++
+        }
+        return max
+    }
+
+    /**
      * 两态判定：音频有信号就是 live；连续 SILENT_STREAK_FRAMES 帧全零 ⇒ silent。
      * 没有第三种状态不是"没做完"，而是文件头那条：**没有可信的第二路信号就不许有 blocked**。
      * 想加回来，先解决"公开 API 拿不到播放器状态、逐帧亮度要 GPU 回读"这两个问题之一。

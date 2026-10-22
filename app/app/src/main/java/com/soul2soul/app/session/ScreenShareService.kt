@@ -17,6 +17,8 @@ import androidx.core.app.ServiceCompat
 import com.soul2soul.app.MainActivity
 import com.soul2soul.app.R
 import com.soul2soul.app.signaling.SignalBus
+import com.soul2soul.app.webrtc.DeviceAudioPolicy
+import com.soul2soul.app.webrtc.DeviceAudioTap
 import com.soul2soul.app.webrtc.IceServerParser
 import com.soul2soul.app.webrtc.WebRtcClient
 import kotlinx.coroutines.CoroutineScope
@@ -48,6 +50,12 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
     private var audioRoute: AudioRouteController? = null
     private var lastCtlErrorAt = 0L
     private val ctlTelemetry = CtlLatencyTelemetry { android.os.SystemClock.elapsedRealtime() }
+    /**
+     * 设备内录采集（FR-16）。会话级单例，与 [webRtc] 同生同死。
+     * 起停只经 [startAudTap]/[stopAudTap] 两条口子——它是"多入口"操作（开关、对端 ack、
+     * 通道状态、重新授权、撤授权、收尾都会改变判定），入口散了就会漏配（AGENTS 的 hideX 规矩）。
+     */
+    private var audTap: DeviceAudioTap? = null
 
     /**
      * 锁屏=画面暂停、会话存续（v0.2.56 推翻 PRD FR-8 的"15 秒自动结束"）：
@@ -147,7 +155,22 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
                         webRtc?.iceStateName ?: "-", "startCapture",
                     )
                 }
+                // 采集器换了=new MediaProjection 换了：内录必须跟着重绑，
+                // 而"重开失败"这一支**只**停不启（旧柄已死，留着就是僵尸线程）——
+                // 会话本身照旧（v0.2.64 语义：画面起不来不许拆通话）
+                if (ok) {
+                    stopAudTap(DeviceAudioTap.Exit.REBIND)
+                    startAudTap("rebind")
+                }
                 updateNotification(statusText())
+                return START_NOT_STICKY
+            }
+            ACTION_TOGGLE_AUD -> {
+                if (webRtc == null) { stopSelf(); return START_NOT_STICKY }
+                audWanted = !audWanted
+                // 门没过时开关仍然翻位（她的意图要留得住，等 ack/通道就绪再起），
+                // 但采集不许凭"她点了"就起来——五条件门是唯一判据
+                if (!startAudTap("toggle_on")) stopAudTap(DeviceAudioTap.Exit.TOGGLE_OFF)
                 return START_NOT_STICKY
             }
             ACTION_TOGGLE_MUTE -> {
@@ -181,6 +204,7 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
         stopping = false
         pendingSignals.clear()
         videoPaused = false // 新会话从零开始：上一通的"画面已停"绝不能带进这一通
+        audWanted = false   // 同上：内录开关默认关，不继承上一通的意图
 
         val projection: Intent? = intent?.let { it.getProjectionExtra(EXTRA_PROJECTION) }
         if (projection == null) {
@@ -309,6 +333,7 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
         com.soul2soul.app.util.WifiKeeper.release()
         pendingSignals.clear()
         unbindStrokeAck()
+        stopAudTap(DeviceAudioTap.Exit.SERVICE_DESTROY)
         webRtc?.close()
         webRtc = null
         audioRoute?.stop()
@@ -463,6 +488,9 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
             liveState = true
             SignalBus.emit(JSONObject().put("type", "local.sessionLive"))
             updateNotification(statusText())
+            // 内录的两条前提（通道 OPEN + 对面 ack）到这一刻才可能齐；
+            // 她在这之前就把开关拨到了"开"，也要在这里补一次起
+            startAudTap("live")
             // 共享端也报一份：断线/操控问题时两份矩阵对起来看是谁的环境缺了什么
             com.soul2soul.app.util.SelfCheck.report(
                 this, "sharer",
@@ -483,6 +511,25 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
 
     override fun onRtt(ms: Long) {}
 
+    /** 观看端亲口 ack 过它解得这路 AAC（FR-16）：内录的唯一开闸依据到这一刻才成立 */
+    override fun onDeviceAudioPeerAck() {
+        watchdog.post { startAudTap("peer_ack") }
+    }
+
+    /**
+     * `aud` 通道状态变化（FR-16）。CLOSED 必须立刻停表——通道没了，采集出来的帧没有出口，
+     * 留着线程只会白烧编码和电量；重新 OPEN 才允许按门再起。
+     */
+    override fun onDeviceAudioChannelState(state: String) {
+        watchdog.post {
+            when (state) {
+                "CLOSED" -> stopAudTap(DeviceAudioTap.Exit.CHANNEL_CLOSED)
+                "OPEN" -> startAudTap("channel_open")
+                else -> Unit  // CONNECTING 等中间态什么都不做：门要等 OPEN 才认
+            }
+        }
+    }
+
     /**
      * 系统撤销录屏授权（她锁屏的那条路）：会话存续、只停画面。
      * 0.2.63 及以前这里等于挂断，于是"她锁屏省电"被对方读成"她把我挂了"——
@@ -490,6 +537,9 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
      */
     override fun onProjectionRevoked() {
         watchdog.post {
+            // 内录的柄就是采集器手里那个 MediaProjection（Android 14 不许再要第二个），
+            // 它被系统撤了， AudioRecord 注定读到错误——先按这条出口停表，别等线程自己撞墙
+            stopAudTap(DeviceAudioTap.Exit.PROJECTION_STOPPED)
             // 迟到的回调不许改状态：收尾路径会把 webRtc 置空，那一刻再发 videooff 就是给对方
             // 一条再也不会被 videoon 撤掉的横幅（成对操作必须穷举退出路径）
             if (stopping || webRtc == null || !live) return@post
@@ -498,6 +548,47 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
             sendScreenStatus("videooff")
             updateNotification(statusText())
         }
+    }
+
+    // ---------- 设备内录（FR-16） ----------
+
+    /** 五条件门的现值（SDK / 采集柄 / 开关 / 对端 ack / 录音权限）。判定本身在 DeviceAudioPolicy 里 */
+    private fun audGateReason(): DeviceAudioPolicy.Reason = DeviceAudioPolicy.gate(
+        sdk = Build.VERSION.SDK_INT,
+        hasProjection = webRtc?.sharerMediaProjection() != null,
+        toggleWanted = audWanted,
+        peerAcked = webRtc?.deviceAudioPeerSupported == true,
+        hasRecordPermission = checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) ==
+            PackageManager.PERMISSION_GRANTED,
+    )
+
+    /**
+     * 起采集的唯一入口。门没过就返回 false——调用方**不许**"稍后再试"：
+     * 五个否决理由各自出路不同（旧机型/没授权/她没开/对面版本旧/没录音权限），重试解决不了任何一个。
+     */
+    private fun startAudTap(reason: String): Boolean {
+        if (webRtc == null || audGateReason() != DeviceAudioPolicy.Reason.START) return false
+        val tap = audTap ?: DeviceAudioTap(
+            // 现取：restartCapture 换掉采集器内部的 MediaProjection 之后必须指向新的那一个
+            projectionOf = { webRtc?.sharerMediaProjection() },
+            sink = { packet -> webRtc?.sendDeviceAudioFrame(packet) ?: false },
+            bufferedBytesOf = { webRtc?.deviceAudioBufferedBytes() ?: 0 },
+            onEvent = { name, detail ->
+                com.soul2soul.app.util.SelfCheck.reportEvent(
+                    this, "sharer", name, webRtc?.iceStateName ?: "-", detail,
+                )
+            },
+        ).also { audTap = it }
+        return tap.start(reason)
+    }
+
+    /**
+     * 停采集的唯一出口（幂等在 DeviceAudioTap 里：没在跑就不发事件，一次停止只配一行 `aud_stopped`）。
+     * ⚠️ 会 join 采集线程最多 500ms；调用点都在主线程，但阻塞的 read() 被 stop() 叫醒通常是几毫秒——
+     *    这点代价换"不留一个还在烧 140kbps 上行的僵尸线程"，值。
+     */
+    private fun stopAudTap(exit: DeviceAudioTap.Exit) {
+        audTap?.stop(exit)
     }
 
     // ---------- 会话控制 ----------
@@ -517,6 +608,7 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
             screenReceiverRegistered = false
         }
         micMuted = false
+        audWanted = false // 内录开关是会话级意图，默认关——上一通"让她听到视频声"不能带进这一通
         consent.resetForNewSession() // 会话结束立即收回操控授权
         // 静音是发送轨属性，随 AudioSource 销毁而复位，无需再全局恢复系统麦克风
         com.soul2soul.app.util.WifiKeeper.release()
@@ -524,6 +616,10 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
         // 没有任何上游终止原因时才落到 local_stop：用户点停止/连接失败会先 noteEnd
         if (sendBye) webRtc?.noteEnd("local_stop")
         unbindStrokeAck() // 拆在 close 之前：ack 出口绝不能指向一个已关闭的 client
+        // 必须先停内录再关 client：close() 会 release audioModule 并关掉 aud 通道，
+        // 那一刻采集线程还在往一个已关闭的通道里塞帧，事件顺序也会读成"通道先死、采集后停"的假象
+        stopAudTap(DeviceAudioTap.Exit.SESSION_CLOSE)
+        audTap = null
         val client = webRtc
         webRtc = null
         client?.close()
@@ -664,10 +760,19 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
         const val ACTION_TOGGLE_MUTE = "com.soul2soul.app.action.TOGGLE_MUTE"
         const val ACTION_TOGGLE_CTL = "com.soul2soul.app.action.TOGGLE_CTL"
         const val ACTION_SET_CTL = "com.soul2soul.app.action.SET_CTL"
+        const val ACTION_TOGGLE_AUD = "com.soul2soul.app.action.TOGGLE_AUD"
         const val EXTRA_CTL_ON = "ctl_on"
         const val EXTRA_PROJECTION = "projection"
         const val EXTRA_STOP_SRC = "stop_src"
         private const val CTL_ERROR_THROTTLE_MS = 2_000L
+
+        /**
+         * 内录开关（FR-16）：会话级、**默认关**。它是"她的意图"，不是"采集在跑"——
+         * 门没过时（对面版本旧、通道没开）开关照样是开的，UI 必须分别说出这两种样子。
+         */
+        @Volatile
+        var audWanted = false
+            private set
 
         /** 操控授权状态机（会话级）：通知按钮与授权对话框都经它读写，跨 Activity/Service 共享 */
         val consent = CtlConsentMachine { android.os.SystemClock.elapsedRealtime() }
@@ -722,6 +827,17 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
                 Intent(ctx, ScreenShareService::class.java)
                     .setAction(ACTION_RESTART_CAPTURE)
                     .putExtra(EXTRA_PROJECTION, projectionData),
+            )
+        }
+
+        /**
+         * 共享中面板的「让TA听到我手机里的声音」（FR-16）。
+         * 这里只翻"她的意图"，起不起采集由服务里的五条件门决定——
+         * 开关拨到"开"但对面版本旧，是正确的"开着且没起"，不是坏了。
+         */
+        fun toggleDeviceAudio(ctx: Context) {
+            ctx.startService(
+                Intent(ctx, ScreenShareService::class.java).setAction(ACTION_TOGGLE_AUD),
             )
         }
     }
