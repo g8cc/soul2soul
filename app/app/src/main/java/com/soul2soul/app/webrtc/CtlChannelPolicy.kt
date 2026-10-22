@@ -12,6 +12,13 @@ object CtlChannelPolicy {
     const val CTL = "ctl"
     const val ANNO = "anno"
 
+    /**
+     * 设备内录音频（FR-16）：唯一一条**二进制**通道，载荷是 `[codec id][ADTS][AU]`。
+     * 它不走 channelOrder——JSON 信令永远留在 ctl/ctlg/anno，音频帧只在 aud 上，
+     * 这样背压时丢掉的是音频，不会挤到笔迹或授权信令。
+     */
+    const val AUD = "aud"
+
     /** 手势消息的 k 值：只有整笔轨迹走快道，其余一律有序道 */
     fun isGesture(k: String): Boolean = k == "g"
 

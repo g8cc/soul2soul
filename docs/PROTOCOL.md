@@ -198,19 +198,24 @@
 - `GET /voice/<id>?deviceId=&token=` — 仅**收件人本人**可下载（`MessageBook.hasVoice` 校验该语音确在其未读箱中），返回 `audio/mp4`；非收件人/错误 token 403，文件已删 404。
 - 客户端上传的 token/deviceId 与 WebSocket hello 相同（Prefs 持久化的 pairToken）。
 
-## 3. DataChannel 三通道
+## 3. DataChannel 通道
 
-共享端（offerer）创建三条通道（WebRtcClient，创建顺序 ctl → ctlg → anno，旧观看端"后到者覆盖"最终仍持有 anno）：
+共享端（offerer）创建四条通道（WebRtcClient，创建顺序 ctl → ctlg → aud → anno，旧观看端"后到者覆盖"最终仍持有 anno）：
 
-| 通道 | label | 传输 | 用途 |
-|---|---|---|---|
-| anno | `anno` | 不可靠（可丢包） | 笔迹、表情、特效、锁屏状态 |
-| ctl | `ctl` | 可靠有序 | 画质请求、被拒/错误通知等必须保序的信令 |
-| ctlg | `ctlg` | 可靠无序 | 临时远程协助手势整笔（v0.2.40：消 ctl 队头阻塞） |
+| 通道 | label | 传输 | 载荷 | 用途 |
+|---|---|---|---|---|
+| anno | `anno` | 不可靠（可丢包） | JSON | 笔迹、表情、特效、锁屏状态 |
+| ctl | `ctl` | 可靠有序 | JSON | 画质请求、被拒/错误通知等必须保序的信令 |
+| ctlg | `ctlg` | 可靠无序 | JSON | 临时远程协助手势整笔（v0.2.40：消 ctl 队头阻塞） |
+| aud | `aud` | 不可靠、不重传 | **二进制** | 设备内录音频帧（FR-16）：`[1B codec id][7B ADTS][AU]`，AAC-LC 48kHz 立体声 |
 
-观看端按 label 分流；通道存在即握手（旧版对端无 ctl 通道 → 不开放临时协助模式）。所有消息为 JSON，路由字段 `k`。
+观看端按 label 分流；通道存在即握手（旧版对端无 ctl 通道 → 不开放临时协助模式）。所有 JSON 消息路由字段 `k`。
+**`aud` 是唯一一条"存在≠可用"的通道**：它由共享端自己创建，所以对面认不认得它只能由对面亲口回 `audok` 证明
+（见 §3.1）；观看端的 `onDataChannel` 因此必须逐个显式列出 label，**不许 else 兜底**——兜底会让任何新 label 顶掉
+anno 并 `unregisterObserver()`，涂鸦随即静默失效（不崩、无日志、通道还在）。
 画质请求优先走可靠 `ctl`；旧版对端没有 `ctl` 时回退到 `anno`，以保持跨版本兼容。
 手势优先走 `ctlg`；旧版共享端没有 `ctlg` 时回退 `ctl`。授权"允许/收回"绝不能上无序通道（乱序=隐私事故）。
+JSON 信令不许走 `aud`（`channelByLabel` 里 `aud` 显式返回 null）：把音频通道的背压传染给笔迹不是一句比喻。
 
 ### 3.1 k= 目录
 
@@ -225,7 +230,8 @@
 | `res` | ctl（旧版回退 anno） | `edge`(960/1280/1600/1920) | 切换画质档；共享端弱网会按 RTT/丢包/带宽/FPS 自动逐档降级。**Android 14+ 这一档只改码率上限、不改采集分辨率**（改分辨率会触发系统撤销录屏授权，见 §2.3 `qos_tick` 第 4 格），13 及以下仍是真的重开采集 |
 | `emoji` | anno | `e`(字符), `x`(0.15–0.85) | 屏幕飘表情 |
 | `fx` | anno | `t`: `bomb`/`gift`/`rocket` | 满屏互动特效 |
-| `g` | ctlg（旧版回退 ctl） | `pts`: [[xn,yn],…]（4 位小数截断），`dur`(ms) | 临时远程协助手势一笔一消息；共享端经无障碍 dispatchGesture 注入，仅在共享端明确允许本次协助时 |
+| `g` | ctlg（旧版回退 ctl） | `pts`: [[xn,yn],…]（4 位小数截断），`dur`(ms) | 远程协助手势一笔一消息；共享端经无障碍 dispatchGesture 注入，仅在共享端明确允许本次协助时 |
+| `audok` | ctl | `codec`(`aac`), `sr`(48000), `ch`(2) | **FR-16 新增**：观看端确认自己解得这路内录音频。只在**本端 `aud` 通道进入 OPEN 之后**发一次（通道没 OPEN 就 ack，对面会起一个帧送不出去的采集）。共享端收到才允许按开关起 `AudioPlaybackCapture`；参数逐项核对，任何一项对不上都按"不支持"处理。**这条是内录唯一的开闸依据**——`aud` 由共享端自己创建，通道非空证明不了对面的版本，所以不许用 `controlSupported` 那类"通道存在即支持"的口径推断它。旧观看端不会发这条，也不会认得 `aud` 通道以外的音频载荷（`onMessage` 起手就丢二进制）⇒ 对它们是纯惰性通道，不影响涂鸦 |
 
 共享端 → 观看端：
 

@@ -52,4 +52,86 @@ class AudWiringTest {
         assertTrue("else 必须在不 registerObserver 之前就返回，未知通道不能挂上本端 observer",
             tail.indexOfFirst { it.contains("return") } in 0 until tail.indexOfFirst { it.contains("registerObserver") })
     }
+
+    /** 取 `val X = …apply {` 起、到第一个同样缩进的 `}` 为止的整段（不用魔法行数窗口） */
+    private fun applyBlock(startAnchor: String): List<String> {
+        val lines = source()
+        val hits = lines.indices.filter { lines[it].contains(startAnchor) }
+        assertTrue("$startAnchor 应恰好出现一次，实际 ${hits.size} 次", hits.size == 1)
+        val start = hits[0]
+        val pad = " ".repeat(lines[start].takeWhile { it == ' ' }.length)
+        val end = ((start + 1)..lines.lastIndex).firstOrNull { lines[it] == "${pad}}" }
+            ?: error("找不到 $startAnchor 的收尾 }")
+        return lines.subList(start, end)
+    }
+
+    /**
+     * 共享端建通道的顺序不是风格问题：旧观看端（≤0.2.65）的 onDataChannel 是后到者覆盖，
+     * anno 必须最后建，否则新通道会把笔迹通道顶掉——涂鸦静默失效。
+     */
+    @Test
+    fun `audCreatedBeforeAnno`() {
+        val body = functionBody("fun startSharer(")
+        val aud = body.indexOfFirst { it.contains("createDataChannel(CtlChannelPolicy.AUD") }
+        val anno = body.indexOfFirst { it.contains("createDataChannel(\"anno\"") }
+        assertTrue("startSharer 里必须建 aud 通道", aud >= 0)
+        assertTrue("anno 必须仍然最后建（旧观看端后到者覆盖）：aud@$aud anno@$anno", aud < anno)
+    }
+
+    /** aud 是"过期即无用"的载荷：有序会造队头阻塞，重传会送旧帧，两者都必须关着 */
+    @Test
+    fun `audInitIsUnorderedAndUnretransmitting`() {
+        val block = applyBlock("val audInit = DataChannel.Init().apply {")
+        assertTrue("aud 必须 unordered", block.any { it.contains("ordered = false") })
+        assertTrue("aud 必须不重传", block.any { it.contains("maxRetransmits = 0") })
+    }
+
+    /**
+     * WebRtcClient 自己的 onMessage 起手就是 `if (buffer.binary) return`，
+     * 复用 this 当 aud 的 observer＝音频帧全部被丢掉（不崩、无日志、通道 OPEN），
+     * 顺带每次音频通道状态变化还会重发一次画质请求。
+     */
+    @Test
+    fun `audUsesDedicatedObserver`() {
+        val body = functionBody("private fun audObserverFor(")
+        assertTrue("aud 的 observer 必须是独立对象（不许复用 this）",
+            body.first().contains("object : DataChannel.Observer"))
+        val onMessage = body.indexOfFirst { it.contains("override fun onMessage(") }
+        assertTrue("aud observer 必须实现 onMessage", onMessage >= 0)
+        assertTrue("aud 的文本载荷必须显式拒绝（这条通道只走二进制）",
+            body.drop(onMessage).take(3).any { it.contains("if (!buffer.binary)") })
+        val dispatch = functionBody("override fun onDataChannel(")
+        val audCase = dispatch.indexOfFirst { it.contains("CtlChannelPolicy.AUD ->") }
+        assertTrue("onDataChannel 必须显式接管 aud", audCase >= 0)
+        assertTrue("aud 分支必须注册专属 observer，不能落到结尾的 registerObserver(this)",
+            dispatch.subList(audCase, dispatch.size).any { it.contains("audObserverFor(") })
+        val created = functionBody("fun startSharer(")
+        assertTrue("共享端自己建的 aud 也必须挂专属 observer",
+            created.any { it.contains("registerObserver(audObserverFor(") })
+    }
+
+    /**
+     * ack 只能压在"通道真的 OPEN"之后：通道没通就 ack，对面会起一个帧送不出去的采集
+     * （表现是"她开了开关、我这边啥也没有"，正是最难查的那类假成功）。
+     */
+    @Test
+    fun `audAckWaitsForChannelOpen`() {
+        val body = functionBody("private fun sendAudAckOnce(")
+        val open = body.indexOfFirst { it.contains("DataChannel.State.OPEN") }
+        val send = body.indexOfFirst { it.contains("sendControlNow(") }
+        assertTrue("sendAudAckOnce 必须先判 OPEN 再发 ack（open@$open send@$send）", open in 0 until send)
+        assertTrue("audok 必须走 ctl（有序可靠），不许图省事发到刚建的 aud 上",
+            body.any { it.contains("DeviceAudioHandshake.ackJson()") })
+    }
+
+    /** 通道选择表也不许 else 兜底：未知 label 悄悄落到 anno＝把背压传染给笔迹 */
+    @Test
+    fun `channelByLabel_hasNoCatchAllToAnno`() {
+        val body = functionBody("private fun channelByLabel(")
+        val elseIdx = body.indexOfFirst { it.trim().startsWith("else ->") }
+        assertTrue("channelByLabel 必须穷举（找不到 else）", elseIdx >= 0)
+        val tail = body.drop(elseIdx)
+        assertTrue("else 分支不许返回 dataChannel：$tail", tail.none { it.contains("dataChannel") })
+        assertTrue("anno 必须有自己的显式分支", body.any { it.contains("CtlChannelPolicy.ANNO ->") })
+    }
 }
