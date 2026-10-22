@@ -225,4 +225,30 @@ class DeviceAudioPolicyTest {
             )
         }
     }
+
+    /**
+     * `aud_tick` 的字段布局只认这一处。10-22 双模拟器只有 `l_` 一个丢弃数时，
+     * "编码器囤死不吃输入"与"`aud` 通道没开"读出来完全一样（`q_` 在通道为 null 时也是 0），
+     * 根因只能靠关开关重开去试。分成 di/do/ds 三段之后，这条字符串就是那张表。
+     */
+    @Test
+    fun audTickDetail_keepsDropCauseSplitAndBytesTrackSends() {
+        assertEquals(
+            "d_21_q_0_l_469_di_469_do_0_ds_0_b_0",
+            DeviceAudioPolicy.audTickDetail(
+                avgPacingMs = 21, bufferedBytes = 0, dropped = 469,
+                stalledInput = 469, stalledOutput = 0, refusedSend = 0,
+                sentFrames = 0, nominalFrameBytes = 349,
+            ),
+        )
+        // 背压那条路只能落在 ds_：它与 di_ 的出路完全不同（一个是通道没了，一个是编码器坏了）
+        assertEquals(
+            "d_20_q_12000_l_7_di_0_do_2_ds_5_b_3490",
+            DeviceAudioPolicy.audTickDetail(
+                avgPacingMs = 20, bufferedBytes = 12_000, dropped = 7,
+                stalledInput = 0, stalledOutput = 2, refusedSend = 5,
+                sentFrames = 10, nominalFrameBytes = 349,
+            ),
+        )
+    }
 }

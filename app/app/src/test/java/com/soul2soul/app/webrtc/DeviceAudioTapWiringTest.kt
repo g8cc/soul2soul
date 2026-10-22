@@ -228,12 +228,12 @@ class DeviceAudioTapWiringTest {
     fun `lastFailureIsSetBeforeStateEdgeAndClearedOnStart`() {
         val tap = file(tapPath)
         val body = functionBody(tap, "private fun loop(")
-        val set = body.indexOfFirst { it.contains("lastFailure = exit") }
+        val set = body.indexOfFirst { it.contains("lastFailure = cause") }
         val edge = body.indexOfFirst { it.contains("onStateEdge(DeviceAudioPolicy.STATE_SILENT)") }
         val stopped = body.indexOfFirst { it.contains("\"aud_stopped\"") }
         assertTrue("finally 必须记失败原因", set >= 0)
         assertTrue("只许记 record/codec 两类自杀（人为停止不是失败）",
-            tap.any { it.contains("exit == Exit.RECORD_ERROR || exit == Exit.CODEC_ERROR") })
+            tap.any { it.contains("cause == Exit.RECORD_ERROR || cause == Exit.CODEC_ERROR") })
         assertTrue("lastFailure 必须在状态沿之前落位，否则快照读到的还是旧值 set@$set edge@$edge",
             set in 0 until edge)
         assertTrue("aud_stopped 必须在记完失败之后发 stopped@$set", set < stopped)
@@ -242,5 +242,65 @@ class DeviceAudioTapWiringTest {
         val publisher = functionBody(file(servicePath), "private fun publishAudStatus(")
         assertTrue("快照必须带 captureFailed（不带＝失败又被读成\"还在等\"）",
             publisher.any { it.contains("captureFailed = audTap?.lastFailure != null") })
+    }
+
+    /**
+     * `stop(出口名)` 的参数必须真的走到 `aud_stopped` 的 tag 上。
+     * 10-22 双模拟器实测：这一条没被锁住的时候，`stop(exit)` 收下 exit 却什么都不做，
+     * 线程用的是自己那个 `var exit = Exit.SESSION_CLOSE` 默认值——于是关开关、撤授权、
+     * 通道关闭、服务销毁**全打成 `r_session_close`**，"七条出口各出一条读数"这句话
+     * 在矩阵里是假的（`audTapStopCoversAllSevenExits` 只查调用点在不在，查不出参数被丢）。
+     */
+    @Test
+    fun `stopPropagatesExitToStoppedTag`() {
+        val tap = file(tapPath)
+        val stop = functionBody(tap, "    fun stop(")
+        val mark = stop.indexOfFirst { it.contains("pendingExit = exit") }
+        val wake = stop.indexOfFirst { it.contains("running = false") }
+        assertTrue("stop() 必须把出口名记进 pendingExit（记了 ≠ 传到了，见 loop 那条）", mark >= 0)
+        assertTrue("必须先记原因再叫醒线程：反了就是竞态，线程可能带着默认值先把这条报掉 mark@$mark wake@$wake",
+            mark in 0 until wake)
+        val start = functionBody(tap, "    fun start(")
+        assertTrue("start 必须清零上一次的外因，否则重开一次会把上一通的停法报成新的一通",
+            start.any { it.contains("pendingExit = null") })
+
+        val loop = functionBody(tap, "private fun loop(")
+        assertTrue("finally 必须用「外因优先、线程死因兜底」取值",
+            loop.any { it.contains("val cause = pendingExit ?: exit") })
+        assertTrue("aud_stopped 的 tag 只能来自 cause", loop.any { it.contains("\"r_\${cause.tag}\"") })
+        assertTrue("不许再把线程的默认值直接当结论发出去",
+            loop.none { it.contains("\"r_\${exit.tag}\"") })
+        assertTrue("线程没人叫却退出了，只能读成采集失败，不许写 session_close（那是替别人编原因）",
+            loop.none { it.contains("var exit = Exit.SESSION_CLOSE") })
+    }
+
+    /**
+     * 编码器输出必须**收干**，不是"每次只取一帧"。
+     * 10-22 实测：只取一帧时内录跑约 80s 后 `b_0` 一帧都发不出去（PCM 还在读到非零，状态行照报"正在听"），
+     * 只有重新 start() 换一台编码器才恢复——输出队列囤满后编码器不再吃输入，`dequeueInputBuffer` 恒返
+     * TRY_AGAIN_LATER。并且丢帧必须分段计（`di_/do_/ds_`）：只有一个 `l_` 的时候，
+     * "编码器囤死"与"`aud` 通道没开"在日志里长得一模一样（`q_` 在通道为 null 时同样读 0）。
+     */
+    @Test
+    fun `encoderOutputIsDrainedAndDropCauseIsSplit`() {
+        val tap = file(tapPath)
+        val encode = functionBody(tap, "private fun encodeOneFrame(")
+        assertTrue("必须循环把可用输出取走（只 dequeue 一次＝囤积的那条路）",
+            encode.any { it.contains("while (drained < MAX_DRAIN_PER_FRAME)") })
+        assertTrue("循环必须有上限，不许在采集线程里无限收",
+            tap.any { it.contains("private const val MAX_DRAIN_PER_FRAME") })
+        assertTrue("旧的「取一帧就走」形状不许回潮", encode.none { it.contains("if (outIdx < 0) return Frame.DROPPED") })
+        assertTrue("丢在哪一段必须分开记：编码器不吃输入",
+            encode.any { it.contains("ledger.stalledInput++") })
+        assertTrue("丢在哪一段必须分开记：编码器没吐输出",
+            encode.any { it.contains("ledger.stalledOutput++") })
+        assertTrue("丢在哪一段必须分开记：通道拒收",
+            encode.any { it.contains("ledger.refusedSend++") })
+        assertTrue("dequeueOutputBuffer 抛异常不许静默算丢掉（旧代码 getOrDefault(-1) 之后一律 DROPPED，" +
+            "编码器坏了却只会看到丢帧）",
+            encode.any { it.contains("if (outIdx == MediaCodec.INFO_TRY_AGAIN_LATER)") })
+        val loop = functionBody(tap, "private fun loop(")
+        assertTrue("tick 明细只能出自 DeviceAudioPolicy.audTickDetail（字段名要有唯一出处，PROTOCOL 才对得上）",
+            loop.any { it.contains("DeviceAudioPolicy.audTickDetail(") })
     }
 }

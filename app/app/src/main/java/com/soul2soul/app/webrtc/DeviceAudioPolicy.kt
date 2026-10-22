@@ -203,4 +203,30 @@ object DeviceAudioPolicy {
 
     fun sendAdmission(bufferedBytes: Int): SendAdmission =
         if (bufferedBytes > SEND_MAX_BUFFERED_BYTES) SendAdmission.DROP else SendAdmission.SEND
+
+    /**
+     * `aud_tick` 的 detail 只在这一处拼装（PROTOCOL 那张读数表要有唯一出处）。
+     *
+     * `l_` 是总丢弃，`di_/do_/ds_` 回答"丢在哪一段"：编码器不吃输入 / 不吐输出 / 通道拒收。
+     * 10-22 之前只有 `l_`，于是"内录跑 80 秒后一帧都发不出去"这一条读数里，
+     * 编码器囤死与 `aud` 通道没开长得一模一样（`q_` 也不区分——通道为 null 时它同样读 0），
+     * 只能靠关开关重开去试。三段分开写之后，`di_` 一路涨就是编码器那条路，不用再猜。
+     */
+    fun audTickDetail(
+        avgPacingMs: Long,
+        bufferedBytes: Int,
+        dropped: Int,
+        stalledInput: Int,
+        stalledOutput: Int,
+        refusedSend: Int,
+        sentFrames: Int,
+        nominalFrameBytes: Int,
+    ): String =
+        "d_$avgPacingMs" +
+            "_q_$bufferedBytes" +
+            "_l_$dropped" +
+            "_di_$stalledInput" +
+            "_do_$stalledOutput" +
+            "_ds_$refusedSend" +
+            "_b_${sentFrames * nominalFrameBytes}"
 }

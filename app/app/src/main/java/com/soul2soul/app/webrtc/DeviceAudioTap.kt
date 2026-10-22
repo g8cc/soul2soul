@@ -54,7 +54,24 @@ class DeviceAudioTap(
         REBIND("rebind"),
     }
 
-    private enum class Frame { SENT, DROPPED, BROKEN }
+    /**
+     * 一个遥测窗口内的账本。**谁把这一帧丢了，只有那一段自己知道**：
+     * 10-22 双模拟器只有 `l_469_b_0` 一个数时，"编码器不吃输入"与"`aud` 通道没开"在日志里长得一模一样，
+     * 只能靠关开关重开来试（本轮就是这样把根因钉在编码器上的）。
+     */
+    private class DropLedger {
+        var sentFrames = 0
+        var stalledInput = 0
+        var stalledOutput = 0
+        var refusedSend = 0
+        val dropped: Int get() = stalledInput + stalledOutput + refusedSend
+        fun reset() {
+            sentFrames = 0
+            stalledInput = 0
+            stalledOutput = 0
+            refusedSend = 0
+        }
+    }
 
     /**
      * 遥测的唯一出口。名字必须写成 `fun X(event: String, …)` 这个形状：
@@ -66,6 +83,16 @@ class DeviceAudioTap(
 
     @Volatile private var running = false
     private var thread: Thread? = null
+
+    /**
+     * 停机原因由 [stop] 传进来，**不**由线程自己猜（与 [DeviceAudioPlayer] 的 pendingExit 同一条纪律）：
+     * 采集线程被叫醒时只看见"running 变了"这一件事，回答不了"是她关的开关、系统撤的授权、
+     * 还是这通结束了"。
+     * ⚠️ 10-22 双模拟器实测：这个字段不存在的那版，`stop(exit)` 把参数直接丢了，
+     * 六条外因出口的 `aud_stopped` 全打成 `r_session_close`——遥测把"谁叫它停的"这唯一的问题
+     * 答成了一个常量，矩阵里那一整列都是假的。
+     */
+    @Volatile private var pendingExit: Exit? = null
 
     /** stop() 要叫醒阻塞中的 read()，所以采集句柄得跨线程可见（release 仍只在线程里做） */
     @Volatile private var record: AudioRecord? = null
@@ -95,6 +122,7 @@ class DeviceAudioTap(
         running = true
         state = DeviceAudioPolicy.STATE_LIVE
         lastFailure = null
+        pendingExit = null
         thread = Thread({ loop(startReason) }, "DeviceAudioTap").also { it.isDaemon = true; it.start() }
         return true
     }
@@ -103,6 +131,8 @@ class DeviceAudioTap(
     @Synchronized
     fun stop(exit: Exit) {
         if (!running) return
+        // 先记原因再叫线程：反过来的话线程可能已经带着"没有外因"的默认值把这条报了
+        pendingExit = exit
         running = false
         // 阻塞式 read() 不会自己醒：stop() 是唯一能把它叫醒的动作。
         // 只 stop 不 release——跨线程 release 是竞态，释放由线程 finally 负责。
@@ -112,7 +142,9 @@ class DeviceAudioTap(
     }
 
     private fun loop(startReason: String) {
-        var exit = Exit.SESSION_CLOSE
+        // 线程**自己**的死因；没死在自己手上时它是 RECORD_ERROR——采集线程"没人叫它停却退出了"
+        // 只可能是读不出声，这一格不许写成 session_close（那是替别人编原因）。
+        var exit = Exit.RECORD_ERROR
         var encoder: MediaCodec? = null
         var localRecord: AudioRecord? = null
         try {
@@ -181,16 +213,15 @@ class DeviceAudioTap(
 
             val pcm = ShortArray(AudioFrameCodec.SAMPLES_PER_FRAME * AudioFrameCodec.CHANNELS)
             val info = MediaCodec.BufferInfo()
+            val ledger = DropLedger()
             var fill = 0
             var silentStreak = 0
-            var droppedFrames = 0
             var frameIndex = 0L
             var silentReported = false
             var lastFrameAt = SystemClock.elapsedRealtime()
             var tickStartedAt = lastFrameAt
             var pacingMs = 0L
             var framesInTick = 0
-            var bytesInTick = 0L
 
             while (running) {
                 // 攒满一整帧（1024 样本/声道）再喂编码器：AAC 的输入粒度就是这个数
@@ -224,34 +255,30 @@ class DeviceAudioTap(
                 }
                 if (silentStreak == 0) silentReported = false
 
-                when (encodeOneFrame(encoder, pcm, info, frameIndex)) {
-                    Frame.SENT -> {
-                        frameIndex++
-                        bytesInTick += FRAME_BYTES_TYPICAL
-                    }
-                    Frame.DROPPED -> {
-                        frameIndex++
-                        droppedFrames++
-                    }
-                    Frame.BROKEN -> {
-                        exit = Exit.CODEC_ERROR
-                        break
-                    }
+                if (encodeOneFrame(encoder, pcm, info, frameIndex, ledger)) {
+                    exit = Exit.CODEC_ERROR
+                    break
                 }
+                frameIndex++
 
                 if (now - tickStartedAt >= TICK_INTERVAL_MS) {
                     audEvent(
                         "aud_tick",
-                        "d_${pacingMs / maxOf(1, framesInTick)}" +
-                            "_q_${bufferedBytesOf()}" +
-                            "_l_$droppedFrames" +
-                            "_b_$bytesInTick",
+                        DeviceAudioPolicy.audTickDetail(
+                            avgPacingMs = pacingMs / maxOf(1, framesInTick),
+                            bufferedBytes = bufferedBytesOf(),
+                            dropped = ledger.dropped,
+                            stalledInput = ledger.stalledInput,
+                            stalledOutput = ledger.stalledOutput,
+                            refusedSend = ledger.refusedSend,
+                            sentFrames = ledger.sentFrames,
+                            nominalFrameBytes = FRAME_BYTES_TYPICAL,
+                        ),
                     )
                     tickStartedAt = now
                     pacingMs = 0L
                     framesInTick = 0
-                    bytesInTick = 0L
-                    droppedFrames = 0
+                    ledger.reset()
                 }
             }
         } catch (e: Exception) {
@@ -259,9 +286,11 @@ class DeviceAudioTap(
             exit = Exit.RECORD_ERROR
         } finally {
             running = false
+            // 外因优先：stop(出口名) 说得出"谁叫它停的"，线程自己说不出来（见 pendingExit）
+            val cause = pendingExit ?: exit
             runCatching { encoder?.stop() }
             runCatching { encoder?.release() }
-            if (exit == Exit.RECORD_ERROR || exit == Exit.CODEC_ERROR) lastFailure = exit
+            if (cause == Exit.RECORD_ERROR || cause == Exit.CODEC_ERROR) lastFailure = cause
             runCatching { localRecord?.stop() }
             runCatching { localRecord?.release() }
             record = null
@@ -271,19 +300,35 @@ class DeviceAudioTap(
                 // 知道"采集已经不在了"的唯一机会，少了它状态行会停在"正在听"上撒谎
                 onStateEdge(DeviceAudioPolicy.STATE_SILENT)
             }
-            audEvent("aud_stopped", "r_${exit.tag}")
+            audEvent("aud_stopped", "r_${cause.tag}")
         }
     }
 
     /**
-     * 一帧 PCM → 一帧 AAC → `aud` 通道。
-     * 超时/拿不到缓冲一律算 [Frame.DROPPED] 而不是重试：音频是"过期即无用"的数据，
+     * 一帧 PCM 投喂给编码器，并把编码器**此刻能给的输出全收走**（上限 [MAX_DRAIN_PER_FRAME]）。
+     * 返回 true = 编码器状态不明（调用抛异常），线程必须立刻收摊。
+     *
+     * 为什么是"收干"而不是"收一帧"：只取一帧时，只要编码器某次一次吐两帧（起流头几拍、
+     * CBR 的填充帧），输出队列就永久多囤一个；囤满之后它不再吃新输入，`dequeueInputBuffer`
+     * 从此恒返 TRY_AGAIN_LATER。10-22 双模拟器实测：内录正常跑约 80s 后 `b_0` 一帧都发不出去，
+     * 而 PCM 明明还在读到非零（状态行报"正在听"）——只有重新 start()（换一台编码器）才恢复。
+     *
+     * 拿不到缓冲一律算丢掉而不是重试：音频是"过期即无用"的数据，
      * 在采集线程里等编码器只会让后面的活帧一起迟到。
      */
-    private fun encodeOneFrame(encoder: MediaCodec, pcm: ShortArray, info: MediaCodec.BufferInfo, frameIndex: Long): Frame {
-        val inIdx = runCatching { encoder.dequeueInputBuffer(INPUT_TIMEOUT_US) }.getOrDefault(-1)
-        if (inIdx < 0) return if (inIdx == MediaCodec.INFO_TRY_AGAIN_LATER) Frame.DROPPED else Frame.BROKEN
-        val inBuf = encoder.getInputBuffer(inIdx) ?: return Frame.BROKEN
+    private fun encodeOneFrame(
+        encoder: MediaCodec,
+        pcm: ShortArray,
+        info: MediaCodec.BufferInfo,
+        frameIndex: Long,
+        ledger: DropLedger,
+    ): Boolean {
+        val inIdx = runCatching { encoder.dequeueInputBuffer(INPUT_TIMEOUT_US) }.getOrDefault(ERROR)
+        if (inIdx < 0) {
+            if (inIdx == MediaCodec.INFO_TRY_AGAIN_LATER) ledger.stalledInput++
+            return inIdx != MediaCodec.INFO_TRY_AGAIN_LATER
+        }
+        val inBuf = encoder.getInputBuffer(inIdx) ?: return true
         inBuf.clear()
         // ByteBuffer 默认大端，PCM16 是小端——写反的现象是"能播，全是噪音"
         inBuf.order(ByteOrder.LITTLE_ENDIAN)
@@ -291,23 +336,42 @@ class DeviceAudioTap(
         val ptsUs = frameIndex * 1_000_000L * AudioFrameCodec.SAMPLES_PER_FRAME / AudioFrameCodec.SAMPLE_RATE
         encoder.queueInputBuffer(inIdx, 0, pcm.size * 2, ptsUs, 0)
 
-        val outIdx = runCatching { encoder.dequeueOutputBuffer(info, OUTPUT_TIMEOUT_US) }.getOrDefault(-1)
-        if (outIdx < 0) return Frame.DROPPED  // 没凑出一帧：21ms 的粒度上这就是"下一拍再说"
-        val outBuf = encoder.getOutputBuffer(outIdx)
-        // csd-0 不上通道：`aud` 是不可靠通道，"唯一一次配置帧可能丢"的设计本来就是错的，
-        // 对端按同一组常量本地拼（见 AudioFrameCodec.audioSpecificConfig）
-        val isConfig = info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0
-        if (outBuf == null || isConfig || info.size <= 0) {
+        var drained = 0
+        while (drained < MAX_DRAIN_PER_FRAME) {
+            // 第一帧按原节奏等，后面几帧只探一下：憋着的输出要拿走，但不许拿成一次长阻塞
+            val outIdx = runCatching {
+                encoder.dequeueOutputBuffer(info, if (drained == 0) OUTPUT_TIMEOUT_US else 0L)
+            }.getOrDefault(ERROR)
+            if (outIdx < 0) {
+                if (outIdx == MediaCodec.INFO_TRY_AGAIN_LATER) {
+                    // 一帧都没凑出来算"没吐出"；已经拿走几帧就不算（那一拍是赚的）
+                    if (drained == 0) ledger.stalledOutput++
+                    return false
+                }
+                return true
+            }
+            drained++
+            val outBuf = encoder.getOutputBuffer(outIdx)
+            // csd-0 不上通道：`aud` 是不可靠通道，"唯一一次配置帧可能丢"的设计本来就是错的，
+            // 对端按同一组常量本地拼（见 AudioFrameCodec.audioSpecificConfig）
+            val isConfig = info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0
+            if (outBuf == null || isConfig || info.size <= 0) {
+                runCatching { encoder.releaseOutputBuffer(outIdx, false) }
+                if (drained == 1) ledger.stalledOutput++
+                continue
+            }
+            val au = ByteArray(info.size)
+            outBuf.position(info.offset)
+            outBuf.limit(info.offset + info.size)
+            outBuf.get(au)
             runCatching { encoder.releaseOutputBuffer(outIdx, false) }
-            return Frame.DROPPED
+            if (au.size > AudioFrameCodec.MAX_AU_BYTES) {
+                ledger.refusedSend++
+                continue
+            }
+            if (sink(AudioFrameCodec.wrap(au))) ledger.sentFrames++ else ledger.refusedSend++
         }
-        val au = ByteArray(info.size)
-        outBuf.position(info.offset)
-        outBuf.limit(info.offset + info.size)
-        outBuf.get(au)
-        runCatching { encoder.releaseOutputBuffer(outIdx, false) }
-        if (au.size > AudioFrameCodec.MAX_AU_BYTES) return Frame.DROPPED
-        return if (sink(AudioFrameCodec.wrap(au))) Frame.SENT else Frame.DROPPED
+        return false
     }
 
     private fun newEncoder(): MediaCodec {
@@ -330,6 +394,15 @@ class DeviceAudioTap(
         private const val INPUT_TIMEOUT_US = 5_000L
         private const val OUTPUT_TIMEOUT_US = 5_000L
         private const val JOIN_TIMEOUT_MS = 500L
+
+        /** runCatching 失败时的哨兵值：-1 既不是合法索引也不是 INFO_TRY_AGAIN_LATER(-11) */
+        private const val ERROR = -1
+
+        /**
+         * 一次投喂最多拿走几帧输出。封顶 4 是因为正常比例就是 1:1，>1 只发生在编码器憋了一拍之后；
+         * 不封顶的话一次突发会把 21ms 粒度的采集线程按住几十毫秒，反而制造迟到。
+         */
+        private const val MAX_DRAIN_PER_FRAME = 4
 
         /** 一帧 PCM 字节数：1024 样本 × 2 声道 × 2 字节 */
         private const val BYTES_PER_FRAME =
