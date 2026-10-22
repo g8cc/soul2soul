@@ -323,7 +323,7 @@ class DeviceAudioTap(
         frameIndex: Long,
         ledger: DropLedger,
     ): Boolean {
-        val inIdx = runCatching { encoder.dequeueInputBuffer(INPUT_TIMEOUT_US) }.getOrDefault(ERROR)
+        val inIdx = runCatching { encoder.dequeueInputBuffer(INPUT_TIMEOUT_US) }.getOrDefault(EXCEPTION)
         if (inIdx < 0) {
             if (inIdx == MediaCodec.INFO_TRY_AGAIN_LATER) ledger.stalledInput++
             return inIdx != MediaCodec.INFO_TRY_AGAIN_LATER
@@ -336,28 +336,28 @@ class DeviceAudioTap(
         val ptsUs = frameIndex * 1_000_000L * AudioFrameCodec.SAMPLES_PER_FRAME / AudioFrameCodec.SAMPLE_RATE
         encoder.queueInputBuffer(inIdx, 0, pcm.size * 2, ptsUs, 0)
 
-        var drained = 0
-        while (drained < MAX_DRAIN_PER_FRAME) {
+        var produced = 0
+        for (attempt in 0 until MAX_DRAIN_PER_FRAME) {
             // 第一帧按原节奏等，后面几帧只探一下：憋着的输出要拿走，但不许拿成一次长阻塞
             val outIdx = runCatching {
-                encoder.dequeueOutputBuffer(info, if (drained == 0) OUTPUT_TIMEOUT_US else 0L)
-            }.getOrDefault(ERROR)
+                encoder.dequeueOutputBuffer(info, if (attempt == 0) OUTPUT_TIMEOUT_US else 0L)
+            }.getOrDefault(EXCEPTION)
+            if (outIdx == MediaCodec.INFO_TRY_AGAIN_LATER) break
             if (outIdx < 0) {
-                if (outIdx == MediaCodec.INFO_TRY_AGAIN_LATER) {
-                    // 一帧都没凑出来算"没吐出"；已经拿走几帧就不算（那一拍是赚的）
-                    if (drained == 0) ledger.stalledOutput++
-                    return false
-                }
+                // 负数里只有这两个不是故障（10-22 实测：把它们当致命 ⇒ 起采 300ms 就 self-kill
+                // `aud_stopped r_codec_error`，一条声音都出不去；AAC 编码器起来时必定先报一次 format changed）
+                if (outIdx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED ||
+                    outIdx == MediaCodec.INFO_OUTPUT_BUFFERS_CHANGED
+                ) continue
                 return true
             }
-            drained++
+            produced++
             val outBuf = encoder.getOutputBuffer(outIdx)
             // csd-0 不上通道：`aud` 是不可靠通道，"唯一一次配置帧可能丢"的设计本来就是错的，
             // 对端按同一组常量本地拼（见 AudioFrameCodec.audioSpecificConfig）
             val isConfig = info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0
             if (outBuf == null || isConfig || info.size <= 0) {
                 runCatching { encoder.releaseOutputBuffer(outIdx, false) }
-                if (drained == 1) ledger.stalledOutput++
                 continue
             }
             val au = ByteArray(info.size)
@@ -371,6 +371,8 @@ class DeviceAudioTap(
             }
             if (sink(AudioFrameCodec.wrap(au))) ledger.sentFrames++ else ledger.refusedSend++
         }
+        // "投喂了一帧却一个输出缓冲都没拿到"——单独计数，别混进"通道拒收"
+        if (produced == 0) ledger.stalledOutput++
         return false
     }
 
@@ -395,12 +397,17 @@ class DeviceAudioTap(
         private const val OUTPUT_TIMEOUT_US = 5_000L
         private const val JOIN_TIMEOUT_MS = 500L
 
-        /** runCatching 失败时的哨兵值：-1 既不是合法索引也不是 INFO_TRY_AGAIN_LATER(-11) */
-        private const val ERROR = -1
+        /**
+         * runCatching 失败时的哨兵值。**刻意不用 -1**：`INFO_TRY_AGAIN_LATER` 就是 -1，
+         * 拿它当"异常"会把抛异常读成"编码器忙"（线程继续空转、故障被藏起来）。
+         */
+        private const val EXCEPTION = Int.MIN_VALUE
 
         /**
-         * 一次投喂最多拿走几帧输出。封顶 4 是因为正常比例就是 1:1，>1 只发生在编码器憋了一拍之后；
-         * 不封顶的话一次突发会把 21ms 粒度的采集线程按住几十毫秒，反而制造迟到。
+         * 一次投喂最多**探**几拍输出（正常比例就是 1:1，多出来的只发生在编码器憋了一拍之后）。
+         * 封顶是因为：不封顶的话一次突发会把 21ms 粒度的采集线程按住几十毫秒，反而制造迟到。
+         * 数的是"尝试次数"而不是"拿到的帧数"——`INFO_OUTPUT_FORMAT_CHANGED` 这类负数码不占产出，
+         * 但也必须有上界，否则编码器一直回报就会在这里空转。
          */
         private const val MAX_DRAIN_PER_FRAME = 4
 

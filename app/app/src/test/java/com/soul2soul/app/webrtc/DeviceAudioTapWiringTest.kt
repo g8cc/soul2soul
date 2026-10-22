@@ -286,19 +286,36 @@ class DeviceAudioTapWiringTest {
         val tap = file(tapPath)
         val encode = functionBody(tap, "private fun encodeOneFrame(")
         assertTrue("必须循环把可用输出取走（只 dequeue 一次＝囤积的那条路）",
-            encode.any { it.contains("while (drained < MAX_DRAIN_PER_FRAME)") })
+            encode.any { it.contains("for (attempt in 0 until MAX_DRAIN_PER_FRAME)") })
         assertTrue("循环必须有上限，不许在采集线程里无限收",
             tap.any { it.contains("private const val MAX_DRAIN_PER_FRAME") })
         assertTrue("旧的「取一帧就走」形状不许回潮", encode.none { it.contains("if (outIdx < 0) return Frame.DROPPED") })
         assertTrue("丢在哪一段必须分开记：编码器不吃输入",
             encode.any { it.contains("ledger.stalledInput++") })
         assertTrue("丢在哪一段必须分开记：编码器没吐输出",
-            encode.any { it.contains("ledger.stalledOutput++") })
+            encode.any { it.contains("if (produced == 0) ledger.stalledOutput++") })
         assertTrue("丢在哪一段必须分开记：通道拒收",
             encode.any { it.contains("ledger.refusedSend++") })
-        assertTrue("dequeueOutputBuffer 抛异常不许静默算丢掉（旧代码 getOrDefault(-1) 之后一律 DROPPED，" +
-            "编码器坏了却只会看到丢帧）",
-            encode.any { it.contains("if (outIdx == MediaCodec.INFO_TRY_AGAIN_LATER)") })
+        // 10-22 装上新 drain 循环后的第一条真读数就是这条：编码器起来必报一次 format changed，
+        // 把它当致命 ⇒ `aud_started` 之后 300ms 就 `aud_stopped r_codec_error`，声音一条都出不去。
+        // 锚点一律排除注释行：只在注释里提一句事件码，代码却仍把它当故障，是这族用例最容易的空锁。
+        fun liveCode(line: String): Boolean = !line.trim().startsWith("//")
+        assertTrue("INFO_OUTPUT_FORMAT_CHANGED 是正常事件，不许当故障",
+            encode.any { it.contains("MediaCodec.INFO_OUTPUT_FORMAT_CHANGED") && liveCode(it) })
+        assertTrue("INFO_OUTPUT_BUFFERS_CHANGED 同理",
+            encode.any { it.contains("MediaCodec.INFO_OUTPUT_BUFFERS_CHANGED") && liveCode(it) })
+        val format = encode.indexOfFirst { it.contains("MediaCodec.INFO_OUTPUT_FORMAT_CHANGED") && liveCode(it) }
+        val fatal = encode.indexOfFirst { it.trim() == "return true" }
+        assertTrue("先认正常负数码、再判致命（顺序反了就是把 format changed 杀了）format@$format fatal@$fatal",
+            format in 0 until fatal)
+        assertTrue("runCatching 的哨兵值不许撞 INFO_TRY_AGAIN_LATER(-1)：撞了就是把异常读成\"编码器忙\"",
+            tap.none { it.contains("private const val ERROR = -1") })
+        // `any` 在这一条上是空锁：函数里有两处 getOrDefault，改掉一处另一处照样让它绿——
+        // 要求是**每一处**都用那个不与负数码重叠的哨兵。
+        assertTrue("两处 getOrDefault 只能用那个不与负数码重叠的哨兵",
+            encode.filter { it.contains("getOrDefault(") && liveCode(it) }
+                .all { it.contains("getOrDefault(EXCEPTION)") } &&
+                encode.any { it.contains("getOrDefault(EXCEPTION)") && liveCode(it) })
         val loop = functionBody(tap, "private fun loop(")
         assertTrue("tick 明细只能出自 DeviceAudioPolicy.audTickDetail（字段名要有唯一出处，PROTOCOL 才对得上）",
             loop.any { it.contains("DeviceAudioPolicy.audTickDetail(") })
