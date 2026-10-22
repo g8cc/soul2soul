@@ -1,7 +1,6 @@
 package com.soul2soul.app.webrtc
 
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -50,34 +49,29 @@ class DeviceAudioPolicyTest {
         assertEquals(1, DeviceAudioPolicy.nextSilentStreak(0, 0))
         assertEquals(n - 1, DeviceAudioPolicy.nextSilentStreak(n - 2, 0))
         // 差一帧不算静音：一次气口/一瞬停顿就把状态打成"没声音"是假故障
-        assertEquals(DeviceAudioPolicy.STATE_LIVE, DeviceAudioPolicy.stateOf(n - 1, 0))
-        assertEquals(DeviceAudioPolicy.STATE_SILENT, DeviceAudioPolicy.stateOf(n, 0))
+        assertEquals(DeviceAudioPolicy.STATE_LIVE, DeviceAudioPolicy.stateOf(n - 1))
+        assertEquals(DeviceAudioPolicy.STATE_SILENT, DeviceAudioPolicy.stateOf(n))
     }
 
     @Test
-    fun oneNonZeroSampleResetsBlackStreak() {
+    fun oneNonZeroSampleResetsSilentStreak() {
         val streak = DeviceAudioPolicy.SILENT_STREAK_FRAMES
         assertEquals(0, DeviceAudioPolicy.nextSilentStreak(streak, 1))
-        assertEquals(0, DeviceAudioPolicy.nextBlackStreak(streak, false))
-        // 计数被清之后即便画面仍连续黑着，也不许再判 blocked：两条 streak 必须同一时刻都到底
-        assertEquals(DeviceAudioPolicy.STATE_LIVE, DeviceAudioPolicy.stateOf(0, streak))
+        assertEquals(DeviceAudioPolicy.STATE_LIVE, DeviceAudioPolicy.stateOf(0))
     }
 
+    /**
+     * 状态词汇表只有两态，且这是一条**反向**锁：谁想不加可信信号就回补一个 "blocked"，
+     * 这里会先红，逼他回到"公开 API 拿不到播放器状态"这个已核过的事实上
+     * （文件头记着两条候选路与各自的死因）。
+     */
     @Test
-    fun blockedRequiresAudioSilencePairedWithBlackVideo() {
-        val n = DeviceAudioPolicy.SILENT_STREAK_FRAMES
-        // 音频全零但画面不黑 ⇒ 只是"当时没声音在放"，绝不能升成"被屏蔽"
-        assertEquals(DeviceAudioPolicy.STATE_SILENT, DeviceAudioPolicy.stateOf(n, n - 1))
-        // 两路同一时刻都到底 ⇒ 这才是内容保护（DRM / FLAG_SECURE）的样子
-        assertEquals(DeviceAudioPolicy.STATE_BLOCKED, DeviceAudioPolicy.stateOf(n, n))
-    }
-
-    @Test
-    fun videoBlack_absenceOfReadingIsNotBlack() {
-        // 空输入 = 无读数。把"测不到"读成"黑屏"就会造出假 BLOCKED（video_stall 那 6 条假警的同族错法）
-        assertFalse(DeviceAudioPolicy.isVideoBlack(byteArrayOf()))
-        assertTrue(DeviceAudioPolicy.isVideoBlack(ByteArray(64) { 0 }))
-        assertFalse(DeviceAudioPolicy.isVideoBlack(ByteArray(64) { (it % 7 + 100).toByte() }))
+    fun statesAreLiveAndSilentOnly() {
+        assertEquals(setOf("live", "silent"), DeviceAudioPolicy.STATES)
+        (0..DeviceAudioPolicy.SILENT_STREAK_FRAMES * 4).forEach { s ->
+            assertTrue("stateOf($s) 越界：${DeviceAudioPolicy.stateOf(s)}",
+                DeviceAudioPolicy.stateOf(s) in DeviceAudioPolicy.STATES)
+        }
     }
 
     @Test

@@ -3,12 +3,23 @@ package com.soul2soul.app.webrtc
 /**
  * 「让TA听到我手机里的声音」的判定层（纯逻辑，可注入常量，JVM 可单测）。
  *
- * 这里只回答四个"该不该"的问题——起不起采集、算不算静音、算不算被屏蔽、要不要丢帧。
+ * 这里只回答四个"该不该"的问题——起不起采集、算不算静音、抖动队列要不要丢帧、发送要不要丢帧。
  * 采集/编解码/通道本体留在 Service 与 WebRtcClient 里，因为它们没法在 JVM 里跑。
  *
  * 全族判据共同遵守的一条纪律：**全零 PCM 本身不携带结论**。它既可能是"对方 App 禁止被录制"，
- * 也可能只是"当时没声音在放"，还可能是"她那边本来就静音"。所以任何"被屏蔽"的判定都必须
- * 与同一时刻的画面黑度配对才升级，单靠音频一路一律降级成"静音"（不写"坏了"）。
+ * 也可能只是"当时没声音在放"，还可能是"她那边本来就静音"。
+ *
+ * 计划里原本要求"与同一时刻的画面黑度配对"才升级成 blocked——**这一路在公开 API 上走不通**，
+ * 两个候选信号都核过：
+ * ① 逐帧亮度：ScreenCapturerAndroid 交出来的是纹理帧，取 Y 平面必须 `toI420()` 做一次
+ *    GPU→CPU 回读，每帧一遍等于在编码路径旁边再架一条贵路径，不为一个横幅文案值这个价。
+ * ② 系统侧"谁在放音"：`AudioManager.getActivePlaybackConfigurations()` 是公开的，但
+ *    `AudioPlaybackConfiguration` 只对第三方 App 公开 `getAudioAttributes()`——
+ *    `getPlayerState()`/`isCaptured()`/`canBeCapturedBy()` 全是 @hide（android-34 android.jar 里
+ *    javap 可见成员即全部），而"暂停中的播放器也留在活跃列表里"这一条恰恰需要那个隐藏状态。
+ * 结论：**没有可信的第二路信号，就不许有 blocked 这个状态**。UI 只报 live/silent，
+ * 静音文案必须把两种成因与出路一起说清；"当时有没有别的播放器活着"降级成一条遥测读数
+ * （`aud_silent detail=f_`），n=0 才允许读成"确实没东西在放"，n>0 什么都不证明。
  */
 object DeviceAudioPolicy {
 
@@ -38,9 +49,6 @@ object DeviceAudioPolicy {
      */
     const val SEND_MAX_BUFFERED_BYTES = 9_600
 
-    /** 判"画面是黑的"用到的亮度上界：8-bit YUV 里 16 就是消隐黑，比它低即认为全黑。 */
-    const val BLACK_Y_MAX = 16
-
     enum class Reason {
         START,
         SDK_TOO_OLD,
@@ -50,10 +58,12 @@ object DeviceAudioPolicy {
         NO_RECORD_PERMISSION,
     }
 
-    /** `aud`/`audok` 握手里的 state 三态；旧版对端不认识这个 key，所以名字要能直接进 JSON。 */
+    /** `aud`/`audok` 握手里的 state 两态；对端不认识这个 key 时会落进路由的 None，所以名字要能直接进 JSON。 */
     const val STATE_LIVE = "live"
     const val STATE_SILENT = "silent"
-    const val STATE_BLOCKED = "blocked"
+
+    /** 路由/解析侧唯一允许的 state 集合：加第三态必须先有一条可信的第二路信号（见文件头）。 */
+    val STATES = setOf(STATE_LIVE, STATE_SILENT)
 
     /**
      * 五个条件全满足才开采集——**包括对端 ACK**。
@@ -79,31 +89,13 @@ object DeviceAudioPolicy {
     fun nextSilentStreak(streak: Int, maxAbsSample: Int): Int =
         if (maxAbsSample == 0) streak + 1 else 0
 
-    fun nextBlackStreak(streak: Int, frameIsBlack: Boolean): Int =
-        if (frameIsBlack) streak + 1 else 0
-
     /**
-     * Y 平面判黑。空输入按"无读数"处理（返回 false，不判黑）——
-     * 把"没测到"读成"黑屏"会造出假 BLOCKED，这条在 video_stall 上已经踩过一次。
+     * 两态判定：音频有信号就是 live；连续 SILENT_STREAK_FRAMES 帧全零 ⇒ silent。
+     * 没有第三种状态不是"没做完"，而是文件头那条：**没有可信的第二路信号就不许有 blocked**。
+     * 想加回来，先解决"公开 API 拿不到播放器状态、逐帧亮度要 GPU 回读"这两个问题之一。
      */
-    fun isVideoBlack(yPlane: ByteArray): Boolean {
-        if (yPlane.isEmpty()) return false
-        for (b in yPlane) {
-            if ((b.toInt() and 0xFF) > BLACK_Y_MAX) return false
-        }
-        return true
-    }
-
-    /**
-     * 三态判定：音频有信号就是 live；音频静音**且**同一时刻画面也黑 ⇒ blocked
-     * （那是 DRM/FLAG_SECURE 那类内容保护的样子）；只有音频静音 ⇒ silent
-     * （她听到的是"没声音"，出路是换个播放器或让他外放，不是"坏了"）。
-     */
-    fun stateOf(silentStreak: Int, blackStreak: Int): String = when {
-        silentStreak < SILENT_STREAK_FRAMES -> STATE_LIVE
-        blackStreak >= SILENT_STREAK_FRAMES -> STATE_BLOCKED
-        else -> STATE_SILENT
-    }
+    fun stateOf(silentStreak: Int): String =
+        if (silentStreak < SILENT_STREAK_FRAMES) STATE_LIVE else STATE_SILENT
 
     enum class JitterAction { PLAY, WAIT, DROP_OLDEST }
 
