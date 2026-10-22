@@ -213,7 +213,7 @@ AOSP 的 Doze 网络限制对它根本不生效，所以凡涉及"真 Doze 行�
 | `aud` 通道 CLOSED / renegotiation / ICE restart | N-A | PASS `renegoAndQualitySwitchDoNotTouchAudChannel`（只重发 offer，不打断她正在听的声音）；⬜ 真机切网后声音是否续上 | ⬜ | N-A |
 | 会话结束 / 服务销毁 | N-A | PASS `stopTapPrecedesClientClose`（先停采集再 close，顺序反了=往已关闭通道塞帧） | PASS 线程自杀那一路也有沿（`线程状态沿接到快照发布`） | N-A |
 | App 被系统杀 | N-A | ⬜ `aud_stopped` 能否经补报到达（与 `app_exit` 同一条死法，需真机） | ⬜ | ⬜ |
-| 采集线程读写出错 / 编码器坏 | N-A | PASS `RECORD_ERROR`/`CODEC_ERROR` 两个出口 + `aud_stopped` 单一发出点在 finally（`audStoppedEmittedOnceInFinally`）；⬜ 注入式故障（真机/模拟器都行，本轮没做） | 同左 | N-A |
+| 采集线程读写出错 / 编码器坏 | N-A | PASS `RECORD_ERROR`/`CODEC_ERROR` 两个出口 + `aud_stopped` 单一发出点在 finally（`audStoppedEmittedOnceInFinally`）；**PASS(模) 10-22 双模拟器这条出口真被触发过一次**（不是注入：`AudioRecord.Builder` 里 `setAudioSource(MIC)` 与 `setAudioPlaybackCaptureConfig` 互斥，构造当场抛 ⇒ 零 `aud_started`/零 `aud_tick`，只剩 `aud_stopped detail=r_record_error`），当时暴露的第二条谎是"线程自杀后状态行永远停在「画面还没连上，声音还在等」"——已单独成态 `FAILED`（锁定 `recordBuilderDoesNotSetAudioSource` / `status_captureFailureIsNotWaitingVideo` / `lastFailureIsSetBeforeStateEdgeAndClearedOnStart`，三条逐条抽掉实测变红）；⬜ HyperOS/MIUI 的音频 HAL 会不会自己把采集打挂（只能真机） | 同左 | N-A |
 | 隐私边界：usage 白名单 | PASS `usageWhitelistExcludesVoiceCommunication`（含 `USAGE_VOICE_COMMUNICATION`＝她的语音绕回她耳朵，这条是 load-bearing）；⬜ 国产播放器/DRM 内容的实际可采性（YouTube/长视频 App 预期静音＝`silent` 那一列） | | | |
 | 她外放他的视频声 → 她的麦克风再送回去（**本轮新增风险，未观测**） | N-A | ⬜ 回环：软件 AEC 对我们自己的 `AudioTrack` 没有参考信号，延迟几帧后可能形成可闻回声。出现即改（她放音期间对它的上行做低通/压低），未出现也要真机记一格"没听到" | ⬜ | N-A |
 

@@ -230,6 +230,8 @@ bash scripts/test.sh --coverage
   同一轮顺带的教训：`AuditRound2WiringTest` 用 `onCreate` 起 60 行的窗口找 `updateWakeLock`，我往匿名 `onState` 监听器里加十几行就把它撑红了（合法代码增长弄破写死行数的锚点）。新增埋点一律收成具名方法，守卫按名字开窗口。
   **反向断言必须证明"能变红"**：用桩 adb（有记录→1/1，无记录→0/0）各跑一遍再登记，否则等价于没测。
 
+- 内录一帧都起不来（FR-16，10-22 双模拟器实测）→ `AudioRecord.Builder` 里 `setAudioSource(MIC)` 与 `setAudioPlaybackCaptureConfig` **互斥**，框架当场抛 `Cannot both set audio source and set playback capture config` ⇒ 采集线程死在构造那一步（零 `aud_started`、零 `aud_tick`，只有 `aud_stopped detail=r_record_error`）。锁在 `DeviceAudioTapWiringTest.recordBuilderDoesNotSetAudioSource`：正确形态是不设源（capture config 自带），把 `.setAudioSource(` 写回 `loop()` 函数体任意位置即红（断言在 :216，已实测）。同一批还有第二条谎：线程自杀时状态表只有"没在跑＝还在等画面"一支，横幅会永远停在「画面还没连上，声音还在等」而画面明明连着 ⇒ 新增 `AudStatus.FAILED`（由 `DeviceAudioTap.lastFailure` 喂），锁 `DeviceAudioPolicyTest.status_captureFailureIsNotWaitingVideo`（删 FAILED 那支即红 :188）与 `DeviceAudioTapWiringTest.lastFailureIsSetBeforeStateEdgeAndClearedOnStart`（把 `captureFailed` 焊成 false 即红 :243；同时锁"记失败必须排在状态沿之前"和"`start()` 必须清零"）。
+
 Service 窗口接线这类 JVM 跑不了的代码，锁定用例的形态是**源码扫描测试/t0 grep 守卫**（把修复
 回滚用例必须变红才算锁定）。审计流程本身的规范（状态机矩阵、5 维度清单、gate 登记制）见
 `docs/AUDIT.md`，矩阵在 `docs/AUDIT-MATRIX.md`（t0 打印空格数）。
