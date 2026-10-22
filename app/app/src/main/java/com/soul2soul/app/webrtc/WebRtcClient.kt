@@ -1231,19 +1231,26 @@ class WebRtcClient(
         }
 
     override fun onDataChannel(dc: DataChannel) {
-        // 观看端：channel 均由共享端创建，按 label 分流
+        // 观看端：channel 均由共享端创建，按 label 分流。
+        // ⚠️ 这里**不许**写 else 兜底：兜底＝任何新 label 都会把 anno 顶掉并 unregisterObserver，
+        // 而笔迹通道的 observer 被摘掉后涂鸦是静默失效（不崩、无日志、通道还在），
+        // 只有显式列出每个已知 label，将来加通道才会被"未知 label"这条日志暴露出来。
         when (dc.label()) {
-            "ctl" -> {
+            CtlChannelPolicy.CTL -> {
                 runCatching { ctlChannel?.unregisterObserver() }
                 ctlChannel = dc
             }
-            "ctlg" -> {
+            CtlChannelPolicy.CTLG -> {
                 runCatching { ctlgChannel?.unregisterObserver() }
                 ctlgChannel = dc
             }
-            else -> {
+            CtlChannelPolicy.ANNO -> {
                 runCatching { dataChannel?.unregisterObserver() }
                 dataChannel = dc
+            }
+            else -> {
+                Log.w(TAG, "unknown datachannel label=${dc.label()}（不接管，避免顶掉 anno）")
+                return
             }
         }
         dc.registerObserver(this)
