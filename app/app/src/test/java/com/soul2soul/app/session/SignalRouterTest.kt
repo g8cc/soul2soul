@@ -2,6 +2,7 @@ package com.soul2soul.app.session
 
 import com.soul2soul.app.R
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -208,5 +209,67 @@ class SignalRouterTest {
             SignalRouter.DataAction.None,
             SignalRouter.routeData("a", controlMode = true, live = true, id = ""),
         )
+    }
+
+    // ---------- FR-16 对方那台手机的内录状况 ----------
+
+    @Test
+    fun `k=aud 的 on 只认 0 与 1 别的值都是没读数`() {
+        assertEquals(
+            SignalRouter.DataAction.PeerDeviceAudio(on = true, state = "live"),
+            SignalRouter.routeData("aud", controlMode = false, live = true, audOn = 1, audState = "live"),
+        )
+        assertEquals(
+            SignalRouter.DataAction.PeerDeviceAudio(on = false, state = null),
+            SignalRouter.routeData("aud", controlMode = false, live = true, audOn = 0),
+        )
+        // 缺字段/乱值一律不认：把猜出来的 false 报成"TA 没开"，会把一个还在起采集的会话读成故障
+        assertEquals(
+            SignalRouter.DataAction.None,
+            SignalRouter.routeData("aud", controlMode = false, live = true, audOn = -1, audState = "live"),
+        )
+        assertEquals(
+            SignalRouter.DataAction.None,
+            SignalRouter.routeData("aud", controlMode = false, live = true, audOn = 2, audState = "live"),
+        )
+    }
+
+    /** 认识的 state 才透传，其余 null——协议里加第三态的先决条件是一条可信的第二路信号（见 DeviceAudioPolicy 文件头） */
+    @Test
+    fun `k=aud 的 state 认不出来时是 null 不是 silent`() {
+        assertNull(SignalRouter.audStateOrNull(""))
+        assertNull(SignalRouter.audStateOrNull("blocked"))
+        assertEquals("live", SignalRouter.audStateOrNull("live"))
+        assertEquals("silent", SignalRouter.audStateOrNull("silent"))
+        assertEquals(
+            SignalRouter.DataAction.PeerDeviceAudio(on = true, state = null),
+            SignalRouter.routeData("aud", controlMode = false, live = true, audOn = 1, audState = "blocked"),
+        )
+    }
+
+    @Test
+    fun `观看端横幅四种读法各归一句`() {
+        assertEquals(R.string.aud_peer_live,
+            SignalRouter.deviceAudioBannerRes(true, "live", channelSeen = true, live = true))
+        assertEquals(R.string.aud_peer_silent,
+            SignalRouter.deviceAudioBannerRes(true, "silent", channelSeen = true, live = true))
+        assertEquals(R.string.aud_peer_off,
+            SignalRouter.deviceAudioBannerRes(false, "silent", channelSeen = true, live = true))
+        // on=0 优先于 state：开关是关的，state 里带什么都不许读出"正在听"
+        assertEquals(R.string.aud_peer_off,
+            SignalRouter.deviceAudioBannerRes(false, "live", channelSeen = true, live = true))
+    }
+
+    @Test
+    fun `横幅不造第二处结论 解不了就空着`() {
+        // 开了但 state 读不出来 ⇒ 什么都不显示。宁可空着，也不把"我解不了这条消息"报成"TA 那边没声音"
+        assertNull(SignalRouter.deviceAudioBannerRes(true, null, channelSeen = true, live = true))
+        // 从没收到 k=aud 而通道也确实没见过 ⇒ 对面那台还没有这套功能
+        assertEquals(R.string.aud_peer_too_old,
+            SignalRouter.deviceAudioBannerRes(null, null, channelSeen = false, live = true))
+        // 没连通之前不许挂"版本太旧"：否则正常通话中途会闪一句无关提示
+        assertNull(SignalRouter.deviceAudioBannerRes(null, null, channelSeen = false, live = false))
+        // 通道见过但一条 k=aud 都没来 ⇒ 新版共享端还没轮到报状态，什么都不判
+        assertNull(SignalRouter.deviceAudioBannerRes(null, null, channelSeen = true, live = true))
     }
 }

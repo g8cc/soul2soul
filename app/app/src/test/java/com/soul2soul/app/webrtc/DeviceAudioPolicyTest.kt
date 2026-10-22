@@ -124,4 +124,74 @@ class DeviceAudioPolicyTest {
         assertEquals(400L, DeviceAudioPolicy.JITTER_HARD_CAP_MS)
         assertEquals(25, DeviceAudioPolicy.SILENT_STREAK_FRAMES)
     }
+
+    /**
+     * 五个否决理由必须落到**不同**的本地状态：它们各自的出路完全不同
+     * （换手机/给权限/升级对面/等画面），塌成"没开"就等于没解释。
+     */
+    @Test
+    fun status_separatesEveryGateRejection() {
+        assertEquals(
+            DeviceAudioPolicy.AudStatus.OFF,
+            DeviceAudioPolicy.status(DeviceAudioPolicy.Reason.TOGGLE_OFF, false, DeviceAudioPolicy.STATE_SILENT),
+        )
+        assertEquals(
+            DeviceAudioPolicy.AudStatus.SDK_TOO_OLD,
+            DeviceAudioPolicy.status(DeviceAudioPolicy.Reason.SDK_TOO_OLD, false, DeviceAudioPolicy.STATE_SILENT),
+        )
+        assertEquals(
+            DeviceAudioPolicy.AudStatus.NO_MIC_PERMISSION,
+            DeviceAudioPolicy.status(
+                DeviceAudioPolicy.Reason.NO_RECORD_PERMISSION, false, DeviceAudioPolicy.STATE_SILENT,
+            ),
+        )
+        assertEquals(
+            DeviceAudioPolicy.AudStatus.WAITING_PEER,
+            DeviceAudioPolicy.status(DeviceAudioPolicy.Reason.PEER_NOT_ACKED, false, DeviceAudioPolicy.STATE_SILENT),
+        )
+        assertEquals(
+            DeviceAudioPolicy.AudStatus.WAITING_VIDEO,
+            DeviceAudioPolicy.status(DeviceAudioPolicy.Reason.NO_PROJECTION, false, DeviceAudioPolicy.STATE_SILENT),
+        )
+    }
+
+    /**
+     * `gate()==START` 而线程没在跑，是真实存在的一瞬（`tap.start()` 返回 false：投影刚好在那一步被撤）。
+     * 这一格必须落在 WAITING_VIDEO——报 HEARD 是撒谎，报 NOT_HEARD 则把"没起来"说成"起了但没声音"。
+     */
+    @Test
+    fun status_startButNotRunning_isWaitingVideo_neverHeard() {
+        assertEquals(
+            DeviceAudioPolicy.AudStatus.WAITING_VIDEO,
+            DeviceAudioPolicy.status(DeviceAudioPolicy.Reason.START, false, DeviceAudioPolicy.STATE_LIVE),
+        )
+        // 真在跑之后，live/silent 才各自有意义
+        assertEquals(
+            DeviceAudioPolicy.AudStatus.HEARD,
+            DeviceAudioPolicy.status(DeviceAudioPolicy.Reason.START, true, DeviceAudioPolicy.STATE_LIVE),
+        )
+        assertEquals(
+            DeviceAudioPolicy.AudStatus.NOT_HEARD,
+            DeviceAudioPolicy.status(DeviceAudioPolicy.Reason.START, true, DeviceAudioPolicy.STATE_SILENT),
+        )
+    }
+
+    /**
+     * 协议侧只有两态（本地七态不许外推）：她那边能做的只有"知道有没有声音"。
+     * 反向锁：谁把 WAITING_* 之类折成 live，这条先红。
+     */
+    @Test
+    fun peerState_foldsToTwoStates_andOnlyHeardIsLive() {
+        DeviceAudioPolicy.AudStatus.entries.forEach { s ->
+            assertTrue(
+                "$s 折出来的 state 越界",
+                DeviceAudioPolicy.peerStateOf(s) in DeviceAudioPolicy.STATES,
+            )
+            assertEquals(
+                if (s == DeviceAudioPolicy.AudStatus.HEARD) DeviceAudioPolicy.STATE_LIVE
+                else DeviceAudioPolicy.STATE_SILENT,
+                DeviceAudioPolicy.peerStateOf(s),
+            )
+        }
+    }
 }

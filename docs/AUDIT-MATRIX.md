@@ -191,4 +191,40 @@ AOSP 的 Doze 网络限制对它根本不生效，所以凡涉及"真 Doze 行�
 | `ice_failed` / `video_resumed` / `surface_destroyed` / `backlog_drop` / `wake_fail` / `wake_off` / `doze_on` / `capture_fail` / `fgs_start_failed` / `webrtc_start_failed` / `leave_hint_screen_off` / `ice_recovered` | 仍 ⬜ | 都是"这一轮没发生那件事"（没硬断过 ICE、帧回来时没跨过告警阈值、没饱和到淘汰、acquire 没抛异常……）。**零采样 ≠ 埋点坏**，但也一律不许改判 PASS |
 
 ---
+
+## 9. 设备音频共享（FR-16，`AudioPlaybackCapture` → AAC → `aud` 通道 → 对端 `AudioTrack`）
+
+状态：`关`（默认） / `开·live`（采到非零 PCM） / `开·silent`（连续 25 帧全零） / `开·门没过`（五条件里缺一条：旧机型 / 没录音权限 / 没画面 / 对面没回 `audok`）
+
+**本轮建表的现状**：代码已落地并有 JVM 锁（下列 `PASS` 全是逻辑/接线锁的读数，不是设备读数）。
+凡是"她听不听得见、听着抖不抖"这类**听感判据**一律 `⬜`——本机双模拟器视频段 ~0.5fps、单帧截图 0.6~4.4s，
+而声音根本没有像素判据；`MODE_IN_COMMUNICATION` 与 MIUI 音频策略的真实表现只能 Mi10/米15 出。
+
+| 事件＼状态 | 关 | 开·live | 开·silent | 开·门没过 |
+|---|---|---|---|---|
+| 主页唯一入口点一次 | PASS `gateIsCalledOnlyFromService` + 点击只递意图（不本地刷状态，读的是翻转前的旧值） | ⬜ 真机第一次点开的实测帧率/是否起采 | ⬜ 同上 | PASS `status_separatesEveryGateRejection`（四个理由四条文案）；⬜ Android 7（Mi5）那台是否稳定停在 `SDK_TOO_OLD` |
+| 系统撤销录屏授权（她锁屏省电／在隐私提示里点"停止录制"） | N-A（没在采） | PASS 出口 `PROJECTION_STOPPED` 有调用点（`audTapStopCoversAllSevenExits`）；⬜ 真机线程是否真的停了 | ⬜ 撤授权时正处静音期 ⇒ `aud_stopped` 与 `aud_silent` 的先后无法用屏幕证 | PASS 门没过不发假状态（`每条起停路径都发布一次快照`，M2 实测抽掉即红） |
+| 重新授权成功（`restartCapture` 重绑） | N-A | PASS `rebindReturnsRestartOnlyForNewProjectionHandle`（先停后起、柄现取）；⬜ Android 14 上新 projection 是否接受第二个消费者（计划里的停止条件③，未触发也未证实） | ⬜ | ⬜ |
+| 重新授权**失败** | N-A | N-A（失败即无 live） | PASS 只停不启 + 状态行自己改口（`publishAudStatus` 在这一支单独调一次；抽掉该行 t1 实测变红） | 同左 |
+| 他按「静音」（micMuted） | N-A | PASS `muteToggleDoesNotTouchDeviceAudio`（分支里不许出现 audTap/audWanted）⇒ 闭麦不该关掉视频声；⬜ 真机确认她仍然听得到内录 | PASS 同左（逻辑层） | N-A |
+| 弱网 / SCTP 积压 | N-A | PASS `backpressure_dropsAudioNeverVideo`（9600B 门，丢音频绝不丢视频/语音）；⬜ 真机弱网下她听到的是"跳"还是"停" | ⬜ | ⬜ |
+| 对面版本旧（不回 `audok`） | N-A | N-A（门拦住了，不起采集＝不白烧 140kbps） | N-A | PASS 她那侧的 `aud_peer_too_old` 由 `deviceAudioChannelSeen` 判（`旧对端判据只认观看端见过的通道`，M6 抽掉 `!isSharer` 即红）；⬜ 混跑一通（新观看端+旧共享端）的实际观感 |
+| 他那台是 Android < 29 | N-A | N-A（结构上做不到，不是开关问题） | N-A | PASS `sdk28_neverStarts_evenWithToggle`；⬜ Mi5 真机文案是否读得懂（只能人工看，那台驱动不了 UI） |
+| `aud` 通道 CLOSED / renegotiation / ICE restart | N-A | PASS `renegoAndQualitySwitchDoNotTouchAudChannel`（只重发 offer，不打断她正在听的声音）；⬜ 真机切网后声音是否续上 | ⬜ | N-A |
+| 会话结束 / 服务销毁 | N-A | PASS `stopTapPrecedesClientClose`（先停采集再 close，顺序反了=往已关闭通道塞帧） | PASS 线程自杀那一路也有沿（`线程状态沿接到快照发布`） | N-A |
+| App 被系统杀 | N-A | ⬜ `aud_stopped` 能否经补报到达（与 `app_exit` 同一条死法，需真机） | ⬜ | ⬜ |
+| 采集线程读写出错 / 编码器坏 | N-A | PASS `RECORD_ERROR`/`CODEC_ERROR` 两个出口 + `aud_stopped` 单一发出点在 finally（`audStoppedEmittedOnceInFinally`）；⬜ 注入式故障（真机/模拟器都行，本轮没做） | 同左 | N-A |
+| 隐私边界：usage 白名单 | PASS `usageWhitelistExcludesVoiceCommunication`（含 `USAGE_VOICE_COMMUNICATION`＝她的语音绕回她耳朵，这条是 load-bearing）；⬜ 国产播放器/DRM 内容的实际可采性（YouTube/长视频 App 预期静音＝`silent` 那一列） | | | |
+| 她外放他的视频声 → 她的麦克风再送回去（**本轮新增风险，未观测**） | N-A | ⬜ 回环：软件 AEC 对我们自己的 `AudioTrack` 没有参考信号，延迟几帧后可能形成可闻回声。出现即改（她放音期间对它的上行做低通/压低），未出现也要真机记一格"没听到" | ⬜ | N-A |
+
+空格合计：本节 **26** 格（复核命令如下，数的是表格里的 ⬜）：
+
+```bash
+awk '/^## 9\./,/^---$/' docs/AUDIT-MATRIX.md | grep -o '⬜' | wc -l
+```
+
+这些空格**全部**是设备/听感读数，本机不可测；其中「Android 14 新 projection 是否接受第二个消费者」
+与「她外放→她的麦克风回环」两条是本轮**主动登记**的未证实项，发版说明里必须照实写，不许用 `PASS(模)` 顶替。
+
+---
 维护规则（AUDIT.md §5）：每关一条真机 bug，本表加一行/填一格并登记 gate；新有状态功能上线前必须先有 §表头，格子可以 ⬜，表不能没有。
