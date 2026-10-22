@@ -23,5 +23,6 @@ object DeviceAudioCopy {
         DeviceAudioPolicy.AudStatus.WAITING_VIDEO -> R.string.aud_state_waiting_video
         DeviceAudioPolicy.AudStatus.HEARD -> R.string.aud_state_heard
         DeviceAudioPolicy.AudStatus.NOT_HEARD -> R.string.aud_state_not_heard
+        DeviceAudioPolicy.AudStatus.FAILED -> R.string.aud_state_failed
     }
 }

@@ -199,4 +199,48 @@ class DeviceAudioTapWiringTest {
         assertTrue("MainActivity 不许自己判门（会与服务不一致）",
             main.none { it.contains("DeviceAudioPolicy") })
     }
+
+    /**
+     * AudioRecord 构造不许设 audio source（10-22 双模拟器实测踩的坑）。
+     * 框架在 `setAudioPlaybackCaptureConfig` 里要求源仍是 DEFAULT，设过 MIC 直接抛
+     * `IllegalStateException: Cannot both set audio source and set playback capture config`，
+     * 采集线程连一帧都没起来——表现是"开关打开了、横幅也变了，但她就是听不到"，
+     * 不崩也没人看 logcat。禁令扫描范围＝整个 loop 函数体（含 builder 链的每一环）。
+     */
+    @Test
+    fun `recordBuilderDoesNotSetAudioSource`() {
+        val tap = file(tapPath)
+        val body = functionBody(tap, "private fun loop(")
+        assertTrue("必须真的用 playback capture 配置建 AudioRecord",
+            body.any { it.contains("setAudioPlaybackCaptureConfig(") })
+        assertTrue("AudioRecord.Builder 不许调 setAudioSource（与 capture config 互斥，实测抛异常）",
+            body.none { it.contains(".setAudioSource(") })
+        assertTrue("连带 import 也不能留着（留着＝有人还想设源）",
+            tap.none { it.contains("android.media.MediaRecorder") })
+    }
+
+    /**
+     * 采集线程自杀必须让上层知道（10-22 那条谎的另一半）：
+     * `lastFailure` 在 finally 里、且在 `onStateEdge` 之前落位，快照才有读数；
+     * `start()` 必须清零，否则重绑成功那一刻还挂着上一次的失败。
+     */
+    @Test
+    fun `lastFailureIsSetBeforeStateEdgeAndClearedOnStart`() {
+        val tap = file(tapPath)
+        val body = functionBody(tap, "private fun loop(")
+        val set = body.indexOfFirst { it.contains("lastFailure = exit") }
+        val edge = body.indexOfFirst { it.contains("onStateEdge(DeviceAudioPolicy.STATE_SILENT)") }
+        val stopped = body.indexOfFirst { it.contains("\"aud_stopped\"") }
+        assertTrue("finally 必须记失败原因", set >= 0)
+        assertTrue("只许记 record/codec 两类自杀（人为停止不是失败）",
+            tap.any { it.contains("exit == Exit.RECORD_ERROR || exit == Exit.CODEC_ERROR") })
+        assertTrue("lastFailure 必须在状态沿之前落位，否则快照读到的还是旧值 set@$set edge@$edge",
+            set in 0 until edge)
+        assertTrue("aud_stopped 必须在记完失败之后发 stopped@$set", set < stopped)
+        val start = functionBody(tap, "    fun start(")
+        assertTrue("start 必须清零上一次的失败", start.any { it.contains("lastFailure = null") })
+        val publisher = functionBody(file(servicePath), "private fun publishAudStatus(")
+        assertTrue("快照必须带 captureFailed（不带＝失败又被读成\"还在等\"）",
+            publisher.any { it.contains("captureFailed = audTap?.lastFailure != null") })
+    }
 }

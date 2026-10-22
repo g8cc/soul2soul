@@ -626,6 +626,7 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
             reason = audGateReason(),
             running = audTap?.isRunning == true,
             state = audTap?.state ?: DeviceAudioPolicy.STATE_SILENT,
+            captureFailed = audTap?.lastFailure != null,
         )
         val sig = "${audWanted}|${status.name}"
         if (sig == audPublishedSig) return

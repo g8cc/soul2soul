@@ -7,7 +7,6 @@ import android.media.AudioRecord
 import android.media.MediaCodec
 import android.media.MediaCodecInfo
 import android.media.MediaFormat
-import android.media.MediaRecorder
 import android.media.projection.MediaProjection
 import android.os.SystemClock
 import android.util.Log
@@ -75,6 +74,14 @@ class DeviceAudioTap(
     @Volatile var state: String = DeviceAudioPolicy.STATE_LIVE
         private set
 
+    /**
+     * 线程**自己死掉**的原因（record/codec 错），由 [start] 清零、finally 落一次。
+     * 上层靠它把"永远在等"与"起不来"分开：这两句的出路完全不同，前者是等画面，后者是外放。
+     * 人为停止（关开关/撤授权/会话收尾）不算失败——那时用户知道发生了什么。
+     */
+    @Volatile var lastFailure: Exit? = null
+        private set
+
     val isRunning: Boolean get() = running
 
     /**
@@ -87,6 +94,7 @@ class DeviceAudioTap(
         if (projectionOf() == null) return false
         running = true
         state = DeviceAudioPolicy.STATE_LIVE
+        lastFailure = null
         thread = Thread({ loop(startReason) }, "DeviceAudioTap").also { it.isDaemon = true; it.start() }
         return true
     }
@@ -133,7 +141,10 @@ class DeviceAudioTap(
                 .build()
             localRecord = try {
                 AudioRecord.Builder()
-                    .setAudioSource(MediaRecorder.AudioSource.MIC)
+                    // 不许调 setAudioSource：框架在 setAudioPlaybackCaptureConfig 里要求
+                    // 源仍是 DEFAULT（或 REMOTE_SUBMIX），设过 MIC 直接抛
+                    // "Cannot both set audio source and set playback capture config"
+                    // ——10-22 双模拟器就是这样只剩一条 aud_stopped r_record_error，一帧没采到。
                     .setAudioFormat(
                         AudioFormat.Builder()
                             .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
@@ -250,6 +261,7 @@ class DeviceAudioTap(
             running = false
             runCatching { encoder?.stop() }
             runCatching { encoder?.release() }
+            if (exit == Exit.RECORD_ERROR || exit == Exit.CODEC_ERROR) lastFailure = exit
             runCatching { localRecord?.stop() }
             runCatching { localRecord?.release() }
             record = null

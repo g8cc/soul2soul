@@ -133,25 +133,26 @@ class DeviceAudioPolicyTest {
     fun status_separatesEveryGateRejection() {
         assertEquals(
             DeviceAudioPolicy.AudStatus.OFF,
-            DeviceAudioPolicy.status(DeviceAudioPolicy.Reason.TOGGLE_OFF, false, DeviceAudioPolicy.STATE_SILENT),
+            DeviceAudioPolicy.status(DeviceAudioPolicy.Reason.TOGGLE_OFF, false, DeviceAudioPolicy.STATE_SILENT, captureFailed = false),
         )
         assertEquals(
             DeviceAudioPolicy.AudStatus.SDK_TOO_OLD,
-            DeviceAudioPolicy.status(DeviceAudioPolicy.Reason.SDK_TOO_OLD, false, DeviceAudioPolicy.STATE_SILENT),
+            DeviceAudioPolicy.status(DeviceAudioPolicy.Reason.SDK_TOO_OLD, false, DeviceAudioPolicy.STATE_SILENT, captureFailed = false),
         )
         assertEquals(
             DeviceAudioPolicy.AudStatus.NO_MIC_PERMISSION,
             DeviceAudioPolicy.status(
                 DeviceAudioPolicy.Reason.NO_RECORD_PERMISSION, false, DeviceAudioPolicy.STATE_SILENT,
+                captureFailed = false,
             ),
         )
         assertEquals(
             DeviceAudioPolicy.AudStatus.WAITING_PEER,
-            DeviceAudioPolicy.status(DeviceAudioPolicy.Reason.PEER_NOT_ACKED, false, DeviceAudioPolicy.STATE_SILENT),
+            DeviceAudioPolicy.status(DeviceAudioPolicy.Reason.PEER_NOT_ACKED, false, DeviceAudioPolicy.STATE_SILENT, captureFailed = false),
         )
         assertEquals(
             DeviceAudioPolicy.AudStatus.WAITING_VIDEO,
-            DeviceAudioPolicy.status(DeviceAudioPolicy.Reason.NO_PROJECTION, false, DeviceAudioPolicy.STATE_SILENT),
+            DeviceAudioPolicy.status(DeviceAudioPolicy.Reason.NO_PROJECTION, false, DeviceAudioPolicy.STATE_SILENT, captureFailed = false),
         )
     }
 
@@ -163,21 +164,51 @@ class DeviceAudioPolicyTest {
     fun status_startButNotRunning_isWaitingVideo_neverHeard() {
         assertEquals(
             DeviceAudioPolicy.AudStatus.WAITING_VIDEO,
-            DeviceAudioPolicy.status(DeviceAudioPolicy.Reason.START, false, DeviceAudioPolicy.STATE_LIVE),
+            DeviceAudioPolicy.status(DeviceAudioPolicy.Reason.START, false, DeviceAudioPolicy.STATE_LIVE, captureFailed = false),
         )
         // 真在跑之后，live/silent 才各自有意义
         assertEquals(
             DeviceAudioPolicy.AudStatus.HEARD,
-            DeviceAudioPolicy.status(DeviceAudioPolicy.Reason.START, true, DeviceAudioPolicy.STATE_LIVE),
+            DeviceAudioPolicy.status(DeviceAudioPolicy.Reason.START, true, DeviceAudioPolicy.STATE_LIVE, captureFailed = false),
         )
         assertEquals(
             DeviceAudioPolicy.AudStatus.NOT_HEARD,
-            DeviceAudioPolicy.status(DeviceAudioPolicy.Reason.START, true, DeviceAudioPolicy.STATE_SILENT),
+            DeviceAudioPolicy.status(DeviceAudioPolicy.Reason.START, true, DeviceAudioPolicy.STATE_SILENT, captureFailed = false),
         )
     }
 
     /**
-     * 协议侧只有两态（本地七态不许外推）：她那边能做的只有"知道有没有声音"。
+     * 10-22 双模拟器实测的那条谎：`setAudioSource` 与 capture config 互斥 ⇒ AudioRecord 构造抛
+     * ⇒ 线程自杀，而当时状态表只有"没在跑＝还在等画面"一支，于是横幅永远停在「画面还没连上，
+     * 声音还在等」。现在 `captureFailed` 单独一支，"起不来"不许冒充"正在起"。
+     * 反向锁：把 FAILED 那支删掉，这条先红。
+     */
+    @Test
+    fun status_captureFailureIsNotWaitingVideo() {
+        assertEquals(
+            DeviceAudioPolicy.AudStatus.FAILED,
+            DeviceAudioPolicy.status(
+                DeviceAudioPolicy.Reason.START, false, DeviceAudioPolicy.STATE_SILENT, captureFailed = true,
+            ),
+        )
+        // 线程还在跑时 failure 不接管（重绑成功那一拍会先清 lastFailure，这里锁的是顺序）
+        assertEquals(
+            DeviceAudioPolicy.AudStatus.HEARD,
+            DeviceAudioPolicy.status(
+                DeviceAudioPolicy.Reason.START, true, DeviceAudioPolicy.STATE_LIVE, captureFailed = true,
+            ),
+        )
+        // 门没过时更不许报失败：SDK 太旧是"结构上做不到"，不是"这次没起来"
+        assertEquals(
+            DeviceAudioPolicy.AudStatus.SDK_TOO_OLD,
+            DeviceAudioPolicy.status(
+                DeviceAudioPolicy.Reason.SDK_TOO_OLD, false, DeviceAudioPolicy.STATE_SILENT, captureFailed = true,
+            ),
+        )
+    }
+
+    /**
+     * 协议侧只有两态（本地八态不许外推）：她那边能做的只有"知道有没有声音"。
      * 反向锁：谁把 WAITING_* 之类折成 live，这条先红。
      */
     @Test

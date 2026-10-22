@@ -345,6 +345,7 @@
     <string name="aud_state_waiting_peer">等 TA 那边准备好（TA 的 App 版本太旧就一直是这个）</string>
     <string name="aud_state_waiting_video">画面还没连上，声音还在等</string>
     <string name="aud_state_heard">TA 正在听我手机里的声音</string>
+    <string name="aud_state_failed">这台手机没让 App 录到手机里的声音（不是画面坏了，画面和说话都正常）。出路：把音量外放，让她用麦克风听；或者关掉再开一次试试。</string>
     <string name="aud_state_not_heard">开了，但 TA 现在听不到（这个 App 不允许被录制，或没在放声音）</string>
     <string name="aud_peer_live">TA 手机里的声音你能听到</string>
     <!-- 协议只有 live/silent 两态，所以这一句必须把 silent 的几种成因一起说清（不是挑一个怪罪）：

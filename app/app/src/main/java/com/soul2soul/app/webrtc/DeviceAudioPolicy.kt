@@ -87,7 +87,7 @@ object DeviceAudioPolicy {
 
     /**
      * **共享端自己屏幕上**的那一行说明（与推给她的 `state` 两态不是同一个东西，见 [peerStateOf]）。
-     * 之所以要七态而不是两态：门的五个否决理由各自的出路完全不同，把它们统一成"没开"或"失败"
+     * 之所以要八态而不是两态：门的五个否决理由各自的出路完全不同，把它们统一成"没开"或"失败"
      * 就等于没解释——"TA 版本太旧"和"这个 App 不让录制"是两件事，用户能做的也只有两件事。
      */
     enum class AudStatus {
@@ -112,22 +112,37 @@ object DeviceAudioPolicy {
 
         /** 开了且在采，但连续全零——**不判成因**（可能禁止录制，也可能当时没声音在放） */
         NOT_HEARD,
+
+        /**
+         * 门过了、采集线程却自己死了（record/codec 错）。
+         * 之所以单独一态：10-22 双模拟器实测，`setAudioSource` 与 capture config 互斥导致
+         * AudioRecord 构造直接抛，线程一帧没起来，而状态行停在「画面还没连上，声音还在等」——
+         * 画面明明是连着的，这句承诺会一直挂着。**失败必须说失败**，不许伪装成"还在等"。
+         */
+        FAILED,
     }
 
     /**
-     * 状态表。`reason` 来自 [gate]，`running`/`state` 来自采集线程，三者不许由 UI 各自推断
+     * 状态表。`reason` 来自 [gate]，`running`/`state` 来自采集线程，`captureFailed` 来自
+     * 采集线程的最后一次自杀（[DeviceAudioTap.lastFailure]），四者不许由 UI 各自推断
      * （MainActivity 里再抄一遍判定＝两处真值，这是本仓库立过规矩的那种错法）。
-     * ⚠️ `reason == START` 但线程没在跑是**真实存在**的一瞬（`tap.start()` 返回 false：
-     * 投影刚好在那一刻被撤），它必须落到 WAITING_VIDEO，不许冒充 HEARD 也不许冒充 NOT_HEARD。
+     * ⚠️ `reason == START` 但线程没在跑是**真实存在**的两瞬：起不来（FAILED）与正在起
+     * （WAITING_VIDEO），把它们混成一条就是"永远在等"的那条谎。
      * 按 Reason 穷举、**不写 else**：以后加一条否决理由而这里没接，编译期就红。
      */
-    fun status(reason: Reason, running: Boolean, state: String): AudStatus = when (reason) {
+    fun status(
+        reason: Reason,
+        running: Boolean,
+        state: String,
+        captureFailed: Boolean,
+    ): AudStatus = when (reason) {
         Reason.TOGGLE_OFF -> AudStatus.OFF
         Reason.SDK_TOO_OLD -> AudStatus.SDK_TOO_OLD
         Reason.NO_RECORD_PERMISSION -> AudStatus.NO_MIC_PERMISSION
         Reason.PEER_NOT_ACKED -> AudStatus.WAITING_PEER
         Reason.NO_PROJECTION -> AudStatus.WAITING_VIDEO
         Reason.START -> when {
+            captureFailed && !running -> AudStatus.FAILED
             !running -> AudStatus.WAITING_VIDEO
             state == STATE_SILENT -> AudStatus.NOT_HEARD
             else -> AudStatus.HEARD
@@ -135,7 +150,7 @@ object DeviceAudioPolicy {
     }
 
     /**
-     * 协议侧只有两态（[STATES]）。本地那七态**不许**外推：她那边能做的只有"知道有没有声音"，
+     * 协议侧只有两态（[STATES]）。本地那八态**不许**外推：她那边能做的只有"知道有没有声音"，
      * 而多出来的态是给他自己看的。
      */
     fun peerStateOf(status: AudStatus): String =
