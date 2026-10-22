@@ -159,13 +159,55 @@
   **七条出口 + 一条重绑共用这一个发出点**，采集线程的 finally 是唯一发射口——分成两处发迟早漏掉一条路径；
   观看端同名事件，出口 ∈ channel_closed/session_ended/activity_destroy/codec_error，同样只在播放线程的 finally 发一次，
   靠 `role=` 分辨是"他没在采"还是"她没在放"）、
-  `aud_silent detail=f_25`（沿触发：一段长静音只报一条）、`aud_tick detail=d_<ms>_q_<字节>_l_<丢帧>_b_<字节>`（10s 一条，与 `qos_tick` 同族、已进 P2）、
+  ⚠️ **`r_<出口>` 从 10-22 的修复起才是真读数**：此前 `stop(exit)` 把参数直接丢掉、采集线程自己 `var exit = Exit.SESSION_CLOSE` 收尾，
+  于是**除"线程自杀"以外的六条外因出口全部打成 `r_session_close`**（10-22 双模拟器实测：关开关报的就是 `r_session_close`）。
+  修法与观看端 `DeviceAudioPlayer.pendingExit` 同一条纪律——停机原因由调用方传进来、线程不许猜（`start()` 清零、
+  finally 里 `pendingExit ?: exit`）。**读旧日志时 `r_session_close` 有两种成因**（真的是会话结束 / 只是有人调了 stop），
+  这一格无法回溯区分；锁定用例 `stopPropagatesExitToStoppedTag`，把回退写回 `SESSION_CLOSE` 实测变红。
+  `aud_silent detail=f_25`（沿触发：一段长静音只报一条）、
+  `aud_tick detail=d_<ms>_q_<字节>_l_<丢帧>_di_<编码器没收下输入>_do_<编码器这一帧没出产物>_ds_<通道拒收或帧超限>_b_<字节>`（10s 一条，与 `qos_tick` 同族、已进 P2）、
   `aud_play detail=dl_<放音延迟ms>_q_<排队帧>_l_<迟到丢帧>_w_<线格式不符帧>_t_<窗口ms>`（观看端 10s 一条，同进 P2）。
   ⚠️ **`aud_tick` 的 `d_` 是发送端的帧间隔（节流自证），不是单程延迟**：两端没有共享时钟，
   真正的"她听到晚了多少"只能由观看端的 `aud_play detail=dl_…` 给出；读 `d_` 只能判"采集线程有没有在正常节奏上跑"，
   把它读成延迟＝把这一族的第一个格子就读歪。
+  ⚠️ **`l_` 单独一个数不判因，必须与 `di_/do_/ds_` 成对读（10-22 双模拟器实测出来的第二个缺陷）**：
+  采集跑约 80s 后长期报 `d_21_q_0_l_469_b_0`——**内录明明在有声**（`dumpsys audio` 能看到那条 tone 的 AudioTrack 在 started），
+  而 469 帧全丢、一条都没上线。根因在编码器而不是通道：一次输入只取**一个**输出，
+  而 AAC 编码器会偶发"一次投喂吐两帧"（起流头几拍、CBR 的填充帧），输出队列于是每发生一次就永久多囤一个；
+  囤满之后它不再吃新输入，`dequeueInputBuffer` 从此**恒返** `INFO_TRY_AGAIN_LATER`
+  （不是"等一下再来"，是再也没人消费那些输出）。
+  修法是每帧把可用输出**排空到有界上限**（`MAX_DRAIN_PER_FRAME=4`：不写上界的话一次突发能把 21ms 的节拍拖死）。
+  遥测侧的教训是这条只有拆开三类丢因才可诊断——`di_`=编码器不收输入（积压的特征形状）、
+  `do_`=收了输入但那一轮没出产物、`ds_`=产物超线或 `sink()` 返回 false（通道关/背压）。
+  **`l_>0` 而三类全 `0` 是第三种情形，10-22 之前无法表达**：旧格式里 `q_`/`b_` 也分不开"通道是 null"和"通道是 0 字节"，
+  于是这条 bug 在日志里的形状与"她挂断了但线程还在跑"几乎一样。
+  锁定用例两条：`DeviceAudioTapWiringTest.encoderOutputIsDrainedAndDropCauseIsSplit`（排空循环的界 `MAX_DRAIN_PER_FRAME` 被写小、或写回"取一帧就走"即红）、
+  `DeviceAudioPolicyTest.audTickDetail_keepsDropCauseSplitAndBytesTrackSends`（`di_` 改名即红）；
+  `b_` 由**实际发出的帧数**算，不是由 `l_` 反推——`l_` 涨而 `b_` 不动才是"积压"的形状。
+  ⚠️ **上面那条排空修复本身在第一版里是致命的，读数形状是「`aud_started` → 约 300ms → `aud_stopped r_codec_error`，一条声音都没出去」**（10-22 装机实测，重复三轮）。
+  `dequeueOutputBuffer` 的负数返回值里有三种，只有一种是故障：`INFO_TRY_AGAIN_LATER(-1)` 是"这一拍没有"、
+  `INFO_OUTPUT_FORMAT_CHANGED(-2)` 与 `INFO_OUTPUT_BUFFERS_CHANGED(-3)` 是**事件**（AAC 编码器起来时必定先报一次 format changed，
+  之后每次格式/缓冲集合变动再报），把它们一律当"编码器坏了"往外返回 ⇒ 排空循环第一次转到 -2 就 self-kill。
+  同一段里还叠了第二个更隐蔽的坑：`runCatching { … }.getOrDefault(-1)` 把**抛异常**也压成了 `-1`，
+  而 `-1` 恰好等于 `INFO_TRY_AGAIN_LATER` ⇒ 真出故障时读起来像"只是没帧"，而没帧时读起来像"坏了"，两种病在同一张日志里长得一模一样。
+  修法：哨兵换成不可能与任何 codec 返回值撞上的 `EXCEPTION = Int.MIN_VALUE`；负数分支里显式放行那两个事件码（`continue` 不是 `break`，
+  放过了还要继续排空，否则积压那条路又回来了）；排空的 `for (attempt in 0 until MAX_DRAIN_PER_FRAME)` 因此必须是**尝试次数上限**
+  而不是产出上限——一长串连续负数事件不能把循环变成自旋。
+  锁定用例两条（同一条用例里，实测各抽一次即红）：把 `INFO_OUTPUT_FORMAT_CHANGED` 那一支**注释掉**（token 还留在注释里）
+  ⇒ 报「INFO_OUTPUT_FORMAT_CHANGED 是正常事件，不许当故障」红；两处 `getOrDefault(EXCEPTION)` 里**只改掉第一处**成 `getOrDefault(-1)`
+  ⇒ 报「两处 getOrDefault 只能用那个不与负数码重叠的哨兵」红。
+  这两条各自还纠了一个空锁：前者要求锚点排除注释行（只在注释里提一句事件码、代码照旧当故障，旧断言 `any { contains(token) }` 读不到）；
+  后者从 `any` 换成"函数里**每一处** `getOrDefault(` 都必须是 EXCEPTION"（两处改一处，`any` 会被另一处顶绿）。
+  **教训记在这里**：这三轮的读数全都来自"我上一轮的修复"，不是来自原始代码——所以任何排空/重试类改动装机后必须先量"起了之后还在不在"，
+  只看 `aud_started` 出条就判通过会直接把 self-kill 当成工作正常。
   ⚠️ `aud_play` 的 `dl_` 目前是**常量读数**（`AUD_PLAYOUT_DELAY_MS=200`，它报告的是"现在用的哪一档"，不是实测到的滞后）——
   这一族真正缺的实测是"她的 `l_` 在非弱网条件下是否持续 >0"，`l_=0` 才说明 200ms 够用；调这个值之前必须先有真机 `aud_play` 样本。
+  10-22 双模拟器给了**第一份（模）读数**：`l_` 是**累计**值，58 个窗口（≈580s、约 2.7 万帧）里它停在 **54**（≈0.2%），
+  而形状是"平一段、跳一格"——**稳态窗口里 `l_` 一格都不涨**（连续 8–10 个窗口读同一个数，`q_` 稳在 9–11 帧＝192–235ms，正对着 200ms 这一档），
+  每一次上涨都落在**含 live↔silent 边沿**（`q_` 被放空后重新堆）或**宿主抖动**（同一条里 `t_` 从 10001 涨到 10165）的那一拍。
+  ⇒ 在这一台上 200ms 这一档够，代价集中在状态边沿而不是稳态。
+  ⚠️ 这一条**不能**外推成真机结论：两台模拟器在同一台宿主机上、走的是本机回环 + 中继 TURN，不是无线网络；
+  真机上"她的 `l_` 是否持续 >0"仍是要重取的那一格。
   `w_>0` 只可能是线格式不自证（解码器版本不符/帧被截断），`l_>0` 才是抖动超了硬上限（400ms），两条不许混着读。
   `probe_start` 是探针存活性的对照点：只有 `probe_start` 而没有后续任何边沿事件 = 注册成功但状态一直没翻转（或进程被冻），与"探针根本没起来"是两种情况。
   ⚠️ **`wake_ok`/`wake_off` 曾经 0 条，根因是接线顺序而不是通路（10-18）**：`PresenceService` 里 `updateWakeLock()` 排在 `StandbyProbe.start()` 之前，首次 acquire 的回报落在探针 `running=false` 上被直接丢弃——而"待机时保活锁到底拿到没有"正是待机断连要查的第一件事，等于白埋。改成**先起探针再拿锁**（解绑侧反过来：先放锁再停探针，否则 `wake_off` 同样发不出去）后，15:00 双模拟器装上即出 `event=wake_ok detail=k_3732`，两台各一条（一条直发、一条经补报带 `at_`，两条投递路径同时见光）。顺序已锁进 `StandbyTelemetryTest` S8：换回去即红（已实测）。**同一条修复也让心跳里的 `w=` 从撒谎变成真**：修复前 14:50~14:59 四条 `heartbeat` 全是 `w_0` 而锁其实拿着（`lastWakeHeld` 从没被喂过），修复后 15:05:40 `k_4032 … w_1 s_1`、15:05:43 `k_3958 … w_1 s_1` 两台同时翻正——读旧版本的 `w_0` 时**不许**当成"ROM 把锁放了"，那是埋点顺序缺陷，0.2.59 装机后的版本才有可信的 `w=`。
