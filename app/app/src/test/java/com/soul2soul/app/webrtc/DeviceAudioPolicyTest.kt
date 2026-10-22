@@ -1,0 +1,118 @@
+package com.soul2soul.app.webrtc
+
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
+import org.junit.Test
+
+/**
+ * FR-16 判定层的锁定用例。方法名与批准计划里的清单一一对应，便于日后按名字回查"这条是谁锁的"。
+ */
+class DeviceAudioPolicyTest {
+
+    private val allYes = mapOf(
+        "sdk" to 34, "hasProjection" to true, "toggleWanted" to true,
+        "peerAcked" to true, "hasRecordPermission" to true,
+    )
+
+    private fun gateWith(overrides: Map<String, Any>) = DeviceAudioPolicy.gate(
+        sdk = overrides["sdk"] as Int,
+        hasProjection = overrides["hasProjection"] as Boolean,
+        toggleWanted = overrides["toggleWanted"] as Boolean,
+        peerAcked = overrides["peerAcked"] as Boolean,
+        hasRecordPermission = overrides["hasRecordPermission"] as Boolean,
+    )
+
+    @Test
+    fun gate_requiresAllFiveIncludingPeerAck() {
+        assertEquals(DeviceAudioPolicy.Reason.START, gateWith(allYes))
+        // 五项里任何一项不满足都不许开——尤其 peerAcked：她版本旧时开了只是白烧 140kbps 上行
+        assertEquals(DeviceAudioPolicy.Reason.PEER_NOT_ACKED, gateWith(allYes + ("peerAcked" to false)))
+        assertEquals(DeviceAudioPolicy.Reason.TOGGLE_OFF, gateWith(allYes + ("toggleWanted" to false)))
+        assertEquals(DeviceAudioPolicy.Reason.NO_PROJECTION, gateWith(allYes + ("hasProjection" to false)))
+        assertEquals(
+            DeviceAudioPolicy.Reason.NO_RECORD_PERMISSION,
+            gateWith(allYes + ("hasRecordPermission" to false)),
+        )
+        assertEquals(DeviceAudioPolicy.Reason.SDK_TOO_OLD, gateWith(allYes + ("sdk" to 28)))
+    }
+
+    @Test
+    fun sdk28_neverStarts_evenWithToggle() {
+        // AudioPlaybackCapture 是 API 29 引入的；开关打开、授权齐全也变不出这个 API（Mi5 就是这一格）
+        assertEquals(DeviceAudioPolicy.Reason.SDK_TOO_OLD, gateWith(allYes + ("sdk" to 28)))
+        assertEquals(29, DeviceAudioPolicy.MIN_SDK)
+    }
+
+    @Test
+    fun silentNeedsNConsecutiveFrames_notOne() {
+        val n = DeviceAudioPolicy.SILENT_STREAK_FRAMES
+        assertEquals(1, DeviceAudioPolicy.nextSilentStreak(0, 0))
+        assertEquals(n - 1, DeviceAudioPolicy.nextSilentStreak(n - 2, 0))
+        // 差一帧不算静音：一次气口/一瞬停顿就把状态打成"没声音"是假故障
+        assertEquals(DeviceAudioPolicy.STATE_LIVE, DeviceAudioPolicy.stateOf(n - 1, 0))
+        assertEquals(DeviceAudioPolicy.STATE_SILENT, DeviceAudioPolicy.stateOf(n, 0))
+    }
+
+    @Test
+    fun oneNonZeroSampleResetsBlackStreak() {
+        val streak = DeviceAudioPolicy.SILENT_STREAK_FRAMES
+        assertEquals(0, DeviceAudioPolicy.nextSilentStreak(streak, 1))
+        assertEquals(0, DeviceAudioPolicy.nextBlackStreak(streak, false))
+        // 计数被清之后即便画面仍连续黑着，也不许再判 blocked：两条 streak 必须同一时刻都到底
+        assertEquals(DeviceAudioPolicy.STATE_LIVE, DeviceAudioPolicy.stateOf(0, streak))
+    }
+
+    @Test
+    fun blockedRequiresAudioSilencePairedWithBlackVideo() {
+        val n = DeviceAudioPolicy.SILENT_STREAK_FRAMES
+        // 音频全零但画面不黑 ⇒ 只是"当时没声音在放"，绝不能升成"被屏蔽"
+        assertEquals(DeviceAudioPolicy.STATE_SILENT, DeviceAudioPolicy.stateOf(n, n - 1))
+        // 两路同一时刻都到底 ⇒ 这才是内容保护（DRM / FLAG_SECURE）的样子
+        assertEquals(DeviceAudioPolicy.STATE_BLOCKED, DeviceAudioPolicy.stateOf(n, n))
+    }
+
+    @Test
+    fun videoBlack_absenceOfReadingIsNotBlack() {
+        // 空输入 = 无读数。把"测不到"读成"黑屏"就会造出假 BLOCKED（video_stall 那 6 条假警的同族错法）
+        assertFalse(DeviceAudioPolicy.isVideoBlack(byteArrayOf()))
+        assertTrue(DeviceAudioPolicy.isVideoBlack(ByteArray(64) { 0 }))
+        assertFalse(DeviceAudioPolicy.isVideoBlack(ByteArray(64) { (it % 7 + 100).toByte() }))
+    }
+
+    @Test
+    fun jitterBuffer_dropsOldestAtHardCap() {
+        val delay = DeviceAudioPolicy.AUD_PLAYOUT_DELAY_MS
+        val cap = DeviceAudioPolicy.JITTER_HARD_CAP_MS
+        val t0 = 1_000_000L
+        // 空队列没东西可播
+        assertEquals(DeviceAudioPolicy.JitterAction.WAIT, DeviceAudioPolicy.jitter(-1L, t0, t0))
+        // 没到放音期限 ⇒ 等（这段缓冲就是把 21.33ms 一帧的抖动拉平的那件事）
+        assertEquals(DeviceAudioPolicy.JitterAction.WAIT, DeviceAudioPolicy.jitter(t0, t0, t0 + delay - 1))
+        assertEquals(DeviceAudioPolicy.JitterAction.PLAY, DeviceAudioPolicy.jitter(t0, t0, t0 + delay))
+        // 正好卡在硬上限 ⇒ 还在预算内；越界一格就扔最旧的
+        assertEquals(DeviceAudioPolicy.JitterAction.PLAY, DeviceAudioPolicy.jitter(t0, t0 + cap, t0 + cap))
+        assertEquals(DeviceAudioPolicy.JitterAction.DROP_OLDEST, DeviceAudioPolicy.jitter(t0, t0 + cap + 1, t0 + cap + 1))
+        // 上限看的是"队首到队尾的跨度"，不是"队首自己等了多久"：追赶式突发里后者会误杀整段
+        assertEquals(DeviceAudioPolicy.JitterAction.DROP_OLDEST, DeviceAudioPolicy.jitter(t0, t0 + cap + 50, t0 + delay))
+    }
+
+    @Test
+    fun backpressure_dropsAudioNeverVideo() {
+        // 9600B 的来路：(放音 200ms + 抖动 400ms) × 128kbps ÷ 8 —— 超预算的帧只会迟到，塞进去没有意义
+        assertEquals(9_600, DeviceAudioPolicy.SEND_MAX_BUFFERED_BYTES)
+        assertEquals(DeviceAudioPolicy.SendAdmission.SEND, DeviceAudioPolicy.sendAdmission(0))
+        assertEquals(DeviceAudioPolicy.SendAdmission.SEND, DeviceAudioPolicy.sendAdmission(9_600))
+        assertEquals(DeviceAudioPolicy.SendAdmission.DROP, DeviceAudioPolicy.sendAdmission(9_601))
+        // 一帧的量级必须远小于预算，否则这个门会变成"每帧都丢"的空锁
+        assertTrue(AudioFrameCodec.EXPECTED_AU_BYTES * 8 < DeviceAudioPolicy.SEND_MAX_BUFFERED_BYTES)
+    }
+
+    @Test
+    fun playoutDelayConstantIs200() {
+        // 计划钉死的值。要动它得先有 aud_play detail=dl_… 的读数，不许顺手调参
+        assertEquals(200L, DeviceAudioPolicy.AUD_PLAYOUT_DELAY_MS)
+        assertEquals(400L, DeviceAudioPolicy.JITTER_HARD_CAP_MS)
+        assertEquals(25, DeviceAudioPolicy.SILENT_STREAK_FRAMES)
+    }
+}
