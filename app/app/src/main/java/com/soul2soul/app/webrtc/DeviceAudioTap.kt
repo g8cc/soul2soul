@@ -33,6 +33,12 @@ class DeviceAudioTap(
     private val bufferedBytesOf: () -> Int,
     /** 遥测出口（宿主接 `SelfCheck.reportEvent`） */
     private val onEvent: (name: String, detail: String) -> Unit,
+    /**
+     * live↔silent 翻转的沿口（宿主接 `k=aud` 推送 + 本地状态行刷新）。
+     * 只在**沿**上叫：它是 ctl 上的一条 JSON，每帧一报会把有序信令队列当音频通道用——
+     * 而 `aud` 帧丢掉的那些时刻，信令反而在排队。静音期长达几分钟也只报一次。
+     */
+    private val onStateEdge: (state: String) -> Unit,
 ) {
 
     /** 七条出口 + 一条重绑：`aud_stopped` 的 detail 只能出自这份枚举。 */
@@ -195,7 +201,11 @@ class DeviceAudioTap(
 
                 val maxAbs = DeviceAudioPolicy.maxAbsSample(pcm, pcm.size)
                 silentStreak = DeviceAudioPolicy.nextSilentStreak(silentStreak, maxAbs)
-                state = DeviceAudioPolicy.stateOf(silentStreak)
+                val nextState = DeviceAudioPolicy.stateOf(silentStreak)
+                if (nextState != state) {
+                    state = nextState
+                    onStateEdge(nextState)
+                }
                 // 沿触发：一段长静音只报一条（这是 P0 事件，重复报会吃补报配额）
                 if (silentStreak == DeviceAudioPolicy.SILENT_STREAK_FRAMES && !silentReported) {
                     silentReported = true
@@ -243,7 +253,12 @@ class DeviceAudioTap(
             runCatching { localRecord?.stop() }
             runCatching { localRecord?.release() }
             record = null
-            state = DeviceAudioPolicy.STATE_SILENT
+            if (state != DeviceAudioPolicy.STATE_SILENT) {
+                state = DeviceAudioPolicy.STATE_SILENT
+                // 线程自杀（record/codec 错）没有人会再调 stopAudTap——这条沿是宿主
+                // 知道"采集已经不在了"的唯一机会，少了它状态行会停在"正在听"上撒谎
+                onStateEdge(DeviceAudioPolicy.STATE_SILENT)
+            }
             audEvent("aud_stopped", "r_${exit.tag}")
         }
     }

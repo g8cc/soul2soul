@@ -17,6 +17,7 @@ import androidx.core.app.ServiceCompat
 import com.soul2soul.app.MainActivity
 import com.soul2soul.app.R
 import com.soul2soul.app.signaling.SignalBus
+import com.soul2soul.app.webrtc.DeviceAudioHandshake
 import com.soul2soul.app.webrtc.DeviceAudioPolicy
 import com.soul2soul.app.webrtc.DeviceAudioTap
 import com.soul2soul.app.webrtc.IceServerParser
@@ -56,6 +57,9 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
      * 通道状态、重新授权、撤授权、收尾都会改变判定），入口散了就会漏配（AGENTS 的 hideX 规矩）。
      */
     private var audTap: DeviceAudioTap? = null
+
+    /** 上一次对外发过的内录快照（`开关|状态`）；同一条状态只发一次 ctl，见 [publishAudStatus] */
+    private var audPublishedSig: String? = null
 
     /**
      * 锁屏=画面暂停、会话存续（v0.2.56 推翻 PRD FR-8 的"15 秒自动结束"）：
@@ -161,6 +165,10 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
                 if (ok) {
                     stopAudTap(DeviceAudioTap.Exit.REBIND)
                     startAudTap("rebind")
+                } else {
+                    // 重开失败：内录的旧柄已死（上面只停不启），主页那一行必须跟着改口，
+                    // 否则会停在"正在听"上继续撒谎——这一支没人调 start/stop，得自己发一次
+                    publishAudStatus()
                 }
                 updateNotification(statusText())
                 return START_NOT_STICKY
@@ -205,6 +213,8 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
         pendingSignals.clear()
         videoPaused = false // 新会话从零开始：上一通的"画面已停"绝不能带进这一通
         audWanted = false   // 同上：内录开关默认关，不继承上一通的意图
+        audStatusForUi = DeviceAudioPolicy.AudStatus.OFF
+        audPublishedSig = null   // 新会话的第一条 k=aud 必须发出去，不能被上一通的签名吞掉
 
         val projection: Intent? = intent?.let { it.getProjectionExtra(EXTRA_PROJECTION) }
         if (projection == null) {
@@ -567,7 +577,13 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
      * 五个否决理由各自出路不同（旧机型/没授权/她没开/对面版本旧/没录音权限），重试解决不了任何一个。
      */
     private fun startAudTap(reason: String): Boolean {
-        if (webRtc == null || audGateReason() != DeviceAudioPolicy.Reason.START) return false
+        if (webRtc == null) return false
+        if (audGateReason() != DeviceAudioPolicy.Reason.START) {
+            // 门没过也要发一次：主页那一行得说出**为什么**没起（对面旧版/没录音权限），
+            // 只在这里 return false 而状态行停在上一态，用户读到的是"没反应"
+            publishAudStatus()
+            return false
+        }
         val tap = audTap ?: DeviceAudioTap(
             // 现取：restartCapture 换掉采集器内部的 MediaProjection 之后必须指向新的那一个
             projectionOf = { webRtc?.sharerMediaProjection() },
@@ -578,8 +594,14 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
                     this, "sharer", name, webRtc?.iceStateName ?: "-", detail,
                 )
             },
+            // live↔silent 的沿：采集线程是唯一知道有没有读到声的人，推给她的 k=aud 只能由它叫醒
+            onStateEdge = { watchdog.post { publishAudStatus() } },
         ).also { audTap = it }
-        return tap.start(reason)
+        val started = tap.start(reason)
+        // `tap.start()` 返回 false 是真实存在的一瞬（投影刚好在这一步被撤），
+        // 状态表把它读成 WAITING_VIDEO——所以两条结果都必须发，不许只在成功时发
+        publishAudStatus()
+        return started
     }
 
     /**
@@ -589,6 +611,36 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
      */
     private fun stopAudTap(exit: DeviceAudioTap.Exit) {
         audTap?.stop(exit)
+        publishAudStatus()
+    }
+
+    /**
+     * 内录对外快照的**唯一**生成点：本地状态行（[audStatusForUi] + `local.deviceAudioState`）
+     * 与推给她的 `k=aud` 都从这里出，两处读数不许各自推断一遍（AGENTS「两处真值」）。
+     * 沿触发+去重：`aud` 是开关级事件（一通里最多几次），状态没变就不发第二条——
+     * ctl 是有序可靠通道，把它当音频道刷会让笔迹交棒的 ack 排在后面。
+     */
+    private fun publishAudStatus() {
+        if (webRtc == null) return
+        val status = DeviceAudioPolicy.status(
+            reason = audGateReason(),
+            running = audTap?.isRunning == true,
+            state = audTap?.state ?: DeviceAudioPolicy.STATE_SILENT,
+        )
+        val sig = "${audWanted}|${status.name}"
+        if (sig == audPublishedSig) return
+        audPublishedSig = sig
+        audStatusForUi = status
+        // 旧观看端不认这个 k ⇒ 落进 SignalRouter 的 else，静默无害（与 k="a" 同一条兼容理由）
+        webRtc?.sendControl(
+            DeviceAudioHandshake.stateJson(
+                on = audWanted,
+                state = DeviceAudioPolicy.peerStateOf(status),
+            ),
+        )
+        SignalBus.emit(
+            org.json.JSONObject().put("type", "local.deviceAudioState"),
+        )
     }
 
     // ---------- 会话控制 ----------
@@ -772,6 +824,14 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
          */
         @Volatile
         var audWanted = false
+            private set
+
+        /**
+         * 主页那一行说明的现值（[publishAudStatus] 唯一写入）。UI 只读这一份，
+         * 不许自己去拼"门没过到底是哪一条"——两处判定迟早对不上（AGENTS 两处真值）。
+         */
+        @Volatile
+        var audStatusForUi = DeviceAudioPolicy.AudStatus.OFF
             private set
 
         /** 操控授权状态机（会话级）：通知按钮与授权对话框都经它读写，跨 Activity/Service 共享 */

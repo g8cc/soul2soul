@@ -210,6 +210,38 @@
                 android:layout_height="wrap_content"
                 android:layout_marginTop="16dp"
                 android:text="@string/action_end" />
+
+            <!-- 设备声音共享（FR-16）唯一入口。刻意不做第 5 个通知动作：
+                 t0 的动作数守卫锁死「守卫外 3 + 守卫内 1」，且 MIUI 折叠通知本来就看不见动作 -->
+            <!-- 描边按钮：MaterialButton 会忽略 android:background，用普通 Button 会撞主题变实粉底 -->
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnDeviceAudio"
+                style="@style/Widget.Material3.Button.OutlinedButton"
+                android:layout_width="match_parent"
+                android:layout_height="52dp"
+                android:layout_marginTop="12dp"
+                android:text="@string/aud_switch_title"
+                android:textColor="@color/primary"
+                android:textSize="15sp"
+                app:strokeColor="@color/primary" />
+
+            <!-- 状态行：只由 ScreenShareService.audStatusForUi 这一份快照刷新（开关拨了没起、
+                 起了没声，是三种不同的样子，必须分开说，否则用户只能猜哪一环坏了） -->
+            <TextView
+                android:id="@+id/tvDeviceAudioState"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:textColor="@color/text_secondary"
+                android:textSize="13sp" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="6dp"
+                android:text="@string/aud_switch_hint"
+                android:textColor="@color/text_secondary"
+                android:textSize="12sp" />
         </LinearLayout>
 
         <!-- 权限引导卡片 -->

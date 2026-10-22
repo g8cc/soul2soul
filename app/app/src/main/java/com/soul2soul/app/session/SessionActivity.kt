@@ -42,6 +42,7 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
     private var remoteVideoTrack: VideoTrack? = null
     private lateinit var boxIncoming: View
     private lateinit var tvState: TextView
+    private lateinit var tvAudState: TextView
     private lateinit var tvCountdown: TextView
     private lateinit var tvElapsed: TextView
     private lateinit var tvRtt: TextView
@@ -77,6 +78,13 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
     private var live = false
     /** 共享端报过 videooff 且还没报 videoon：解锁不许把横幅收起来（画面仍然停着） */
     private var remoteVideoPaused = false
+    /**
+     * 最近一条 `k=aud` 的两格现值（FR-16）。**null = 从没收到过**，这与"收到过 on=0"是两件事：
+     * 后者能判"TA 没开"，前者什么都不能判（旧共享端根本不会发这条）。
+     * 横幅文案由 SignalRouter.deviceAudioBannerRes 一处算，两个触发点（这条到达、连通那一刻）都只调它。
+     */
+    private var peerAudOn: Boolean? = null
+    private var peerAudState: String? = null
     /**
      * 「我收笔 → 她画布落墨」这一跳的账本。两个时刻都取本机 uptimeMillis，
      * 同一台设备可直接相减，不需要时钟同步。
@@ -156,6 +164,7 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
         overlay = findViewById(R.id.drawingOverlay)
         boxIncoming = findViewById(R.id.boxIncoming)
         tvState = findViewById(R.id.tvState)
+        tvAudState = findViewById(R.id.tvAudState)
         tvCountdown = findViewById(R.id.tvCountdown)
         tvElapsed = findViewById(R.id.tvElapsed)
         tvRtt = findViewById(R.id.tvRtt)
@@ -752,7 +761,8 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
             // 判据（controlMode/live）与 UI 更新同在主线程：与提取前的读取时序一致
             when (val action = SignalRouter.routeData(
                 json.optString("k"), overlay.controlMode, live, json.optString("reason"),
-                remoteVideoPaused, json.optString("id")
+                remoteVideoPaused, json.optString("id"),
+                json.optInt("on", -1), json.optString("state"),
             )) {
                 SignalRouter.DataAction.None -> Unit
                 is SignalRouter.DataAction.EchoAck -> {
@@ -803,7 +813,32 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
                     mainHandler.removeCallbacks(restoreCtlBanner)
                     mainHandler.postDelayed(restoreCtlBanner, 5000)
                 }
+                is SignalRouter.DataAction.PeerDeviceAudio -> {
+                    peerAudOn = action.on
+                    peerAudState = action.state
+                    refreshAudBanner()
+                }
             }
+        }
+    }
+
+    /**
+     * 「TA 手机里的声音我听到没有」这一行的唯一写入点（显示与隐藏都在这一处，
+     * AGENTS「成对操作收口为单一方法」）。两个触发时刻共用同一个判定函数：
+     * 收到 `k=aud`、以及连通那一刻（后者专门用来出"对面版本太旧"——那条永远不会有消息来报）。
+     */
+    private fun refreshAudBanner() {
+        val res = SignalRouter.deviceAudioBannerRes(
+            peerOn = peerAudOn,
+            peerState = peerAudState,
+            channelSeen = client?.deviceAudioChannelSeen == true,
+            live = live,
+        )
+        if (res == null) {
+            tvAudState.visibility = View.GONE
+        } else {
+            tvAudState.setText(res)
+            tvAudState.visibility = View.VISIBLE
         }
     }
 
@@ -865,6 +900,9 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
             btnBall.visibility = View.VISIBLE
             overlay.visibility = View.VISIBLE // 接听并连通前不显示/不响应画笔层
             live = true
+            // 「对面版本太旧」这一格只能在这里出：旧共享端既不建 aud 通道也不发 k=aud，
+            // 这条判断没有消息会再叫醒它，连通那一刻是唯一时机
+            refreshAudBanner()
             // 新一通从干净的账本开始：上一通没配上 ack 的笔迹绝不能带进来当 miss
             echoLedger.reset()
             micGranted = checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) ==

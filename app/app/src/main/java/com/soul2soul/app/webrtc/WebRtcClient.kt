@@ -738,6 +738,13 @@ class WebRtcClient(
     /** 观看端亲口回过 audok：内录的唯一开闸依据（aud 由本端创建，非空证明不了对面版本） */
     val deviceAudioPeerSupported: Boolean get() = deviceAudioPeerAcked
 
+    /**
+     * **观看端专用**：对面创建过 `aud` 通道吗？这是"那台手机认得 FR-16"的唯一机器判据——
+     * 旧共享端既不建通道也不发 `k=aud`，这边没有任何消息可报错，只能靠通道有没有出现过说话。
+     * 共享端读它没有意义（自己建的，恒真），所以这里把 `isSharer` 折进去，误用直接得到 false。
+     */
+    val deviceAudioChannelSeen: Boolean get() = !isSharer && audChannel != null
+
     fun deviceAudioChannelOpen(): Boolean =
         runCatching { audChannel?.state() == DataChannel.State.OPEN }.getOrDefault(false)
 

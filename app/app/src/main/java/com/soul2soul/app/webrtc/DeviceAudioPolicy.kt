@@ -85,6 +85,62 @@ object DeviceAudioPolicy {
         else -> Reason.START
     }
 
+    /**
+     * **共享端自己屏幕上**的那一行说明（与推给她的 `state` 两态不是同一个东西，见 [peerStateOf]）。
+     * 之所以要七态而不是两态：门的五个否决理由各自的出路完全不同，把它们统一成"没开"或"失败"
+     * 就等于没解释——"TA 版本太旧"和"这个 App 不让录制"是两件事，用户能做的也只有两件事。
+     */
+    enum class AudStatus {
+        /** 开关关着（默认态，不是一条提示） */
+        OFF,
+
+        /** API < 29：结构上做不到，与开关无关 */
+        SDK_TOO_OLD,
+
+        /** 没给录音权限。Android 里这条权限就叫「麦克风」，文案必须认这个名字（否则她在设置里找不到），
+         *  同时要明说不是要她闭麦——内录和说话用的是同一条权限，两个语义在她那儿是相反的。 */
+        NO_MIC_PERMISSION,
+
+        /** 开了、但对面还没回 audok（她版本旧，或通道还没 OPEN） */
+        WAITING_PEER,
+
+        /** 开了、门也过了，但采集柄还没到位（画面没起来/正在起） */
+        WAITING_VIDEO,
+
+        /** 正在采、正在推 */
+        HEARD,
+
+        /** 开了且在采，但连续全零——**不判成因**（可能禁止录制，也可能当时没声音在放） */
+        NOT_HEARD,
+    }
+
+    /**
+     * 状态表。`reason` 来自 [gate]，`running`/`state` 来自采集线程，三者不许由 UI 各自推断
+     * （MainActivity 里再抄一遍判定＝两处真值，这是本仓库立过规矩的那种错法）。
+     * ⚠️ `reason == START` 但线程没在跑是**真实存在**的一瞬（`tap.start()` 返回 false：
+     * 投影刚好在那一刻被撤），它必须落到 WAITING_VIDEO，不许冒充 HEARD 也不许冒充 NOT_HEARD。
+     * 按 Reason 穷举、**不写 else**：以后加一条否决理由而这里没接，编译期就红。
+     */
+    fun status(reason: Reason, running: Boolean, state: String): AudStatus = when (reason) {
+        Reason.TOGGLE_OFF -> AudStatus.OFF
+        Reason.SDK_TOO_OLD -> AudStatus.SDK_TOO_OLD
+        Reason.NO_RECORD_PERMISSION -> AudStatus.NO_MIC_PERMISSION
+        Reason.PEER_NOT_ACKED -> AudStatus.WAITING_PEER
+        Reason.NO_PROJECTION -> AudStatus.WAITING_VIDEO
+        Reason.START -> when {
+            !running -> AudStatus.WAITING_VIDEO
+            state == STATE_SILENT -> AudStatus.NOT_HEARD
+            else -> AudStatus.HEARD
+        }
+    }
+
+    /**
+     * 协议侧只有两态（[STATES]）。本地那七态**不许**外推：她那边能做的只有"知道有没有声音"，
+     * 而多出来的态是给他自己看的。
+     */
+    fun peerStateOf(status: AudStatus): String =
+        if (status == AudStatus.HEARD) STATE_LIVE else STATE_SILENT
+
     /** 一帧非零即清计数——这是"连续"的定义本身，不许用累计值偷懒。 */
     fun nextSilentStreak(streak: Int, maxAbsSample: Int): Int =
         if (maxAbsSample == 0) streak + 1 else 0

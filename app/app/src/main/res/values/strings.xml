@@ -334,4 +334,22 @@
     <string name="msg_recall_failed">这条撤不回来了，可能已超过5分钟</string>
     <string name="msg_recalled_me">你撤回了一条消息</string>
     <string name="msg_recalled_peer">对方撤回了一条消息</string>
+
+    <!-- 设备声音共享（PRD FR-16）：隐私边界写在旁注里，用户不必翻文档就知道采的是什么 -->
+    <string name="aud_switch_title">让TA听到我手机里的声音</string>
+    <string name="aud_switch_hint">开了以后，你手机里正在放的视频、音乐、游戏声音，TA 都能听到，你自己的说话声照旧一起传。
+听不到的几种情况：打电话时、以及有些 App（比如部分长视频软件）自己设了不允许被录制，还有一类受版权保护的影片。TA 那边会看到是哪种情况。</string>
+    <string name="aud_state_off">没开（TA 只听得到你说话）</string>
+    <string name="aud_state_sdk_too_old">这台手机系统太旧，放不了内部声音</string>
+    <string name="aud_state_no_mic">还没给「麦克风」权限，录不到（不是要你闭麦，下面权限里点「麦克风」授权就行）</string>
+    <string name="aud_state_waiting_peer">等 TA 那边准备好（TA 的 App 版本太旧就一直是这个）</string>
+    <string name="aud_state_waiting_video">画面还没连上，声音还在等</string>
+    <string name="aud_state_heard">TA 正在听我手机里的声音</string>
+    <string name="aud_state_not_heard">开了，但 TA 现在听不到（这个 App 不允许被录制，或没在放声音）</string>
+    <string name="aud_peer_live">TA 手机里的声音你能听到</string>
+    <!-- 协议只有 live/silent 两态，所以这一句必须把 silent 的几种成因一起说清（不是挑一个怪罪）：
+         全零 PCM 本身不携带结论，共享端那边也只是"没读到声音"而已 -->
+    <string name="aud_peer_silent">TA 开了声音共享，但现在没有声音过来：可能是那个 App 不允许被录制（不是坏了），也可能 TA 那边本来就没在放。让 TA 换个播放器，或者直接外放。</string>
+    <string name="aud_peer_off">TA 没开「让TA听到我手机里的声音」，你只听得到 TA 说话</string>
+    <string name="aud_peer_too_old">TA 的 App 版本太旧，还听不到手机里的声音</string>
 </resources>
