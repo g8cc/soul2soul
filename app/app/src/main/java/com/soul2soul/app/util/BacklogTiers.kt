@@ -42,6 +42,10 @@ object BacklogTiers {
      * `aud_tick`（FR-16 内录通路的心跳，10s 一条）与 `qos_tick` 是同一族：**重复标量、且发射点就在
      * 采集线程里**——它一断就是"内录停了"，而停这件事由紧随其后的 `aud_stopped`（P0，受保护）说，
      * 不需要靠数 tick 的缺口。留着 P0 的代价是：一通 20 分钟共享能灌 120 条，把 P0 配额整个占满。
+     *
+     * `aud_play` 是同一件事在**观看端**的另一半（10s 一条，报放音延迟档/排队帧数/迟到丢弃/线格式不符/窗口），
+     * 降级理由与 `aud_tick` 完全一致：重复标量、"她那边没声了"由 `aud_stopped` 说而不是由缺口说。
+     * 两端各留 P0 的话，一通 20 分钟共享是 240 条——比配额本身还多。
      */
     fun tierOf(line: String): Int {
         val event = runCatching {
@@ -49,7 +53,7 @@ object BacklogTiers {
         }.getOrNull() ?: return TIER_QOS
         return when (event) {
             "heartbeat", "video_stall", "echo_ack" -> TIER_GAP
-            "qos_tick", "aud_tick" -> TIER_QOS
+            "qos_tick", "aud_tick", "aud_play" -> TIER_QOS
             else -> TIER_DEATH
         }
     }

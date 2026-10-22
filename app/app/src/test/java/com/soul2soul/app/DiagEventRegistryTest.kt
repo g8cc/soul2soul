@@ -147,8 +147,13 @@ class DiagEventRegistryTest {
         val files = ktFiles().map { it.name to mask(it.readText()) }
 
         // 1) 找出所有"接收 event: String 形参"的函数，记下事件位下标与可见性
+        //    ⚠️ 按 (名字) 归**多份**而不是覆盖：`Map<String, Wrapper>` 会让同名私有包装函数只留下
+        //    最后扫到的那个文件，其它文件里的同名包装被当成"别人的私有函数"整体跳过
+        //    ——10-22 实测踩过：DeviceAudioTap 与 DeviceAudioPlayer 各有一个 `audEvent(event: String, …)`，
+        //    观看端的 `aud_play` 因此扫不出来。这类失效是静默的（少收名字 ⇒ 反向差集里冒出"文档登记了代码从不发"，
+        //    看着像代码漏埋），所以键必须带出处。
         val decl = Regex("""fun\s+(\w+)\s*\(([^)]*)\)""")
-        val wrappers = mutableMapOf<String, Wrapper>()
+        val wrappers = mutableMapOf<String, MutableList<Wrapper>>()
         files.forEach { (fileName, src) ->
             decl.findAll(src).forEach { m ->
                 val params = m.groupValues[2]
@@ -157,7 +162,9 @@ class DiagEventRegistryTest {
                 if (idx < 0) return@forEach
                 val lineStart = src.lastIndexOf('\n', m.range.first) + 1
                 val isPrivate = src.substring(lineStart, m.range.first).contains("private")
-                wrappers[m.groupValues[1]] = Wrapper(idx, fileName, isPrivate)
+                val candidate = Wrapper(idx, fileName, isPrivate)
+                val list = wrappers.getOrPut(m.groupValues[1]) { mutableListOf() }
+                if (list.none { it.declaringFile == fileName && it.index == idx }) list.add(candidate)
             }
         }
         // 扫描器自己坏了必须被发现：这四个是已知的出口，少一个就说明形状对不上源码了
@@ -167,18 +174,20 @@ class DiagEventRegistryTest {
 
         // 2) 扫调用点，取事件位实参的顶层字面量
         files.forEach { (fileName, src) ->
-            wrappers.forEach { (fn, w) ->
-                if (w.isPrivate && w.declaringFile != fileName) return@forEach
-                var from = 0
-                while (true) {
-                    val hit = src.indexOf("$fn(", from)
-                    if (hit < 0) break
-                    from = hit + 1
-                    val before = if (hit == 0) ' ' else src[hit - 1]
-                    if (before.isLetterOrDigit() || before == '_') continue // transmit( 之类不算
-                    val lineStart = src.lastIndexOf('\n', hit) + 1
-                    if (src.substring(lineStart, hit).contains("fun ")) continue // 声明不是调用
-                    argAt(src, hit + fn.length, w.index)?.let { take(topLevelNames(it), fileName) }
+            wrappers.forEach { (fn, defs) ->
+                defs.forEach { w ->
+                    if (w.isPrivate && w.declaringFile != fileName) return@forEach
+                    var from = 0
+                    while (true) {
+                        val hit = src.indexOf("$fn(", from)
+                        if (hit < 0) break
+                        from = hit + 1
+                        val before = if (hit == 0) ' ' else src[hit - 1]
+                        if (before.isLetterOrDigit() || before == '_') continue // transmit( 之类不算
+                        val lineStart = src.lastIndexOf('\n', hit) + 1
+                        if (src.substring(lineStart, hit).contains("fun ")) continue // 声明不是调用
+                        argAt(src, hit + fn.length, w.index)?.let { take(topLevelNames(it), fileName) }
+                    }
                 }
             }
             // 补报重放路径不经 reportEvent（会递归），它直接 put("event", …)
@@ -203,7 +212,15 @@ class DiagEventRegistryTest {
         )
         // 本轮埋点存在的理由，一个都不许从扫描结果里漏掉
         listOf("heartbeat", "qos_tick", "qos_bad", "gather_done", "ice_failed", "aexit", "app_exit",
-            "backlog_drop", "session_end", "bucket_", "net_up", "doze_on", "wake_fail", "peer_signal")
+            "backlog_drop", "session_end", "bucket_", "net_up", "doze_on", "wake_fail", "peer_signal",
+            "aud_started", "aud_stopped", "aud_silent", "aud_tick", "aud_play")
             .forEach { assertTrue("扫描器没抓到 $it", emitted.containsKey(it)) }
+        // 同名私有包装函数分处两个文件时，两边的调用点都必须被收到
+        //（10-22 的失效形状：Map 覆盖 ⇒ DeviceAudioPlayer 的 `audEvent` 被当成"别人的私有函数"整体跳过，
+        //  观看端唯一发出的 `aud_play` 扫不出来 ⇒ 报成"文档登记了代码从不发的事件名"，看着像漏埋）
+        assertTrue("aud_play 的出处必须是播放器（归错文件＝包装函数登记表又塌回一份）",
+            emitted["aud_play"] == "DeviceAudioPlayer.kt")
+        assertTrue("aud_tick 的出处必须是采集线程",
+            emitted["aud_tick"] == "DeviceAudioTap.kt")
     }
 }
