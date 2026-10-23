@@ -2,13 +2,15 @@ package com.soul2soul.app.msg
 
 import java.io.File
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * 通知栏留言条数的决策表（锁定 v0.2.31 需求：静音常驻、变化才刷新、读完消失），
+ * 通知栏留言条数的决策表（锁定 v0.2.31 需求：常驻、变化才刷新、读完消失），
  * 以及 #82 的判据：签名从"条数"换成"是哪几条"——只比条数会停在上一条的预览上。
+ * M4~M7 锁的是 10-23 的改口径：留言从「静静躺着不出声」改成「要出声」（横幅仍然不弹）。
  */
 class UnreadNotifierTest {
 
@@ -145,16 +147,61 @@ class UnreadNotifierTest {
     }
 
     @Test
-    fun `M4 留言通知安静躺着-不响不横幅不震动（用户 10-20 定口径）`() {
-        val text = notifier().joinToString("\n")
-        for (noisy in listOf("setPriority", "setDefaults", "setVibrate", "setSound")) {
-            assertTrue("留言通知用了 $noisy＝会响或会横幅，与\"静静躺在通知里\"相反",
-                !text.contains(noisy))
-        }
+    fun `M4 留言通知要出声-但仍不弹横幅（用户 10-23 改口径，推翻 10-20 的静音）`() {
         val ch = msgChannel(source("app/src/main/java/com/soul2soul/app/session/Notif.kt"))
-        assertTrue("msg 渠道必须真的是 IMPORTANCE_LOW", ch.any { it.contains("IMPORTANCE_LOW") })
-        assertTrue("同一条语句里不许再出现别的档位（HIGH/MAX＝横幅+声音）",
-            ch.none { it.contains("IMPORTANCE_HIGH") || it.contains("IMPORTANCE_MAX") || it.contains("IMPORTANCE_DEFAULT") })
+            .joinToString("\n")
+        assertTrue("msg 渠道必须 IMPORTANCE_DEFAULT：出声、不 heads-up",
+            ch.contains("IMPORTANCE_DEFAULT"))
+        assertTrue("同一句里不许再出现 LOW/MIN（＝烂回 0.2.64 的「静静躺着」不出声）",
+            listOf("IMPORTANCE_LOW", "IMPORTANCE_MIN").none { ch.contains(it) })
+        assertTrue("不许擅自升到 HIGH/MAX：那会盖出横幅，10-23 只要求出声",
+            listOf("IMPORTANCE_HIGH", "IMPORTANCE_MAX").none { ch.contains(it) })
+        val text = notifier().joinToString("\n")
+        for (flashy in listOf("setPriority", "setVibrate")) {
+            assertTrue("留言通知用了 $flashy＝横幅/震动，超出「带声音」的口径",
+                !text.contains(flashy))
+        }
+    }
+
+    @Test
+    fun `M5 出声靠换新渠道id生效-沿用msg的话已装机用户永远听不到`() {
+        val lines = source("app/src/main/java/com/soul2soul/app/session/Notif.kt")
+        val text = lines.joinToString("\n")
+        val idLine = lines.firstOrNull { it.contains("const val CH_MSG =") }
+            ?: error("找不到 CH_MSG 常量定义——渠道改名了，这条锁必须先红")
+        val idValue = Regex("\"([^\"]*)\"").find(idLine)?.groupValues?.get(1)
+            ?: error("CH_MSG 那行取不出字符串字面量：$idLine")
+        assertTrue("渠道 id 不许退回 0.2.64 那条已建成的「msg」：系统侧改不掉它的档位，只有新 id 才带声音",
+            idValue != "msg")
+        assertTrue("旧静音渠道必须删掉，否则系统设置里留两条同名「留言提醒」，她分不清关哪条",
+            text.contains("deleteNotificationChannel(CH_MSG_SILENT)"))
+        assertTrue("CH_MSG_SILENT 必须真的指向旧 id msg，否则删的是空气",
+            Regex("CH_MSG_SILENT\\s*=\\s*\"msg\"").containsMatchIn(text))
+    }
+
+    @Test
+    fun `M6 只有真来了新留言才出声-旧留言重排不许催第二遍`() {
+        val a = msg("1")
+        val b = msg("2")
+        assertTrue(UnreadNotifier.isNewArrival(emptySet(), listOf(a)))
+        assertTrue("旧的一条之外多了新 id：该响",
+            UnreadNotifier.isNewArrival(setOf("1"), listOf(a, b)))
+        assertFalse("同一批再次挂通知（留言页切走→回来重新显示）不该又响一遍",
+            UnreadNotifier.isNewArrival(setOf("1"), listOf(a)))
+        assertFalse("读掉一条后剩下的那条是旧消息：不是新到达",
+            UnreadNotifier.isNewArrival(setOf("1", "2"), listOf(b)))
+        assertFalse("没有未读就没有可响的", UnreadNotifier.isNewArrival(setOf("1"), emptyList()))
+    }
+
+    @Test
+    fun `M7 出声开关接在到达判定上-26以下还得自己挂声音`() {
+        val text = notifier().joinToString("\n")
+        assertTrue("setOnlyAlertOnce 必须由 alert 决定；焊死 true＝新留言也永远不出声",
+            text.contains(".setOnlyAlertOnce(!alert)"))
+        assertTrue("渠道只存在于 26+；26 以下（Mi5/API 24）不在 Builder 上挂声音就是彻底静音",
+            Regex("SDK_INT < 26[\\s\\S]{0,160}setSound").containsMatchIn(text))
+        assertTrue("alert 必须由 isNewArrival 算出来，不许是常量",
+            text.contains("isNewArrival(alertedIds, unread)"))
     }
 
     /** CH_MSG 那条渠道语句：同一行收尾就取一行，跨行则取到收尾括号（不许只取半句） */

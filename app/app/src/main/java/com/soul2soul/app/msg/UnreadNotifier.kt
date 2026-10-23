@@ -9,7 +9,8 @@ import com.soul2soul.app.R
 import com.soul2soul.app.session.Notif
 
 /**
- * 通知栏常驻未读留言（v0.2.31 选的形态：静音、不横幅、读完消失；#82 起正文就是留言本身）。
+ * 通知栏常驻未读留言（v0.2.31 选的形态：常驻、读完消失；#82 起正文就是留言本身；
+ * 10-23 用户改口径「留言做成带声音的吧，不要静默了」⇒ 出声，但仍不弹横幅）。
  * plan 是纯决策（JVM 单测锁定）；sync 负责落到系统通知。
  * 调用方：PresenceService 挂 InboxStore 监听 + MessageActivity 前后台切换。
  */
@@ -37,6 +38,13 @@ object UnreadNotifier {
     /** 语音不转文字，只报时长（向上取整；0/负数不给假读数） */
     fun voiceSec(durMs: Int): Int = if (durMs <= 0) 0 else (durMs + 999) / 1000
 
+    /**
+     * 这批未读里是否含有"从没出过声的 id"——只有真来了新留言才值得再响一次。
+     * 读掉一条后剩下的那条重排、或留言页切回后台把通知重新挂上，都不是新消息，不能催第二次。
+     */
+    fun isNewArrival(alertedIds: Set<String>, unread: List<Msg>): Boolean =
+        unread.any { it.id !in alertedIds }
+
     /** 通知正文只有一行：换行与连续空白压成单个空格（留言里塞满换行会把通知撑爆） */
     fun flatten(s: String): String = s.replace(Regex("\\s+"), " ").trim()
 
@@ -48,6 +56,10 @@ object UnreadNotifier {
     var suppressed = false
 
     private var shownSig: String? = null
+
+    /** 已经出过声的留言 id：跨 Hide 保留（收起通知不等于这条被处理过，但也不该再响第二遍） */
+    @Volatile
+    private var alertedIds: Set<String> = emptySet()
 
     fun sync(ctx: Context) {
         val unread = if (suppressed) emptyList() else InboxStore.received()
@@ -61,7 +73,9 @@ object UnreadNotifier {
                 shownSig = signature(unread)
                 val nm = NotificationManagerCompat.from(ctx)
                 if (!nm.areNotificationsEnabled()) return // 权限没给就只留主页角标
-                runCatching { nm.notify(Notif.ID_MSG, build(ctx, unread)) }
+                val alert = isNewArrival(alertedIds, unread)
+                if (alert) alertedIds = (alertedIds + unread.map { it.id }).toSet()
+                runCatching { nm.notify(Notif.ID_MSG, build(ctx, unread, alert)) }
             }
         }
     }
@@ -70,7 +84,7 @@ object UnreadNotifier {
         if (m.kind == "voice") ctx.getString(R.string.msg_voice_line, voiceSec(m.durMs))
         else flatten(m.text)
 
-    private fun build(ctx: Context, unread: List<Msg>): android.app.Notification {
+    private fun build(ctx: Context, unread: List<Msg>, alert: Boolean): android.app.Notification {
         val count = unread.size
         val title = if (count == 1) ctx.getString(R.string.msg_unread_one)
         else ctx.getString(R.string.msg_unread_many, count)
@@ -87,7 +101,7 @@ object UnreadNotifier {
             .setContentTitle(title)
             .setContentText(newest.ifEmpty { ctx.getString(R.string.msg_unread_tap) })
             .setNumber(count)
-            .setOnlyAlertOnce(true)
+            .setOnlyAlertOnce(!alert)
             .setAutoCancel(true)
             .setContentIntent(tap)
         if (count > 1) {
@@ -95,6 +109,9 @@ object UnreadNotifier {
             for (m in bodyLines(unread)) style.addLine(lineOf(ctx, m))
             b.setStyle(style)
         }
+        // 26+ 声音挂在渠道上（写在这里会被系统忽略）；26 以下没有渠道概念，不挂就是彻底静音
+        if (android.os.Build.VERSION.SDK_INT < 26)
+            Notif.defaultSoundUri()?.let { b.setSound(it) }
         return b.build()
     }
 }
