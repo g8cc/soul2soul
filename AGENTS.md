@@ -31,6 +31,19 @@ export JAVA_HOME=/Users/wardonguo/tools/jdk17/jdk-17.0.2.jdk/Contents/Home
 ```
 
 - Flavor：`prod`（连云服务器）/ `emu`（applicationId 加 `.emu`，连 `ws://10.0.2.2:8080` 双模拟器）× debug/release 共 4 变体。
+- **新克隆/新机器必须先自建两个不入库的文件**，否则构建直接失败而不是"少个功能"：
+  ① `app/local.properties` = 一行 `sdk.dir=<本机 Android SDK 绝对路径>`；
+  ② `app/keystore.properties`（发 release 才需要，见 `docs/SIGNING.md`）。
+  10-23 远端把跟踪状态的 `app/local.properties` 从仓库删了（开发机绝对路径不该入库，判断正确），
+  但这台机器实测 `ANDROID_HOME`/`ANDROID_SDK_ROOT` 都没设、两个 `gradle.properties` 里也没有 `sdk.dir` ⇒ SDK 路径
+  **只**由这个文件提供，缺它 `assembleProdDebug` 当场报 `SDK location not found`（看起来像构建坏了，其实缺的是一个不入库的文件）。
+  根因是 `.gitignore` 原先写 `/local.properties`——前导斜杠只锚仓库根，而 Gradle 根是 `app/`，所以那份文件一直是被跟踪的；
+  现在规则是不带斜杠的 `local.properties`。t0 锁得住的是这两条（都实测过抽掉即红）：ignore 规则写回带斜杠的版本即红、
+  本文件这一条 `sdk.dir=` 锚点被删即红。
+  ⚠️ **"SDK 来源全缺就红 t0"这条守卫做不到，别再去补**：`scripts/test.sh` 第 25-36 行会自己探测
+  `$HOME/Library/Android/sdk` 等三个候选并 `export ANDROID_HOME` ⇒ t0 里任何读 `${ANDROID_HOME:-}` 的判据恒为"已设"。
+  我 10-23 第一版正是这么写的，把 `app/local.properties` 移走 t0 照绿——一条恒不触发的空锁，已删（坑㉘ 同族，方向相反：恒绿）。
+  真正判"SDK 找不到"落在 t1：探测不到时它报 `Android SDK 不存在（设置 ANDROID_HOME 后可启用 T1）` 并 SKIP（SKIP≠通过）。
 - **不要用 `-P` 属性切换信令 URL**（BuildConfig 任务对属性变化不敏感，会拿旧值）。
 - 版本 bump 必须配合 `clean`：Kotlin 会内联 BuildConfig 常量（v0.2.12 实锤 hasUpdate 焊死）。`publish-release.sh` 已内置 clean。
 - **签名口令不入库**：`app/app/build.gradle.kts` 只读未跟踪的 `app/keystore.properties`（模板 `.example` 入库）。
