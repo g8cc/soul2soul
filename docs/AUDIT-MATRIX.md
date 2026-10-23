@@ -247,9 +247,8 @@ awk '/^## 9\./,/^---$/' docs/AUDIT-MATRIX.md | grep -o '⬜' | wc -l
 与「她外放→她的麦克风回环」两条是本轮**主动登记**的未证实项，发版说明里必须照实写，不许用 `PASS(模)` 顶替。
 
 ---
-维护规则（AUDIT.md §5）：每关一条真机 bug，本表加一行/填一格并登记 gate；新有状态功能上线前必须先有 §表头，格子可以 ⬜，表不能没有。
 
-## 9. 信令身份与连接注册（server/src/index.js）
+## 10. 信令身份与连接注册（server/src/index.js）
 
 状态：`未 hello` / `已注册未配对` / `已配对` / `连接被替换或关闭`
 
@@ -264,7 +263,7 @@ awk '/^## 9\./,/^---$/' docs/AUDIT-MATRIX.md | grep -o '⬜' | wc -l
 
 本轮审计按上述状态×事件逐格复核；未被协议测试覆盖、且未由代码证明的格子继续保留 `⬜`。
 
-## 10. 更新提示（MainActivity）
+## 11. 更新提示（MainActivity）
 
 状态：`检查中` / `有更新待提示` / `已提示` / `呼叫中` / `Activity 暂停或重建`
 
@@ -275,3 +274,6 @@ awk '/^## 9\./,/^---$/' docs/AUDIT-MATRIX.md | grep -o '⬜' | wc -l
 | 点击内联更新按钮 | N-A | PASS 按钮绑定 `showUpdateDialog()` | PASS 同左 | ⬜ 呼叫过程中按钮遮挡/点击行为待设备验证 | ⬜ 暂停/重建时的实际窗口可交互性待设备验证 |
 | 呼叫结束/回前台 | N-A | PASS `onResume` 重新评估待提示版本 | N-A | PASS 呼叫结束后回主页评估；单测锁代码路径 | PASS `onResume` 重新检查且不受 10 分钟节流挡住 |
 | 旋转或 Activity 重建 | PASS 检查协程由新 Activity 重启 | PASS 重新检查后按版本策略决定是否提示 | PASS `updatePromptedCode` 经实例状态恢复 | ⬜ 呼叫期旋转与系统授权交互仍待设备验证 | PASS 已提示版本号经 `onSaveInstanceState` 恢复 |
+
+---
+维护规则（AUDIT.md §5）：每关一条真机 bug，本表加一行/填一格并登记 gate；新有状态功能上线前必须先有 §表头，格子可以 ⬜，表不能没有。

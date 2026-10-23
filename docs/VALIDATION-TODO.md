@@ -1,13 +1,16 @@
 # 真机验证待办与记录
 
-最后更新：2026-10-22
-跟踪基线：远端源码 `381ee64`（App `0.2.65`，versionCode 65，**尚未发布**，现网 `0.2.64`）；另含本地连接身份、更新提示修复及本次合并后的审计记录。
+最后更新：2026-10-23
+跟踪基线：`381ee64` + 已上更新通道的 **App `0.2.65`（versionCode 65，10-23 发布，远端 `version.json` sha256 `a2b8e174…` 与本地 dist 逐字节一致）** + 远端的连接身份/更新提示修复与本次合并后的审计记录。
 
 ## 当前结论
 
-- T0、T2、T3 静态/服务端/协议检查已通过（含本次代码审计修改）；T1 的 Android 断言已由直接 Gradle 运行产物核对通过，但仓库脚本在本机默认 Kotlin daemon 回连阶段会挂起，需在可用的 Kotlin daemon 或使用 in-process 策略的环境重跑脚本门控。
-- T4 双设备真机验证尚未完成；此前环境未能提供可用的双设备 adb 会话。
-- 本轮源码复核后：T0 通过（新增审计矩阵后 `126` 个 `⬜`、`0 GAP`）；T2 `55/55`；T3 协议/冒烟/留言/召回/存量回填全部通过，含重复 `hello`、旧 socket 延迟关闭和首个无效 `hello` 重试回归。Android 直接 Gradle 单测产物为 `50` 个测试类、`390` 个用例，`0` failures / `0` errors / `0` skipped（仓库脚本默认 Kotlin daemon 在本机回连阶段卡住，不能把那次脚本汇总的 T1 FAIL 当成断言失败）。仓库内 `app/local.properties` 已删除，避免把开发机 SDK 绝对路径继续跟踪。
+- T0、T2、T3 静态/服务端/协议检查已通过（含本次代码审计修改）；T1 的 Android 断言已由直接 Gradle 运行产物核对通过，但**他们那台机器**的仓库脚本在默认 Kotlin daemon 回连阶段会挂起，需在可用的 Kotlin daemon 或使用 in-process 策略的环境重跑脚本门控。
+  ⚠️ 这条不是通用结论：10-23 在本机（合并了远端这三笔之后）跑 `bash scripts/test.sh`，t0/t1/t2/t3 全部 PASS、rc=0，t1 没有卡住——daemon 挂起是那台开发机的环境差，不许读成"仓库脚本的 T1 门控不可用"。
+- T4 双设备真机验证尚未完成；此前环境未能提供可用的双设备 adb 会话。⚠️ 另外要知道读数机制：**默认 `bash scripts/test.sh` 的汇总里根本没有 t4 那一行**（`run_tier` 里 `t4 && E2E!=1 → return`，连 SKIP 都不记），所以"四行全 PASS"不等于"真机跑过了"；要拿到 t4 的显式读数必须加 `--e2e` 或 `--tier t4`（本机 10-23 实跑 `--tier t4` 出的是 `需要 2 台在线模拟器/设备（当前 0）` + `t4 SKIP`）。
+- 本轮源码复核后：T2 `55/55`；T3 协议/冒烟/留言/召回/存量回填全部通过，含重复 `hello`、旧 socket 延迟关闭和首个无效 `hello` 重试回归。Android 直接 Gradle 单测产物为 `50` 个测试类、`390` 个用例，`0` failures / `0` errors / `0` skipped（仓库脚本默认 Kotlin daemon 在本机回连阶段卡住，不能把那次脚本汇总的 T1 FAIL 当成断言失败）。
+  ⚠️ **上面那句"T0 通过（126 个 ⬜）"是合并前那一拍的读数**（数的是表格行内的 `⬜`），合并了本地 FR-16 §9 之后已不成立：10-23 用同一条命令重量为**表格内 158 / 全文 171 / §9 切片 36**（口径区别见 `docs/AUDIT-MATRIX.md` 开头）。
+  ⚠️ 远端那笔把 `app/local.properties` 从仓库里删掉是对的（不该跟踪开发机的 SDK 绝对路径），但**光删不行**：这台机器 `ANDROID_HOME`/`ANDROID_SDK_ROOT` 未设、`app/gradle.properties` 与 `~/.gradle/gradle.properties` 里也没有 `sdk.dir`，SDK 路径**只**由这个文件提供，接受删除的后果是 `gradle -p app assembleProdDebug` 直接报 SDK location not found。已按正确方式收口：`.gitignore` 的规则从 `/local.properties`（前导斜杠只匹配仓库根，而 Gradle 根是 `app/`——这正是它当初被跟踪的原因）改成不带斜杠的 `local.properties`，文件留在磁盘上且不入库。
 - 因此 ICE 恢复修复、语音短杂音诊断、不同屏幕尺寸下的画面/触点对齐，以及画质/耗电优化都还没有本轮真机证据。它们是“待验证”，不是已确认有故障，也不能据此宣称体验已达标。
 
 ## 未完成项
