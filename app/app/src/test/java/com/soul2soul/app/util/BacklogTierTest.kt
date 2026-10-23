@@ -91,6 +91,13 @@ class BacklogTierTest {
         assertEquals(BacklogTiers.TIER_GAP, BacklogTiers.tierOf(line("heartbeat")))
         assertEquals(BacklogTiers.TIER_GAP, BacklogTiers.tierOf(line("video_stall")))
         assertEquals(BacklogTiers.TIER_QOS, BacklogTiers.tierOf(line("qos_tick")))
+        // FR-16 内录这一族：**只有 10s 一条的 tick 可以廉价**，起止与全零是"通路到底活着没有"的现场证据，
+        // 被断连积压丢掉就等于这条功能从来没上过线
+        assertEquals(BacklogTiers.TIER_QOS, BacklogTiers.tierOf(line("aud_tick")))
+        assertEquals(BacklogTiers.TIER_QOS, BacklogTiers.tierOf(line("aud_play")))
+        assertEquals(BacklogTiers.TIER_DEATH, BacklogTiers.tierOf(line("aud_started")))
+        assertEquals(BacklogTiers.TIER_DEATH, BacklogTiers.tierOf(line("aud_stopped")))
+        assertEquals(BacklogTiers.TIER_DEATH, BacklogTiers.tierOf(line("aud_silent")))
     }
 
     // T7b（#78，10-19 双真机实测后新增）：静止画面的 stall 洪水不许挤掉死亡现场。
@@ -158,7 +165,13 @@ class BacklogTierTest {
             .flatMap { Regex(""""([a-z_]+)"""").findAll(it).map { m -> m.groupValues[1] } }
             .toSet()
         assertTrue("扫描器没抓到 heartbeat 的降级分支＝它坏了，这条对账等于没对", "heartbeat" in demoted)
-        assertEquals(setOf("heartbeat", "video_stall", "echo_ack", "qos_tick"), demoted)
+        // `aud_tick`（FR-16 内录通路心跳，10s 一条）的理由与 qos_tick 同一条：重复标量，
+        // 而"内录停了"由 P0 的 aud_stopped 说，不靠数 tick 缺口
+        // `aud_play` 是它在观看端的另一半（放音侧 10s 一条），同一条口径、同一个分支
+        assertEquals(
+            setOf("heartbeat", "video_stall", "echo_ack", "qos_tick", "aud_tick", "aud_play"),
+            demoted,
+        )
         assertTrue("默认分支不见了", Regex("""else\s*->\s*TIER_DEATH""").containsMatchIn(text))
     }
 

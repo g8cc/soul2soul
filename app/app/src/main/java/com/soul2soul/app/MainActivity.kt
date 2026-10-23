@@ -25,6 +25,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
+import com.soul2soul.app.session.DeviceAudioCopy
 import com.soul2soul.app.session.Notif
 import com.soul2soul.app.session.Presence
 import com.soul2soul.app.session.ScreenShareService
@@ -251,6 +252,12 @@ class MainActivity : AppCompatActivity() {
             ScreenShareService.stopSharing(this, "main_page")
             boxSharing.postDelayed({ updateUi() }, 500)
         }
+        // 内录开关：这里只把"意图"递进服务，**不**当场刷新那一行——
+        // 状态由服务过完五条件门后经 local.deviceAudioState 回推（主页自算一次就是第二处真值，
+        // 而且点完立刻读 audWanted 会拿到翻转前的旧值，显示成"没开"更误导）
+        findViewById<View>(R.id.btnDeviceAudio).setOnClickListener {
+            ScreenShareService.toggleDeviceAudio(this)
+        }
         btnCall.setOnClickListener { onCallClicked() }
         btnMessage.setOnClickListener {
             startActivity(Intent(this, com.soul2soul.app.msg.MessageActivity::class.java))
@@ -454,6 +461,11 @@ class MainActivity : AppCompatActivity() {
             "local.connState" -> {
                 // 信令连接态变化（PresenceService.onState 广播）：胶囊底色实时刷新。
                 // 权威值存 Presence.connState，这里只触发重绘；错过事件由 onResume 兜底。
+                updateUi()
+            }
+            "local.deviceAudioState" -> {
+                // 内录那一行的现值由服务算好后推（publishAudStatus 唯一写入点）：
+                // 开着但门没过、采集在跑但全零，主页都得跟着改口，不许停在上一句上
                 updateUi()
             }
         }
@@ -897,6 +909,11 @@ class MainActivity : AppCompatActivity() {
         boxPairing.visibility = if (paired) View.GONE else View.VISIBLE
         boxReady.visibility = if (paired && !sharing) View.VISIBLE else View.GONE
         boxSharing.visibility = if (sharing) View.VISIBLE else View.GONE
+        // 内录那一行的文案：只从服务那份快照（audStatusForUi）生成，主页不参与判定。
+        // 和上面三块同一处刷新=AGENTS「状态只在这里收口」，任何状态变化都必须走 updateUi
+        findViewById<TextView>(R.id.tvDeviceAudioState).setText(
+            DeviceAudioCopy.sharerStatusRes(ScreenShareService.audStatusForUi),
+        )
         // 老搭档复配入口：仅未配对 + 服务端有 30 天内历史时出现
         val recallVisible = !paired && hasHistory
         findViewById<View>(R.id.btnRecall).visibility =

@@ -191,6 +191,56 @@ AOSP 的 Doze 网络限制对它根本不生效，所以凡涉及"真 Doze 行�
 | `ice_failed` / `video_resumed` / `surface_destroyed` / `backlog_drop` / `wake_fail` / `wake_off` / `doze_on` / `capture_fail` / `fgs_start_failed` / `webrtc_start_failed` / `leave_hint_screen_off` / `ice_recovered` | 仍 ⬜ | 都是"这一轮没发生那件事"（没硬断过 ICE、帧回来时没跨过告警阈值、没饱和到淘汰、acquire 没抛异常……）。**零采样 ≠ 埋点坏**，但也一律不许改判 PASS |
 
 ---
+
+## 9. 设备音频共享（FR-16，`AudioPlaybackCapture` → AAC → `aud` 通道 → 对端 `AudioTrack`）
+
+状态：`关`（默认） / `开·live`（采到非零 PCM） / `开·silent`（连续 25 帧全零） / `开·门没过`（五条件里缺一条：旧机型 / 没录音权限 / 没画面 / 对面没回 `audok`）
+
+**本轮建表的现状**：代码已落地并有 JVM 锁（下列 `PASS` 全是逻辑/接线锁的读数，不是设备读数）。
+**10-22 双模拟器（API 34，两端同版本）另给了一批 `PASS(模)` 设备读数**——它们只证明"这条通路真会出数、格式对"，
+不证明"HyperOS/MIUI 上也这样"；凡是"她听不听得见、听着抖不抖"这类**听感判据**一律 `⬜`——本机双模拟器视频段 ~0.5fps、单帧截图 0.6~4.4s，
+而声音根本没有像素判据；`MODE_IN_COMMUNICATION` 与 MIUI 音频策略的真实表现只能 Mi10/米15 出。
+
+| 事件＼状态 | 关 | 开·live | 开·silent | 开·门没过 |
+|---|---|---|---|---|
+| 主页唯一入口点一次 | PASS `gateIsCalledOnlyFromService` + 点击只递意图（不本地刷状态，读的是翻转前的旧值） | PASS(模) 10-22：点一次即出 `aud_started detail=sr_48000_ch_2_c_aac_r_toggle_on`（起因真落到位，不是常量）；⬜ 真机第一次点开是否起采（HyperOS 的 `MODE_IN_COMMUNICATION` + 音频策略） | ⬜ 同上 | PASS `status_separatesEveryGateRejection`（四个理由四条文案）；⬜ Android 7（Mi5）那台是否稳定停在 `SDK_TOO_OLD` |
+| **他在放声音 → 她真听得到**（用户报的那句「她听不到声音」的正面判据） | N-A（关着不放） | PASS(模) 10-22：他那边 `adb shell app_process tone.jar`（uid 2000、`USAGE_MEDIA`）当已知可采音源，她那边 `dumpsys audio` 同时列出**两条 started 的 AudioTrack 且都来自我们自己的进程**——`USAGE_VOICE_COMMUNICATION`（libwebrtc 的语音轨）+ `USAGE_MEDIA/CONTENT_TYPE_MUSIC`（本功能的新轨）⇒ 混音器层面两股声音确实并存，这是 FR-16 要的"视频声＋我的声音"；同刻他侧 `aud_tick d_21_q_0_l_2_b_162983`（≈130kbps）、她侧 `aud_play dl_200_q_9_l_6_w_0_t_10006`；**同一台上 10-22 复跑还给了放音档的第一份读数**：58 个窗口里 `l_`（累计迟到丢帧）停在 54（≈0.2%），**稳态窗口一格不涨**、只在 live↔silent 边沿与宿主抖动（`t_` 10001→10165）那几拍跳格 ⇒ `AUD_PLAYOUT_DELAY_MS=200` 在这台上够用；⬜ **真机/无线网上是否也够用**（这两台模拟器同在一台宿主机上走回环，不是网络样本）；⬜ **听感**（卡不卡、有没有爆音、同步不同步）只能人耳，本机给不出任何判据 | PASS(模) 音源一停 ≈533ms 内出 `aud_silent f_25`，他侧状态行改「开了，但 TA 现在听不到」、她侧横幅改成带原因+出路的静音文案 | ⬜ |
+| 关开关 / 会话结束 / 她挂断（`aud_stopped` 的**出口名**） | N-A | PASS(模) 10-22 之前这一格是**假的**：`stop(exit)` 把参数丢了、线程自己 `SESSION_CLOSE` 收尾 ⇒ 六条外因出口全打成 `r_session_close`（关开关实测就是这条），已按观看端 `pendingExit` 纪律补齐并锁 `stopPropagatesExitToStoppedTag`（写回 `SESSION_CLOSE` 即红）；**PASS(模) 10-22 复跑：同一条日志里三个出口名各归其位**——`r_toggle_off`（关开关，两次）、`r_session_close`（他点「结束」）、观看端侧 `r_session_ended`（她收到关闭），且三条都出在同一段采集线程的收尾（旧形状下这三条会全是 `r_session_close`）；⬜ 真机每条出口各来一次（撤授权/服务销毁那两条只能真机造） | 同左（同一发出点） | PASS `audTapStopCoversAllSevenExits`（七条出口+一条重绑都有调用点） |
+| 系统撤销录屏授权（她锁屏省电／在隐私提示里点"停止录制"） | N-A（没在采） | PASS 出口 `PROJECTION_STOPPED` 有调用点（`audTapStopCoversAllSevenExits`）；⬜ **这一格在模拟器上结构造不出来**（10-22 逐个试过四条：① shade 里没有系统的"停止共享"动作，只有我们自己的「正在共享屏幕」那条 + 一个 `content-desc="Applications are using your microphone."` 隐私芯片；② `cmd media_projection` 回 `No shell command implementation`；③ QS 页滑到第二页也没有投影 tile；④ `input keyevent 26` 锁屏 10s ⇒ `projection_revoked` **0 条**、`aud_stopped` 0 条，即这台 API 34 模拟器根本不因锁屏撤投影——真机那条 #77 是 HyperOS 的行为）⇒ 只能真机取 | ⬜ 撤授权时正处静音期 ⇒ `aud_stopped` 与 `aud_silent` 的先后无法用屏幕证 | PASS 门没过不发假状态（`每条起停路径都发布一次快照`，M2 实测抽掉即红） |
+| **他锁屏 10s（画面可能停，声音该不该停）** | N-A | PASS(模) 10-22：锁屏那一窗 `aud_tick d_22_q_0_l_17_di_0_do_17_ds_0_b_153909` 带 `fg=false screenOn=false` 照出、`aud_stopped` 零条 ⇒ **内录线程不随锁屏停**（这是设计：她锁屏时他这边的视频声仍要能到；但也意味着 HyperOS 若在锁屏时撤了 projection，这一格的真机读数会不同——见上一行）；⬜ 真机：撤投影后 tap 是否收到 `r_projection_stopped` | 同左 | N-A |
+| 重新授权成功（`restartCapture` 重绑） | N-A | PASS `rebindReturnsRestartOnlyForNewProjectionHandle`（先停后起、柄现取）；⬜ **设备复跑没做成**——撤销这一步在本机就造不出来（见上两行那四条试过的路子），所以"撤→重开→内录自动重绑且会话没结束"整条链在模拟器上**未取得任何读数**，只能真机；⬜ Android 14 上新 projection 是否接受第二个消费者（计划里的停止条件③，未触发也未证实） | ⬜ | ⬜ |
+| 重新授权**失败** | N-A | N-A（失败即无 live） | PASS 只停不启 + 状态行自己改口（`publishAudStatus` 在这一支单独调一次；抽掉该行 t1 实测变红） | 同左 |
+| 他按「静音」（micMuted） | N-A | PASS `muteToggleDoesNotTouchDeviceAudio`（分支里不许出现 audTap/audWanted）⇒ 闭麦不该关掉视频声；PASS(模) 10-22 真点了一次通知动作（`dumpsys notification` 报 `actions=4`、第 0 条就是「静音」）：按下去 `aud_stopped` 增量为 **0**、`aud_tick` 照走、动作随即翻成「取消静音」；⬜ 真机确认她仍然听得到内录 | PASS 同左（逻辑层） | N-A |
+| 弱网 / SCTP 积压 | N-A | PASS `backpressure_dropsAudioNeverVideo`（9600B 门，丢音频绝不丢视频/语音）；⬜ 真机弱网下她听到的是"跳"还是"停" | ⬜ | ⬜ |
+| 对面版本旧（不回 `audok`） | N-A | N-A（门拦住了，不起采集＝不白烧 140kbps） | N-A | PASS 她那侧的 `aud_peer_too_old` 由 `deviceAudioChannelSeen` 判（`旧对端判据只认观看端见过的通道`，M6 抽掉 `!isSharer` 即红）；⬜ 混跑一通（新观看端+旧共享端）的实际观感 |
+| 他那台是 Android < 29 | N-A | N-A（结构上做不到，不是开关问题） | N-A | PASS `sdk28_neverStarts_evenWithToggle`；⬜ Mi5 真机文案是否读得懂（只能人工看，那台驱动不了 UI） |
+| `aud` 通道 CLOSED / renegotiation / ICE restart | N-A | PASS `renegoAndQualitySwitchDoNotTouchAudChannel`（只重发 offer，不打断她正在听的声音）；⬜ 真机切网后声音是否续上 | ⬜ | N-A |
+| 会话结束 / 服务销毁 | N-A | PASS `stopTapPrecedesClientClose`（先停采集再 close，顺序反了=往已关闭通道塞帧） | PASS 线程自杀那一路也有沿（`线程状态沿接到快照发布`） | N-A |
+| App 被系统杀 | N-A | ⬜ `aud_stopped` 能否经补报到达（与 `app_exit` 同一条死法，需真机） | ⬜ | ⬜ |
+| 采集线程读写出错 / 编码器坏 | N-A | PASS `RECORD_ERROR`/`CODEC_ERROR` 两个出口 + `aud_stopped` 单一发出点在 finally（`audStoppedEmittedOnceInFinally`）；**PASS(模) 10-22 双模拟器这条出口真被触发过一次**（不是注入：`AudioRecord.Builder` 里 `setAudioSource(MIC)` 与 `setAudioPlaybackCaptureConfig` 互斥，构造当场抛 ⇒ 零 `aud_started`/零 `aud_tick`，只剩 `aud_stopped detail=r_record_error`），当时暴露的第二条谎是"线程自杀后状态行永远停在「画面还没连上，声音还在等」"——已单独成态 `FAILED`（锁定 `recordBuilderDoesNotSetAudioSource` / `status_captureFailureIsNotWaitingVideo` / `lastFailureIsSetBeforeStateEdgeAndClearedOnStart`，三条逐条抽掉实测变红）；⬜ HyperOS/MIUI 的音频 HAL 会不会自己把采集打挂（只能真机） | 同左 | N-A |
+| **编码器输出积压**（10-22 取证轮自己咬人的一格，非注入） | N-A | PASS(模) 内录正常跑约 80s 后长期报 `aud_tick d_21_q_0_l_469_b_0`——PCM 明明还在读到非零（状态行说"正在听"），一条都发不出去：一次投喂只取一个输出，而 AAC 偶发"一次吐两帧"（起流头几拍、CBR 填充帧），囤满输出池后 `dequeueInputBuffer` **恒返** `TRY_AGAIN_LATER`，只有重新 start()（换一台编码器）才恢复。已改成每帧排空到有界上限（`MAX_DRAIN_PER_FRAME=4`），并把 `aud_tick` 的丢因拆成 `di_/do_/ds_`（旧格式分不开"编码器积压""通道是 null""通道拒收"，这条 bug 的形状与"她挂了但线程还在跑"几乎一样）；锁定 `encoderOutputIsDrainedAndDropCauseIsSplit`（排空循环的界写小、或写回"取一帧就走"即红）+ `audTickDetail_keepsDropCauseSplitAndBytesTrackSends`（`di_` 改名即红）；**PASS(模) 10-22 复跑（aud-drive5）跨过了那道坎**：同一条采集线程连续跑到 t+106s 仍然 `aud_tick d_21_q_0_l_0_di_0_do_0_ds_0_b_163681`（`b_`=469 帧×349B 满速、`l_` 稳态 0–3，旧形状在这一拍早已是 `l_469_b_0`）；**live→silent→live 往返也没重启编码器**——静音期 `aud_stopped` 增量为 **0**、tick 照出（`b_164379`，全零帧照样在编码上线，所以 `b_>0` 只证"管线没停"、不证"有声"），音源回来后 `b_` 回到满速且 `aud_started` 总数不变（6→6）。⬜ 真机长跑（HyperOS 是否另有囤积节奏） | ⬜ 静音期编码器是否同样囤积（模拟器上 34s 静音期内 `di_/do_` 均为个位数＝没囤，真机未取） | N-A |
+| **把编码器的"事件"当故障**（10-22 取证轮自己咬人的第二格——是上一条的**修复**引入的，非注入） | N-A | **PASS(模) 真读数（当时的形状是坏的）**：装上第一版排空循环后三轮全是 `aud_started` → 约 300ms → `aud_stopped r_codec_error`，一条声音都没出去 ⇒ 现象一眼可辨（出口名这次是真读数，见上面那格）。根因两条叠在一起：① `dequeueOutputBuffer` 的负数返回里有三种，`-2 INFO_OUTPUT_FORMAT_CHANGED` / `-3 INFO_OUTPUT_BUFFERS_CHANGED` 是**事件**不是故障（AAC 起来必报一次 format changed），一律往外返＝self-kill；② `runCatching{…}.getOrDefault(-1)` 把**抛异常**压成 `-1`，而 `-1` 恰等于 `INFO_TRY_AGAIN_LATER` ⇒ 真坏了读成"只是没帧"、只是没帧读成"坏了"，两种病同一个形状（这条是遥测层的病，不是功能的病）。修法：哨兵换 `EXCEPTION = Int.MIN_VALUE`、两个事件码 `continue` 放行、`MAX_DRAIN_PER_FRAME` 明确成**尝试次数**上限（一长串负数不许变自旋）。锁 `encoderOutputIsDrainedAndDropCauseIsSplit` 的两条新锚点（各实测抽一次即红：注释掉 format-changed 那一支、两处 `getOrDefault` 只改一处）+ 一条"先认事件再判致命"的次序断言（随前者一起红过，未单独做变异）；⬜ 真机编码器是否也在起流时报 format changed（结构上必报，但未在 HyperOS 上取过数） | 同左（同一发出点） | N-A |
+| 隐私边界：usage 白名单 | PASS `usageWhitelistExcludesVoiceCommunication`（含 `USAGE_VOICE_COMMUNICATION`＝她的语音绕回她耳朵，这条是 load-bearing）；⬜ 国产播放器/DRM 内容的实际可采性（YouTube/长视频 App 预期静音＝`silent` 那一列） | | | |
+| 她外放他的视频声 → 她的麦克风再送回去（**本轮新增风险，未观测**） | N-A | ⬜ 回环：软件 AEC 对我们自己的 `AudioTrack` 没有参考信号，延迟几帧后可能形成可闻回声。出现即改（她放音期间对它的上行做低通/压低），未出现也要真机记一格"没听到" | ⬜ | N-A |
+
+空格合计：本节 **36** 格（复核命令如下，数的是本节切片里出现的 ⬜，含说明行）：
+
+```bash
+awk '/^## 9\./,/^---$/' docs/AUDIT-MATRIX.md | grep -o '⬜' | wc -l
+```
+
+这些空格分三类，**不许混着写**：① 设备/听感读数，本机结构上给不出（`⬜` 后附了原因的即此类）；
+② 本机可再跑、这一轮已经跑完的（10-22 aud-drive5 关掉的那三格：长跑跨 80s、live→silent→live 不重启编码器、
+会话结束的出口名 `r_session_close`）——已升成 `PASS(模)`；
+③ 本机可再跑、**这一轮还没跑**的（本轮没有新增此类；上一轮记在这一类下的两项各有各的下落：
+"修后 live→silent→live 往返时 `b_` 仍 >0" 由 aud-drive5 跑完并升成 `PASS(模)`，
+"重新授权成功后的重绑" 则改判成了 ① ——见下面那句）。
+而**"撤销→重开→重绑"这一整条链已从"② 没跑"改判为"① 结构上给不出"**（四条触发路子逐个试过，见上面那两行的括注），
+它不是欠一次复跑，是这台测量平台给不了，只能真机。
+其中「Android 14 新 projection 是否接受第二个消费者」
+与「她外放→她的麦克风回环」两条是本轮**主动登记**的未证实项，发版说明里必须照实写，不许用 `PASS(模)` 顶替。
+
+---
 维护规则（AUDIT.md §5）：每关一条真机 bug，本表加一行/填一格并登记 gate；新有状态功能上线前必须先有 §表头，格子可以 ⬜，表不能没有。
 
 ## 9. 信令身份与连接注册（server/src/index.js）

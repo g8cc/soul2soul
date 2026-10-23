@@ -22,6 +22,7 @@ import androidx.lifecycle.lifecycleScope
 import com.soul2soul.app.App
 import com.soul2soul.app.R
 import com.soul2soul.app.signaling.SignalBus
+import com.soul2soul.app.webrtc.DeviceAudioPlayer
 import com.soul2soul.app.webrtc.IceServerParser
 import com.soul2soul.app.webrtc.WebRtcClient
 import kotlinx.coroutines.launch
@@ -41,6 +42,7 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
     private var remoteVideoTrack: VideoTrack? = null
     private lateinit var boxIncoming: View
     private lateinit var tvState: TextView
+    private lateinit var tvAudState: TextView
     private lateinit var tvCountdown: TextView
     private lateinit var tvElapsed: TextView
     private lateinit var tvRtt: TextView
@@ -77,12 +79,33 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
     /** 共享端报过 videooff 且还没报 videoon：解锁不许把横幅收起来（画面仍然停着） */
     private var remoteVideoPaused = false
     /**
+     * 最近一条 `k=aud` 的两格现值（FR-16）。**null = 从没收到过**，这与"收到过 on=0"是两件事：
+     * 后者能判"TA 没开"，前者什么都不能判（旧共享端根本不会发这条）。
+     * 横幅文案由 SignalRouter.deviceAudioBannerRes 一处算，两个触发点（这条到达、连通那一刻）都只调它。
+     */
+    private var peerAudOn: Boolean? = null
+    private var peerAudState: String? = null
+    /**
      * 「我收笔 → 她画布落墨」这一跳的账本。两个时刻都取本机 uptimeMillis，
      * 同一台设备可直接相减，不需要时钟同步。
      */
     private val echoLedger = EchoLatency { android.os.SystemClock.uptimeMillis() }
     private var elapsedBase = 0L
     private var audioRoute: AudioRouteController? = null
+    /**
+     * 设备内录播放（FR-16）。**与 libwebrtc 的语音轨是两条独立的路**：语音由它自己的
+     * AudioDeviceModule 渲染，这一条由本类渲染，两股声在手机音频混合器里叠加 ⇒
+     * 她才能同时听到"TA 手机里的视频声 + TA 说话"。
+     * 起在构造期而不是懒建：`onDeviceAudioFrame` 回调在 WebRTC 的 binder 线程上，
+     * 懒建那一下的竞态会造出两个播放器、两条 AudioTrack 抢同一个流。
+     */
+    private val audPlayer = DeviceAudioPlayer { name, detail ->
+        // 刻意不复用 viewerEvent：它在 callInvalidated 之后直接 return，
+        // 而"会话结束""页面销毁"这两条出口的 aud_stopped 恰恰必须在那之后还发得出去
+        com.soul2soul.app.util.SelfCheck.reportEvent(
+            applicationContext, "viewer", name, client?.iceStateName ?: "-", detail,
+        )
+    }
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private var ringtone: android.media.Ringtone? = null
@@ -141,6 +164,7 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
         overlay = findViewById(R.id.drawingOverlay)
         boxIncoming = findViewById(R.id.boxIncoming)
         tvState = findViewById(R.id.tvState)
+        tvAudState = findViewById(R.id.tvAudState)
         tvCountdown = findViewById(R.id.tvCountdown)
         tvElapsed = findViewById(R.id.tvElapsed)
         tvRtt = findViewById(R.id.tvRtt)
@@ -737,7 +761,8 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
             // 判据（controlMode/live）与 UI 更新同在主线程：与提取前的读取时序一致
             when (val action = SignalRouter.routeData(
                 json.optString("k"), overlay.controlMode, live, json.optString("reason"),
-                remoteVideoPaused, json.optString("id")
+                remoteVideoPaused, json.optString("id"),
+                json.optInt("on", -1), json.optString("state"),
             )) {
                 SignalRouter.DataAction.None -> Unit
                 is SignalRouter.DataAction.EchoAck -> {
@@ -788,7 +813,32 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
                     mainHandler.removeCallbacks(restoreCtlBanner)
                     mainHandler.postDelayed(restoreCtlBanner, 5000)
                 }
+                is SignalRouter.DataAction.PeerDeviceAudio -> {
+                    peerAudOn = action.on
+                    peerAudState = action.state
+                    refreshAudBanner()
+                }
             }
+        }
+    }
+
+    /**
+     * 「TA 手机里的声音我听到没有」这一行的唯一写入点（显示与隐藏都在这一处，
+     * AGENTS「成对操作收口为单一方法」）。两个触发时刻共用同一个判定函数：
+     * 收到 `k=aud`、以及连通那一刻（后者专门用来出"对面版本太旧"——那条永远不会有消息来报）。
+     */
+    private fun refreshAudBanner() {
+        val res = SignalRouter.deviceAudioBannerRes(
+            peerOn = peerAudOn,
+            peerState = peerAudState,
+            channelSeen = client?.deviceAudioChannelSeen == true,
+            live = live,
+        )
+        if (res == null) {
+            tvAudState.visibility = View.GONE
+        } else {
+            tvAudState.setText(res)
+            tvAudState.visibility = View.VISIBLE
         }
     }
 
@@ -850,6 +900,9 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
             btnBall.visibility = View.VISIBLE
             overlay.visibility = View.VISIBLE // 接听并连通前不显示/不响应画笔层
             live = true
+            // 「对面版本太旧」这一格只能在这里出：旧共享端既不建 aud 通道也不发 k=aud，
+            // 这条判断没有消息会再叫醒它，连通那一刻是唯一时机
+            refreshAudBanner()
             // 新一通从干净的账本开始：上一通没配上 ack 的笔迹绝不能带进来当 miss
             echoLedger.reset()
             micGranted = checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) ==
@@ -880,10 +933,37 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
         }
     }
 
+    /**
+     * 设备内录帧（FR-16）。这一条**不回到主线程**：播放器自己的队列与线程就是为它设计的，
+     * post 到主线程等于把 21.33ms 一帧的节拍交给 UI 卡顿。
+     * 收尾之后的迟到帧必须丢掉——`finishWithCleanup` 已经停了表，再 offer 会把播放线程重新叫起来，
+     * 于是"她已经挂了，我这边还在放 TA 的视频声"。
+     */
+    override fun onDeviceAudioFrame(packet: ByteArray) {
+        if (callInvalidated) return
+        audPlayer.offer(packet)
+    }
+
+    /**
+     * `aud` 通道状态（FR-16）。只有 CLOSED 需要动作：通道没了还留着解码线程和 AudioTrack，
+     * 她那边就有一个占着媒体音量的死播放器；OPEN 什么都不做，第一帧到来自然把线程叫起来
+     * （播放器是懒启动的，这里再"预建"只会多一条没声音的 AudioTrack）。
+     */
+    override fun onDeviceAudioChannelState(state: String) {
+        // stop() 会 join 播放线程（最多 500ms），这条回调在 libwebrtc 的 sigthread 上——
+        // 在那儿阻塞等于把涂鸦/操控的入站消息一起卡住，所以挪回主线程做
+        if (state == "CLOSED") mainHandler.post {
+            audPlayer.stop(DeviceAudioPlayer.Exit.CHANNEL_CLOSED)
+        }
+    }
+
     // ---------- 生命周期 ----------
 
     private fun finishWithCleanup(sendBye: Boolean, notice: Int? = null, endReason: String? = null) {
         callInvalidated = true
+        // 先停内录再收尾：`aud_stopped` 要在这条信令通道还开着的时候发出去，
+        // 而 finish() 之后跟着的就是 onDestroy→client.close()（帧还躺在 socket 里会被一起关掉）
+        audPlayer.stop(DeviceAudioPlayer.Exit.SESSION_ENDED)
         if (notice != null) {
             android.widget.Toast.makeText(this, notice, android.widget.Toast.LENGTH_SHORT).show()
         }
@@ -984,6 +1064,9 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
         }
         remoteVideoTrack?.removeSink(renderer)
         remoteVideoTrack = null
+        // 内录播放必须在关连接之前停：`aud_stopped` 走的是同一条信令通道，
+        // 而 AudioTrack 若晚于 Activity 死，她手机上会留一个占着媒体音量的僵尸播放器
+        audPlayer.stop(DeviceAudioPlayer.Exit.ACTIVITY_DESTROY)
         client?.close()
         client = null
         // WebRTC 播放/采集彻底停止后才恢复系统路由，避免关闭阶段漏出残音。

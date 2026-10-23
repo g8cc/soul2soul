@@ -92,6 +92,16 @@ class WebRtcClient(
          * 0.2.64 起这不是会话终止——共享端要保活，并把"重新开画面"的入口交回给她。
          */
         fun onProjectionRevoked() {}
+        /**
+         * 观看端回来了 `audok`（FR-16）：它亲口确认解得这路 AAC，共享端才可以按开关起内录。
+         * 反向不成立——aud 通道由共享端创建，"通道在"证明不了对面认得它。
+         * 回调在 WebRTC signaling 线程：与 onDataMessage 同一条约束，接线方要自己回主线程。
+         */
+        fun onDeviceAudioPeerAck() {}
+        /** `aud` 通道状态变化（共享端据此停表，不留僵尸采集线程）；同样在 signaling 线程回调 */
+        fun onDeviceAudioChannelState(state: String) {}
+        /** 收到一个内录音频帧（观看端）：`[codec id][ADTS][AU]` 原样交付，解码在播放器里 */
+        fun onDeviceAudioFrame(packet: ByteArray) {}
     }
 
     private val eglContext = App.instance.eglBase.eglBaseContext
@@ -141,6 +151,11 @@ class WebRtcClient(
     @Volatile private var dataChannel: DataChannel? = null
     @Volatile private var ctlChannel: DataChannel? = null
     @Volatile private var ctlgChannel: DataChannel? = null
+    @Volatile private var audChannel: DataChannel? = null
+    /** 观看端亲口 ack 过才为 true（见 DeviceAudioHandshake）：通道非空不算对端支持 */
+    @Volatile private var deviceAudioPeerAcked = false
+    /** 每条 aud 通道只 ack 一次：OPEN 之后可能反复回调状态，不该每次再发一条 */
+    private var audAckSent = false
     private val qualityLock = Any()
     private var pendingQualityEdge: Int? = null
     private var surfaceHelper: SurfaceTextureHelper? = null
@@ -430,7 +445,7 @@ class WebRtcClient(
         }
 
         // 授权/拒绝/错误等控制信令：可靠有序（"允许""收回"乱序 = 隐私事故，必须留 ctl）
-        // 注意创建顺序：0.2.8 观看端 onDataChannel 是后到者覆盖；ctl、ctlg 先建、anno 最后建，
+        // 注意创建顺序：0.2.8 观看端 onDataChannel 是后到者覆盖；ctl、ctlg、aud 先建、anno 最后建，
         // 保证旧观看端最终持有 anno（丢包容忍），笔迹不会被可靠通道的队头阻塞拖死
         val ctlInit = DataChannel.Init().apply { ordered = true }
         ctlChannel = pc.createDataChannel("ctl", ctlInit)?.also {
@@ -442,6 +457,17 @@ class WebRtcClient(
         val ctlgInit = DataChannel.Init().apply { ordered = false }
         ctlgChannel = pc.createDataChannel("ctlg", ctlgInit)?.also {
             it.registerObserver(this)
+        }
+        // aud：设备内录音频（FR-16），本端唯一的二进制通道。
+        // unordered + 不重传：20ms 前那帧重传回来只会堵住后面的活帧（音频是"过期即无用"的数据）。
+        // 必须建在 anno 之前——理由与 ctlg 同一条：旧观看端 onDataChannel 是后到者覆盖，
+        // anno 最后建才保得住笔迹。
+        val audInit = DataChannel.Init().apply {
+            ordered = false
+            maxRetransmits = 0
+        }
+        audChannel = pc.createDataChannel(CtlChannelPolicy.AUD, audInit)?.also {
+            it.registerObserver(audObserverFor(it))
         }
         // 共享端是 offerer，负责创建 DataChannel
         // 笔迹是激光笔范式：容忍丢包、不要队头阻塞（reliable-ordered 在弱网下会堵死整队笔迹）
@@ -707,6 +733,80 @@ class WebRtcClient(
     /** 操控能力握手即通道本身：只有新版共享端会创建 ctl。旧版对端 = null，观看端据此禁用操控 */
     val controlSupported: Boolean get() = ctlChannel != null
 
+    // ---------- 设备内录音频通道（FR-16） ----------
+
+    /** 观看端亲口回过 audok：内录的唯一开闸依据（aud 由本端创建，非空证明不了对面版本） */
+    val deviceAudioPeerSupported: Boolean get() = deviceAudioPeerAcked
+
+    /**
+     * **观看端专用**：对面创建过 `aud` 通道吗？这是"那台手机认得 FR-16"的唯一机器判据——
+     * 旧共享端既不建通道也不发 `k=aud`，这边没有任何消息可报错，只能靠通道有没有出现过说话。
+     * 共享端读它没有意义（自己建的，恒真），所以这里把 `isSharer` 折进去，误用直接得到 false。
+     */
+    val deviceAudioChannelSeen: Boolean get() = !isSharer && audChannel != null
+
+    fun deviceAudioChannelOpen(): Boolean =
+        runCatching { audChannel?.state() == DataChannel.State.OPEN }.getOrDefault(false)
+
+    /** SCTP 在途字节（只进 `aud_tick` 的 `q_`，不参与判定）；通道没建就报 0=无读数 */
+    fun deviceAudioBufferedBytes(): Int =
+        runCatching { audChannel?.bufferedAmount()?.toInt() ?: 0 }.getOrDefault(0)
+
+    /**
+     * 采集用的**那一个** MediaProjection 对象，交内录复用。
+     * 复用而不是再 `getMediaProjection()` 一次是硬约束：Android 14 起同一份 resultData
+     * 第二次换取会被系统拒（本仓库已实测 `Don't re-use the resultData` → 会话 4.5s 死）。
+     * 采集器换代（[restartCapture]）后这里自然指向新对象，重绑取到的就是新的。
+     */
+    fun sharerMediaProjection(): android.media.projection.MediaProjection? =
+        (capturer as? ScreenCapturerAndroid)?.mediaProjection
+
+    /**
+     * 内录音频帧出口（共享端 → 观看端）。返回 false 的一律是**丢掉这一帧**：
+     * 通道没开、或 SCTP 发送缓冲已超预算（DeviceAudioPolicy.sendAdmission）。
+     * 背压时丢音频是刻意的——反过来把帧排队死守，代价会转嫁给同一条 PeerConnection 上的
+     * 视频与语音，而"她听到的一瞬间卡"远不如"画面/声音一起糊"值得保。
+     */
+    fun sendDeviceAudioFrame(packet: ByteArray): Boolean {
+        val dc = audChannel ?: return false
+        if (runCatching { dc.state() }.getOrNull() != DataChannel.State.OPEN) return false
+        val buffered = runCatching { dc.bufferedAmount().toInt() }.getOrDefault(0)
+        if (DeviceAudioPolicy.sendAdmission(buffered) == DeviceAudioPolicy.SendAdmission.DROP) return false
+        return runCatching { dc.send(DataChannel.Buffer(ByteBuffer.wrap(packet), true)) }
+            .onFailure { Log.w(TAG, "device audio send failed", it) }
+            .getOrDefault(false)
+    }
+
+    /** aud 通道的专属 observer：**不许**复用 this（见 audObserverFor 的注释） */
+    private fun audObserverFor(dc: DataChannel): DataChannel.Observer = object : DataChannel.Observer {
+        override fun onBufferedAmountChange(previousAmount: Long) {
+            // 刻意不去碰 flushPendingQuality()：画质请求属于 ctl，音频背压不该触发它重发
+        }
+
+        override fun onStateChange() {
+            val state = runCatching { dc.state().name }.getOrNull() ?: return
+            if (!isSharer) sendAudAckOnce(dc)
+            listener.onDeviceAudioChannelState(state)
+        }
+
+        override fun onMessage(buffer: DataChannel.Buffer) {
+            if (!buffer.binary) {
+                Log.w(TAG, "aud 通道只走二进制帧，忽略文本载荷")
+                return
+            }
+            val bytes = ByteArray(buffer.data.remaining())
+            buffer.data.get(bytes)
+            listener.onDeviceAudioFrame(bytes)
+        }
+    }
+
+    /** 观看端：通道确认 OPEN 才 ack（走有序 ctl）。提前 ack＝对面起一个送不出去的采集 */
+    private fun sendAudAckOnce(dc: DataChannel) {
+        if (audAckSent) return
+        if (runCatching { dc.state() }.getOrNull() != DataChannel.State.OPEN) return
+        if (sendControlNow(DeviceAudioHandshake.ackJson())) audAckSent = true
+    }
+
     /** 远程操控手势出口（观看端 → 共享端）；ctl 通道未建时退回 anno 通道保兼容 */
     fun sendControl(json: JSONObject) {
         sendControlNow(json)
@@ -733,7 +833,10 @@ class WebRtcClient(
     private fun channelByLabel(label: String): DataChannel? = when (label) {
         CtlChannelPolicy.CTLG -> ctlgChannel
         CtlChannelPolicy.CTL -> ctlChannel
-        else -> dataChannel
+        CtlChannelPolicy.ANNO -> dataChannel
+        // 这里也不许 else 兜底：JSON 信令悄悄落到 anno 上，等于把音频/操控的背压传染给笔迹。
+        // AUD 出现在这份表里就是配置错误，宁可让它报"no channel"（下面有 Log.w）也不送去 anno。
+        else -> null
     }
 
     private fun sendControlNow(json: JSONObject): Boolean {
@@ -1231,24 +1334,42 @@ class WebRtcClient(
         }
 
     override fun onDataChannel(dc: DataChannel) {
-        // 观看端：channel 均由共享端创建，按 label 分流
-        when (dc.label()) {
-            "ctl" -> {
+        // 观看端：channel 均由共享端创建，按 label 分流。
+        // ⚠️ 这里**不许**写 else 兜底：兜底＝任何新 label 都会把 anno 顶掉并 unregisterObserver，
+        // 而笔迹通道的 observer 被摘掉后涂鸦是静默失效（不崩、无日志、通道还在），
+        // 只有显式列出每个已知 label，将来加通道才会被"未知 label"这条日志暴露出来。
+        val observer: DataChannel.Observer = when (dc.label()) {
+            CtlChannelPolicy.CTL -> {
                 runCatching { ctlChannel?.unregisterObserver() }
                 ctlChannel = dc
+                this
             }
-            "ctlg" -> {
+            CtlChannelPolicy.CTLG -> {
                 runCatching { ctlgChannel?.unregisterObserver() }
                 ctlgChannel = dc
+                this
             }
-            else -> {
+            CtlChannelPolicy.ANNO -> {
                 runCatching { dataChannel?.unregisterObserver() }
                 dataChannel = dc
+                this
+            }
+            // aud 必须挂专属 observer：本类的 onMessage 起手就是 `if (buffer.binary) return`，
+            // 复用 this 等于把音频帧全丢掉，还会让每次 onStateChange 顺手重发画质请求
+            CtlChannelPolicy.AUD -> {
+                runCatching { audChannel?.unregisterObserver() }
+                audChannel = dc
+                audObserverFor(dc)
+            }
+            else -> {
+                Log.w(TAG, "unknown datachannel label=${dc.label()}（不接管，避免顶掉 anno）")
+                return
             }
         }
-        dc.registerObserver(this)
+        dc.registerObserver(observer)
         // 对端可能在注册 observer 前就已进入 OPEN；不能只依赖后续状态回调。
         flushPendingQuality()
+        if (!isSharer && dc.label() == CtlChannelPolicy.AUD) sendAudAckOnce(dc)
     }
 
     override fun onTrack(transceiver: RtpTransceiver) {
@@ -1364,7 +1485,21 @@ class WebRtcClient(
         val bytes = ByteArray(buffer.data.remaining())
         buffer.data.get(bytes)
         try {
-            listener.onDataMessage(JSONObject(String(bytes, Charsets.UTF_8)))
+            val json = JSONObject(String(bytes, Charsets.UTF_8))
+            // audok 就地消化：它是 aud 通道自己的能力应答，本端就是那条通道的创建者，
+            // 除了这里没人能把它翻译成"可以起内录"。转发给会话页反而会让旧路径
+            // （ScreenShareService 的 else → 涂鸦 hook）收到一个陌生 k。
+            if (isSharer && json.optString("k") == DeviceAudioHandshake.K_ACK) {
+                if (DeviceAudioHandshake.parseAck(json)) {
+                    deviceAudioPeerAcked = true
+                    listener.onDeviceAudioPeerAck()
+                } else {
+                    // 参数对不上＝对面想要另一种编码：宁可不响，也不要送一路她解不出来的帧
+                    Log.w(TAG, "audok 参数不匹配，内录保持关闭: $json")
+                }
+                return
+            }
+            listener.onDataMessage(json)
         } catch (e: Exception) {
             Log.w(TAG, "bad datachannel msg", e)
         }
@@ -1396,6 +1531,11 @@ class WebRtcClient(
         runCatching { ctlChannel?.close() }; ctlChannel = null
         runCatching { ctlgChannel?.unregisterObserver() }
         runCatching { ctlgChannel?.close() }; ctlgChannel = null
+        // 内录帧通道：与 anno 一样是"丢了就丢了"的载荷，收尾顺序不重要，
+        // 但必须在这里关掉——tap 线程的出口判据之一是"通道 CLOSED"
+        runCatching { audChannel?.unregisterObserver() }
+        runCatching { audChannel?.close() }; audChannel = null
+        deviceAudioPeerAcked = false
         remoteVideoSizeSink?.let { sink -> runCatching { remoteVideoTrack?.removeSink(sink) } }
         remoteVideoSizeSink = null
         remoteVideoTrack = null

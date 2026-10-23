@@ -230,6 +230,26 @@ bash scripts/test.sh --coverage
   同一轮顺带的教训：`AuditRound2WiringTest` 用 `onCreate` 起 60 行的窗口找 `updateWakeLock`，我往匿名 `onState` 监听器里加十几行就把它撑红了（合法代码增长弄破写死行数的锚点）。新增埋点一律收成具名方法，守卫按名字开窗口。
   **反向断言必须证明"能变红"**：用桩 adb（有记录→1/1，无记录→0/0）各跑一遍再登记，否则等价于没测。
 
+- 内录一帧都起不来（FR-16，10-22 双模拟器实测）→ `AudioRecord.Builder` 里 `setAudioSource(MIC)` 与 `setAudioPlaybackCaptureConfig` **互斥**，框架当场抛 `Cannot both set audio source and set playback capture config` ⇒ 采集线程死在构造那一步（零 `aud_started`、零 `aud_tick`，只有 `aud_stopped detail=r_record_error`）。锁在 `DeviceAudioTapWiringTest.recordBuilderDoesNotSetAudioSource`：正确形态是不设源（capture config 自带），把 `.setAudioSource(` 写回 `loop()` 函数体任意位置即红（断言在 :216，已实测）。同一批还有第二条谎：线程自杀时状态表只有"没在跑＝还在等画面"一支，横幅会永远停在「画面还没连上，声音还在等」而画面明明连着 ⇒ 新增 `AudStatus.FAILED`（由 `DeviceAudioTap.lastFailure` 喂），锁 `DeviceAudioPolicyTest.status_captureFailureIsNotWaitingVideo`（删 FAILED 那支即红 :188）与 `DeviceAudioTapWiringTest.lastFailureIsSetBeforeStateEdgeAndClearedOnStart`（把 `captureFailed` 焊成 false 即红 :243；同时锁"记失败必须排在状态沿之前"和"`start()` 必须清零"）。
+
+- **MediaCodec「一次输入只取一个输出」是攒雷的写法**（FR-16，10-22 双模拟器实测）：内录正常跑约 80s 后长期报 `aud_tick d_21_q_0_l_469_b_0`——PCM 还在读到非零（状态行说"正在听"），一帧都发不出去。根因在编码器侧：AAC 偶发"一次投喂吐两帧"（起流头几拍、CBR 填充帧），每发生一次输出队列就永久多囤一个，囤满后 `dequeueInputBuffer` **恒返** `INFO_TRY_AGAIN_LATER`（不是"等一下再来"），只有重新 `start()`（换一台编码器）才恢复。正确形态是每帧把可用输出**排空到有界上限**（`MAX_DRAIN_PER_FRAME=4`：不写上界，一次突发能把 21ms 的节拍拖死）。锁 `DeviceAudioTapWiringTest.encoderOutputIsDrainedAndDropCauseIsSplit`，三个锚点分别是排空循环的界（`for (attempt in 0 until MAX_DRAIN_PER_FRAME)`）、`MAX_DRAIN_PER_FRAME` 常量本身、以及旧的"取一帧就走"形状（`if (outIdx < 0) return Frame.DROPPED`）不许回潮。
+  同一格还连带修了遥测的可诊断性：旧 `aud_tick` 只有 `l_`，"编码器积压""通道是 null""通道拒收"三种成因在日志里同一个形状 ⇒ 拆成 `di_/do_/ds_` 并把 `b_` 改成只由**实际发出的帧数**算（`l_` 涨而 `b_` 不动才是积压的形状），锁 `DeviceAudioPolicyTest.audTickDetail_keepsDropCauseSplitAndBytesTrackSends`（`di_` 改名即红）。
+- **`dequeueOutputBuffer` 的负数返回值里只有一种是故障**（FR-16，10-22 是上一条的修复引入的，装机才看得见）：
+  `-1 INFO_TRY_AGAIN_LATER` 是"这一拍没有"，`-2 INFO_OUTPUT_FORMAT_CHANGED` / `-3 INFO_OUTPUT_BUFFERS_CHANGED` 是**事件**
+  （AAC 编码器起来必报一次 format changed）。把它们一律往外返＝线程 self-kill，真读数形状是
+  `aud_started` → 约 300ms → `aud_stopped r_codec_error`，声音一条都出不去。
+  同一段里 `runCatching { … }.getOrDefault(-1)` 又把**抛异常**压成 `-1`，而 `-1` 恰等于 `TRY_AGAIN_LATER`
+  ⇒ "真坏了"与"只是没帧"在日志里同一个形状（这是遥测层的病：它让人去查错的那一段）。
+  修法：哨兵用 `EXCEPTION = Int.MIN_VALUE`、两个事件码 `continue` 放行（放行不等于停止排空，否则积压那条路又回来）、
+  `MAX_DRAIN_PER_FRAME` 语义明确成**尝试次数**上限。
+  锁 `encoderOutputIsDrainedAndDropCauseIsSplit` 的新锚点，实测两条各抽一次即红：注释掉 `INFO_OUTPUT_FORMAT_CHANGED` 那一支 ⇒ 红；
+  两处 `getOrDefault(EXCEPTION)` **只改掉一处**成 `getOrDefault(-1)` ⇒ 红。
+  （同用例里还有一条"先认正常负数码、再判致命"的先后次序断言 `format in 0 until fatal`，它随第一条一起被抽红过，
+  但**没有单独做过变异**——把它当成已经独立证过就是注水。）
+  **这一族用例的锚点必须排除注释行**（只在注释里提一句事件码、代码照旧把它当故障，`any { contains(token) }` 是会绿的空锁），
+  且"两处都得对"的判据只能写成 `all`——10-22 这两处是实测出来的，不是推出来的。
+- **`stop(exit)` 的参数不许被丢掉**（FR-16，同一轮）：采集线程自己 `var exit = Exit.SESSION_CLOSE` 收尾、`stop(exit)` 只改了 `running=false` ⇒ 除"线程自杀"外的六条外因出口**全部**打成 `r_session_close`（关开关实测就是这条），等于把"谁叫它停的"这个唯一答案扔掉。正确形态见观看端 `DeviceAudioPlayer.pendingExit`：原因由调用方传、线程不许猜（`start()` 清零、finally 里 `pendingExit ?: exit`，`lastFailure` 与 `aud_stopped` 读同一份）。锁 `DeviceAudioTapWiringTest.stopPropagatesExitToStoppedTag`（把回退写回 `Exit.SESSION_CLOSE` 即红 :260；同时锁"先记原因再叫线程"的先后次序）。
+
 Service 窗口接线这类 JVM 跑不了的代码，锁定用例的形态是**源码扫描测试/t0 grep 守卫**（把修复
 回滚用例必须变红才算锁定）。审计流程本身的规范（状态机矩阵、5 维度清单、gate 登记制）见
 `docs/AUDIT.md`，矩阵在 `docs/AUDIT-MATRIX.md`（t0 打印空格数）。

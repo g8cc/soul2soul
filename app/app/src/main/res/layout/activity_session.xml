@@ -59,6 +59,23 @@
         android:textSize="16sp"
         android:visibility="gone" />
 
+    <!-- 对方那台手机的内录状况（FR-16）。和 tvCtlMode 一样挂根层而不是底部菜单：
+         操控时整套菜单会收起，这一行讲的是"声音"，不该跟着菜单一起消失。
+         与 tvState 分开挂是刻意的：那条是"画面/连接"的状态（center + 大字 + 会被 screenon/videoon 收掉），
+         合并成一条就得在两处互相覆盖，横幅配对关系立刻变成漏配（AGENTS hideX 必穷举 restoreX） -->
+    <TextView
+        android:id="@+id/tvAudState"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="center_horizontal|top"
+        android:layout_marginTop="72dp"
+        android:background="@drawable/bg_chip"
+        android:paddingHorizontal="12dp"
+        android:paddingVertical="6dp"
+        android:textColor="@color/white"
+        android:textSize="12sp"
+        android:visibility="gone" />
+
     <!-- 来电 -->
     <LinearLayout
         android:id="@+id/boxIncoming"

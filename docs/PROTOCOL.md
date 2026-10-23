@@ -152,7 +152,63 @@
   判"交棒遥测坏了"之前先对提交 `1da0158`。
   **`ice_failed` 与 `ice_outage` 必须在日志里分得开**：`ice_outage`（DISCONNECTED）会等恢复、`ice_failed` 是打洞彻底失败（detail 带 `established=`、`restarts=`、`path=` 的缩码）。取证必须排在恢复策略判定之前，否则 `established` 已被改掉。
   下面这一行是**机器读的**：`DiagEventRegistryTest` 把它与 main 源码扫出的事件名逐一比对，两个方向都不许有差（新增事件名不写进来，t1 直接红；写了没在发，也直接红）。以 `_` 结尾的是前缀项——`bucket_` 覆盖 `bucket_act`/`bucket_wset`/`bucket_freq`/`bucket_rare`/`bucket_rst`。上面那些散文段落是会腐烂的，这行不会。
-  <!-- DIAG-EVENT-NAMES: screen_off/screen_on/capture_ok/capture_fail/ice_outage/ice_recovered/ice_failed/video_stall/video_resumed/viewer_paused/viewer_resumed/surface_created/surface_size/surface_destroyed/sink_attached/fgs_start_failed/webrtc_start_failed/leave_hint_screen_off/pip_enter/pip_exit/peer_signal/gather_done/qos_tick/qos_bad/stop_tap/signaling_down/signaling_up/app_exit/probe_start/heartbeat/net_up/net_down/net_type/doze_on/doze_off/bucket_/wake_ok/wake_off/wake_fail/aexit/session_end/backlog_drop/projection_revoked/projection_resumed/projection_reopen_fail/echo_ack -->
+  <!-- DIAG-EVENT-NAMES: screen_off/screen_on/capture_ok/capture_fail/ice_outage/ice_recovered/ice_failed/video_stall/video_resumed/viewer_paused/viewer_resumed/surface_created/surface_size/surface_destroyed/sink_attached/fgs_start_failed/webrtc_start_failed/leave_hint_screen_off/pip_enter/pip_exit/peer_signal/gather_done/qos_tick/qos_bad/stop_tap/signaling_down/signaling_up/app_exit/probe_start/heartbeat/net_up/net_down/net_type/doze_on/doze_off/bucket_/wake_ok/wake_off/wake_fail/aexit/session_end/backlog_drop/projection_revoked/projection_resumed/projection_reopen_fail/echo_ack/aud_started/aud_stopped/aud_silent/aud_tick/aud_play -->
+  **FR-16 设备内录一族（`aud_*`，`role=sharer` 是采集侧、`role=viewer` 是放音侧）**：`aud_started detail=sr_48000_ch_2_c_aac_r_<起因>`
+  （起因 ∈ toggle_on/peer_ack/channel_open/live/rebind，回答"这次采集是谁叫起来的"）、
+  `aud_stopped detail=r_<出口>`（共享端出口 ∈ toggle_off/projection_stopped/session_close/channel_closed/record_error/codec_error/service_destroy/rebind，
+  **七条出口 + 一条重绑共用这一个发出点**，采集线程的 finally 是唯一发射口——分成两处发迟早漏掉一条路径；
+  观看端同名事件，出口 ∈ channel_closed/session_ended/activity_destroy/codec_error，同样只在播放线程的 finally 发一次，
+  靠 `role=` 分辨是"他没在采"还是"她没在放"）、
+  ⚠️ **`r_<出口>` 从 10-22 的修复起才是真读数**：此前 `stop(exit)` 把参数直接丢掉、采集线程自己 `var exit = Exit.SESSION_CLOSE` 收尾，
+  于是**除"线程自杀"以外的六条外因出口全部打成 `r_session_close`**（10-22 双模拟器实测：关开关报的就是 `r_session_close`）。
+  修法与观看端 `DeviceAudioPlayer.pendingExit` 同一条纪律——停机原因由调用方传进来、线程不许猜（`start()` 清零、
+  finally 里 `pendingExit ?: exit`）。**读旧日志时 `r_session_close` 有两种成因**（真的是会话结束 / 只是有人调了 stop），
+  这一格无法回溯区分；锁定用例 `stopPropagatesExitToStoppedTag`，把回退写回 `SESSION_CLOSE` 实测变红。
+  `aud_silent detail=f_25`（沿触发：一段长静音只报一条）、
+  `aud_tick detail=d_<ms>_q_<字节>_l_<丢帧>_di_<编码器没收下输入>_do_<编码器这一帧没出产物>_ds_<通道拒收或帧超限>_b_<字节>`（10s 一条，与 `qos_tick` 同族、已进 P2）、
+  `aud_play detail=dl_<放音延迟ms>_q_<排队帧>_l_<迟到丢帧>_w_<线格式不符帧>_t_<窗口ms>`（观看端 10s 一条，同进 P2）。
+  ⚠️ **`aud_tick` 的 `d_` 是发送端的帧间隔（节流自证），不是单程延迟**：两端没有共享时钟，
+  真正的"她听到晚了多少"只能由观看端的 `aud_play detail=dl_…` 给出；读 `d_` 只能判"采集线程有没有在正常节奏上跑"，
+  把它读成延迟＝把这一族的第一个格子就读歪。
+  ⚠️ **`l_` 单独一个数不判因，必须与 `di_/do_/ds_` 成对读（10-22 双模拟器实测出来的第二个缺陷）**：
+  采集跑约 80s 后长期报 `d_21_q_0_l_469_b_0`——**内录明明在有声**（`dumpsys audio` 能看到那条 tone 的 AudioTrack 在 started），
+  而 469 帧全丢、一条都没上线。根因在编码器而不是通道：一次输入只取**一个**输出，
+  而 AAC 编码器会偶发"一次投喂吐两帧"（起流头几拍、CBR 的填充帧），输出队列于是每发生一次就永久多囤一个；
+  囤满之后它不再吃新输入，`dequeueInputBuffer` 从此**恒返** `INFO_TRY_AGAIN_LATER`
+  （不是"等一下再来"，是再也没人消费那些输出）。
+  修法是每帧把可用输出**排空到有界上限**（`MAX_DRAIN_PER_FRAME=4`：不写上界的话一次突发能把 21ms 的节拍拖死）。
+  遥测侧的教训是这条只有拆开三类丢因才可诊断——`di_`=编码器不收输入（积压的特征形状）、
+  `do_`=收了输入但那一轮没出产物、`ds_`=产物超线或 `sink()` 返回 false（通道关/背压）。
+  **`l_>0` 而三类全 `0` 是第三种情形，10-22 之前无法表达**：旧格式里 `q_`/`b_` 也分不开"通道是 null"和"通道是 0 字节"，
+  于是这条 bug 在日志里的形状与"她挂断了但线程还在跑"几乎一样。
+  锁定用例两条：`DeviceAudioTapWiringTest.encoderOutputIsDrainedAndDropCauseIsSplit`（排空循环的界 `MAX_DRAIN_PER_FRAME` 被写小、或写回"取一帧就走"即红）、
+  `DeviceAudioPolicyTest.audTickDetail_keepsDropCauseSplitAndBytesTrackSends`（`di_` 改名即红）；
+  `b_` 由**实际发出的帧数**算，不是由 `l_` 反推——`l_` 涨而 `b_` 不动才是"积压"的形状。
+  ⚠️ **上面那条排空修复本身在第一版里是致命的，读数形状是「`aud_started` → 约 300ms → `aud_stopped r_codec_error`，一条声音都没出去」**（10-22 装机实测，重复三轮）。
+  `dequeueOutputBuffer` 的负数返回值里有三种，只有一种是故障：`INFO_TRY_AGAIN_LATER(-1)` 是"这一拍没有"、
+  `INFO_OUTPUT_FORMAT_CHANGED(-2)` 与 `INFO_OUTPUT_BUFFERS_CHANGED(-3)` 是**事件**（AAC 编码器起来时必定先报一次 format changed，
+  之后每次格式/缓冲集合变动再报），把它们一律当"编码器坏了"往外返回 ⇒ 排空循环第一次转到 -2 就 self-kill。
+  同一段里还叠了第二个更隐蔽的坑：`runCatching { … }.getOrDefault(-1)` 把**抛异常**也压成了 `-1`，
+  而 `-1` 恰好等于 `INFO_TRY_AGAIN_LATER` ⇒ 真出故障时读起来像"只是没帧"，而没帧时读起来像"坏了"，两种病在同一张日志里长得一模一样。
+  修法：哨兵换成不可能与任何 codec 返回值撞上的 `EXCEPTION = Int.MIN_VALUE`；负数分支里显式放行那两个事件码（`continue` 不是 `break`，
+  放过了还要继续排空，否则积压那条路又回来了）；排空的 `for (attempt in 0 until MAX_DRAIN_PER_FRAME)` 因此必须是**尝试次数上限**
+  而不是产出上限——一长串连续负数事件不能把循环变成自旋。
+  锁定用例两条（同一条用例里，实测各抽一次即红）：把 `INFO_OUTPUT_FORMAT_CHANGED` 那一支**注释掉**（token 还留在注释里）
+  ⇒ 报「INFO_OUTPUT_FORMAT_CHANGED 是正常事件，不许当故障」红；两处 `getOrDefault(EXCEPTION)` 里**只改掉第一处**成 `getOrDefault(-1)`
+  ⇒ 报「两处 getOrDefault 只能用那个不与负数码重叠的哨兵」红。
+  这两条各自还纠了一个空锁：前者要求锚点排除注释行（只在注释里提一句事件码、代码照旧当故障，旧断言 `any { contains(token) }` 读不到）；
+  后者从 `any` 换成"函数里**每一处** `getOrDefault(` 都必须是 EXCEPTION"（两处改一处，`any` 会被另一处顶绿）。
+  **教训记在这里**：这三轮的读数全都来自"我上一轮的修复"，不是来自原始代码——所以任何排空/重试类改动装机后必须先量"起了之后还在不在"，
+  只看 `aud_started` 出条就判通过会直接把 self-kill 当成工作正常。
+  ⚠️ `aud_play` 的 `dl_` 目前是**常量读数**（`AUD_PLAYOUT_DELAY_MS=200`，它报告的是"现在用的哪一档"，不是实测到的滞后）——
+  这一族真正缺的实测是"她的 `l_` 在非弱网条件下是否持续 >0"，`l_=0` 才说明 200ms 够用；调这个值之前必须先有真机 `aud_play` 样本。
+  10-22 双模拟器给了**第一份（模）读数**：`l_` 是**累计**值，58 个窗口（≈580s、约 2.7 万帧）里它停在 **54**（≈0.2%），
+  而形状是"平一段、跳一格"——**稳态窗口里 `l_` 一格都不涨**（连续 8–10 个窗口读同一个数，`q_` 稳在 9–11 帧＝192–235ms，正对着 200ms 这一档），
+  每一次上涨都落在**含 live↔silent 边沿**（`q_` 被放空后重新堆）或**宿主抖动**（同一条里 `t_` 从 10001 涨到 10165）的那一拍。
+  ⇒ 在这一台上 200ms 这一档够，代价集中在状态边沿而不是稳态。
+  ⚠️ 这一条**不能**外推成真机结论：两台模拟器在同一台宿主机上、走的是本机回环 + 中继 TURN，不是无线网络；
+  真机上"她的 `l_` 是否持续 >0"仍是要重取的那一格。
+  `w_>0` 只可能是线格式不自证（解码器版本不符/帧被截断），`l_>0` 才是抖动超了硬上限（400ms），两条不许混着读。
   `probe_start` 是探针存活性的对照点：只有 `probe_start` 而没有后续任何边沿事件 = 注册成功但状态一直没翻转（或进程被冻），与"探针根本没起来"是两种情况。
   ⚠️ **`wake_ok`/`wake_off` 曾经 0 条，根因是接线顺序而不是通路（10-18）**：`PresenceService` 里 `updateWakeLock()` 排在 `StandbyProbe.start()` 之前，首次 acquire 的回报落在探针 `running=false` 上被直接丢弃——而"待机时保活锁到底拿到没有"正是待机断连要查的第一件事，等于白埋。改成**先起探针再拿锁**（解绑侧反过来：先放锁再停探针，否则 `wake_off` 同样发不出去）后，15:00 双模拟器装上即出 `event=wake_ok detail=k_3732`，两台各一条（一条直发、一条经补报带 `at_`，两条投递路径同时见光）。顺序已锁进 `StandbyTelemetryTest` S8：换回去即红（已实测）。**同一条修复也让心跳里的 `w=` 从撒谎变成真**：修复前 14:50~14:59 四条 `heartbeat` 全是 `w_0` 而锁其实拿着（`lastWakeHeld` 从没被喂过），修复后 15:05:40 `k_4032 … w_1 s_1`、15:05:43 `k_3958 … w_1 s_1` 两台同时翻正——读旧版本的 `w_0` 时**不许**当成"ROM 把锁放了"，那是埋点顺序缺陷，0.2.59 装机后的版本才有可信的 `w=`。
   **10-18 本机 dev server 的出数清单（米15 装 0.2.59 之前，这就是证据的唯一形态；都是模拟器，不许读成"真机已验"）**：已出数 `probe_start`/`heartbeat`/`screen_on`/`screen_off`/`net_up`/`net_down`/`doze_on`/`doze_off`（`cmd deviceidle` 逼出）/`bucket_act|wset|freq|rare|rst`（`am set-standby-bucket` 逼出）/`aexit`/`wake_ok`/`signaling_up`/`signaling_down`/`ice_failed`/`detail=at_` 补报；**仍零采样且原因各异**——`qos_tick`/`qos_bad`（要 established 的媒体会话，本机 `.env` 的 TURN 是占位值、模拟器 ICE 结构性打不通）、`gather_done`（当时和上面归为同一条原因，**10-19 复查更正为埋点缺陷**：同轮 `ice_failed` 已出数而它 0 条，因为发射点只挂在 `onIceGatheringChange(COMPLETE)` 上，快速 FAILED 的会话根本走不到收集完成 ⇒ 已在收尾补一条 `inc=1` 的发射点，S9 锁定；**10-19 07:42 复跑 t4 已出数**，共享端 `detail=h_6_s_0_r_0_p_0_inc_1`、观看端 `h_2_s_0_r_0_p_0_inc_1`（`app=0.2.60`，本机 `.env` 未配 TURN 故 `r=0` 与预期一致）⇒ 这一项从零采样名单里划掉，改判 `PASS(模)`)、`net_type`（要一次真实换网且前后 transport 代号不同）、`backlog_drop`（要 P0 积压超 150 条）。**10-19 从这条名单里划掉两项**：本机双模拟器点"解除配对"后，发起端与被解绑端**各**报了一条 `app_exit detail=why_unpair`（渲染成 `why_unpair`）与一条 `wake_off detail=k_…`，且顺序是 `app_exit`→`wake_off`→探针停——这正是源码注释要求的那条顺序（放锁排在 `StandbyProbe.stop` 之前，否则 `wake_off` 发不出去），运行时第一次成立；同刻之后服务器日志里 `event=heartbeat` **0 条**，证"解绑即关心跳"不是只写在单测里。⇒ 这两项改判 `PASS(模)`；仍零采样的是 `wake_fail`（要 acquire 真抛异常），以及 `app_exit why=destroy`（要 `onDestroy` 那条口，10-19 这次没走到）。零采样不等于埋点坏了，但也**不许**当成"已验证"。
@@ -188,7 +244,7 @@
   ⚠️ **顺序与模拟器那次相反**：这里 `signaling_down(at_…705147)` 比 `net_down(at_…705199)` **早 52ms**——socket 先死、ConnectivityManager 回调后到。所以"断网在前、信令死在后"只是**其中一种形态**（模拟器那种是拔掉唯一网卡、默认网络整体消失），换网（wifi↔蜂窝）时是**信令先死**。读日志时不许拿任一种顺序去否证另一类埋点，两种都要按"`net_*` 与 `signaling_*` 是否同批、`k=` 差多少"来判。另外这一轮的 `net_down`/`net_up`/`net_type` 三条都走的是**补报**路径（带 `at_`）而不是实时路径，说明换网瞬间乐观发送确实会丢——这正是留环的意义。
   **10-19 Mi10 又有两轮同向样本，把这句从"一次观测"升成"三次里三次同向"**：07:18 那轮 `signaling_down` 比 `net_down` 早 **54ms**、08:32 那轮早 **4.86s**（都是 wifi 掉→蜂窝 0.15s 起→2.7s 后 wifi 回来，`screenOn=false`，全部走补报）。⇒ 待机/换网场景里 **socket 层是比 `ConnectivityManager` 更早的传感器**；`net_*` 只能当晚到的旁证，不能当"死因的上级"。附带一条新读法：`at=` 与服务器到达时刻之差≈`downMs`（08:32：`at_…932324`→打印 08:32:26.489，`downMs_14174`），两者对得上说明这台设备的墙钟与服务器墙钟本次没漂——**但这不能假设**（Mi5 实测慢 ~10.5h），跨机对齐一律用 `k=`。
   ⚠️ **`screenOn` 列不是事件时刻的状态**：`diag.event`/`diag.session` 的这一列是**发送那一刻**的 `PowerManager.isInteractive`，而事件名来自广播 action，两者相隔可以是零点几秒。10-19 09:01:06.944 就有一条 `screen_off` 带 `screenOn=true`、0.73s 后紧跟 `screen_on`、两条 `k` 相同（=MIUI 造成的秒级闪灭）。判"那一刻屏到底灭没灭"要看事件序列本身（off→亚秒级 on→再 off），**不许拿这一列自证**；同理上一轮"18:35 那次 down 沿 `screenOn=true` 说明亮屏"这种读法只能算弱证据。
-  **v0.2.59 起淘汰是分级而不是"保最新"**：规则是**默认 P0 保护，只有四个名字被降级**——`heartbeat`→P1（配额 25）、`video_stall`→P1（配额与心跳合用，理由见上文 #78 那条 ⚠️：真机静止画面下最短 40.0s 一条，重复那几条不携带新信息，而它的时刻线能从 `qos_tick` 第 7 格复原）、`qos_tick`→P2（配额 25），`echo_ack`→P1（0.2.65 交棒遥测，同样是**重复采样**：一条只带"最近一次 e / 本轮最大 x / miss m / 等待 p"四个标量且客户端已 5s 节流，p50/p90 由整条序列给出，丢掉其中几条不丢结论；它留在 P0 的代价是把死亡现场挤出配额），其余一切事件名（含 `signaling_down`/`signaling_up`/`screen_on`/`screen_off`/`probe_start`/`peer_signal`/`stop_tap`…）都是 P0（配额 150），`BacklogTiers.tierOf` 的 `else` 分支就是这条默认。**不要把它读成一份 P0 白名单**：白名单口径会让"新加的埋点"默认落进最廉价的一档、在断连积压时被静默丢掉（正是这套分级要避免的事），而 `signaling_down`/`screen_off` 这些名字本身也不在任何手写清单里；解析不出事件名的行按 P2 处理（它本来也重放不出去）。原来的 `takeLast(200)` 保最新会先挤掉**最旧**那几条，而断连积压里最旧的恰是死亡瞬间的现场。P0 自身超额被丢时会在队首插一条 `backlog_drop detail=dropped=<n>`——"队列满过"必须和"队列从没满过"在日志里长得不一样，否则静默会被读成"没发生"。补报**复用 `diag.event` 一种类型**（服务器零改动），真实时刻带在 `detail` 前缀 `at=<epochMs> ` 里——服务器行时间是"到达时刻"，不带 `at=` 就等于没报；会话终态降级成 `event=session_end`，`detail` 形如 `at=… why=<reason> dur=<liveMs>`（`[diag.session]` 行不打 detail，时刻会被丢掉）。grep 补报的口径是 `detail=at_`（`safeTag` 把 `at=` 的等号磨成 `_`，见上条警示；写 grep 前先拿一行真日志对形）。`app.diag` 不入队（它不是事件）。本端进程被杀且文件没写完时仍会丢，此时以服务端 `[ws] … close code=…` 为准。`diag.*` 只允许标量与枚举名，禁止携带任何业务内容（SDP/ICE 正文、文字、坐标）。
+  **v0.2.59 起淘汰是分级而不是"保最新"**：规则是**默认 P0 保护，只有六个名字被降级**——`heartbeat`→P1（配额 25）、`video_stall`→P1（配额与心跳合用，理由见上文 #78 那条 ⚠️：真机静止画面下最短 40.0s 一条，重复那几条不携带新信息，而它的时刻线能从 `qos_tick` 第 7 格复原）、`qos_tick`→P2（配额 25），`echo_ack`→P1（0.2.65 交棒遥测，同样是**重复采样**：一条只带"最近一次 e / 本轮最大 x / miss m / 等待 p"四个标量且客户端已 5s 节流，p50/p90 由整条序列给出，丢掉其中几条不丢结论；它留在 P0 的代价是把死亡现场挤出配额），`aud_tick`+`aud_play`→P2（FR-16 内录两端的 10s 心跳，与 `qos_tick` 同一条口径：重复标量、不携带新信息，而"内录停了/没声了"由 P0 的 `aud_stopped` 说，不靠数 tick 的缺口；两端各留 P0 的话一通 20 分钟共享是 240 条，比配额本身还多），其余一切事件名（含 `signaling_down`/`signaling_up`/`screen_on`/`screen_off`/`probe_start`/`peer_signal`/`stop_tap`…）都是 P0（配额 150），`BacklogTiers.tierOf` 的 `else` 分支就是这条默认。**不要把它读成一份 P0 白名单**：白名单口径会让"新加的埋点"默认落进最廉价的一档、在断连积压时被静默丢掉（正是这套分级要避免的事），而 `signaling_down`/`screen_off` 这些名字本身也不在任何手写清单里；解析不出事件名的行按 P2 处理（它本来也重放不出去）。原来的 `takeLast(200)` 保最新会先挤掉**最旧**那几条，而断连积压里最旧的恰是死亡瞬间的现场。P0 自身超额被丢时会在队首插一条 `backlog_drop detail=dropped=<n>`——"队列满过"必须和"队列从没满过"在日志里长得不一样，否则静默会被读成"没发生"。补报**复用 `diag.event` 一种类型**（服务器零改动），真实时刻带在 `detail` 前缀 `at=<epochMs> ` 里——服务器行时间是"到达时刻"，不带 `at=` 就等于没报；会话终态降级成 `event=session_end`，`detail` 形如 `at=… why=<reason> dur=<liveMs>`（`[diag.session]` 行不打 detail，时刻会被丢掉）。grep 补报的口径是 `detail=at_`（`safeTag` 把 `at=` 的等号磨成 `_`，见上条警示；写 grep 前先拿一行真日志对形）。`app.diag` 不入队（它不是事件）。本端进程被杀且文件没写完时仍会丢，此时以服务端 `[ws] … close code=…` 为准。`diag.*` 只允许标量与枚举名，禁止携带任何业务内容（SDP/ICE 正文、文字、坐标）。
 - 服务端日志行统一带 `YYYY-MM-DD HH:MM:SS.mmm` 本地时间前缀（v0.2.58 起含日期：这份文件跨天连续写，只有时分秒就分不清"07:23 的 close"是哪天；10-18 10:50 已随服务器上线，此前的老行仍是 `HH:MM:SS.mmm`，跨这个点读日志时按两种格式分别 grep）。呼叫与连接生命周期另有 `[call] kind=sdp|ice|bye …`、`[ws] … close code=… aliveFor=… iceSeen=… sessionMs=…`、`[ws] … pong 超时 terminate（假死）`，用于区分"主动挂断 / 假死被踢 / 被新连接顶掉"三种死法。逐帧噪声（`[relay]` 类型行与 `[call] sdp|ice`）在 `S2S_LOG=minimal` 时抑制，默认 `diag` 保持现行详细度；隐私名单不随档位放开：`paired`/`pair.code`/`sdp`/`ice`/`incoming`/`accepted`/`msg.*` 任何档位都只记类型（`server/src/logpolicy.js`）。⚠️ `sessionMs` 读作"本 socket 上的会话已进行多久"，**不是**"踢掉的那一刻还在通话中"——`ws.sessionAt` 在会话结束时不重置，会话结束后 socket 再活 8 分钟就会显示成 8 分钟前起算的时长（10-17 18:02 结束、18:10 pong 超时即被误读过一次）。判断"假死是否拆掉了活着的会话"请用客户端的 `peer_signal` 事件，别用 `sessionMs`。
   ⚠️ **`close code=1006` 里有一类不是断连，是"被自己顶掉的旧 socket 的死亡通知"（10-19 实测，数断连次数前必须先减掉）**：`index.js` 在鉴权后遇到同 `deviceId` 的新连接会打 `[ws] … replaced old connection (oldAliveFor=…ms)` 然后 `old.close()`；旧 socket 已经从 `online` 里摘掉但仍在 `wss.clients` 里被 30s 心跳轮询，于是它的 `close` 事件**必定在 +30.003s 后到达**。机器可查形式：`18:09:05.437 replaced(oldAliveFor=1254341ms)` → `18:09:35.440 close code=1006 aliveFor=1284344ms`（差正好 30003ms，`aliveFor = oldAliveFor + 30003`），且这类 1006 **前面没有** `pong 超时 terminate（假死）` 那行。本轮 27 条 1006 里有 2 条属于这一类、9 条前面有 pong 行。反过来说：**只有既没有 `replaced` 前导、也没有 `pong 超时` 的 1006，才是"客户端那边链路真的没了"**，而 `pong 超时` 那一类是服务器主动拆（假死判定，#55）。
 
@@ -198,19 +254,24 @@
 - `GET /voice/<id>?deviceId=&token=` — 仅**收件人本人**可下载（`MessageBook.hasVoice` 校验该语音确在其未读箱中），返回 `audio/mp4`；非收件人/错误 token 403，文件已删 404。
 - 客户端上传的 token/deviceId 与 WebSocket hello 相同（Prefs 持久化的 pairToken）。
 
-## 3. DataChannel 三通道
+## 3. DataChannel 通道
 
-共享端（offerer）创建三条通道（WebRtcClient，创建顺序 ctl → ctlg → anno，旧观看端"后到者覆盖"最终仍持有 anno）：
+共享端（offerer）创建四条通道（WebRtcClient，创建顺序 ctl → ctlg → aud → anno，旧观看端"后到者覆盖"最终仍持有 anno）：
 
-| 通道 | label | 传输 | 用途 |
-|---|---|---|---|
-| anno | `anno` | 不可靠（可丢包） | 笔迹、表情、特效、锁屏状态 |
-| ctl | `ctl` | 可靠有序 | 画质请求、被拒/错误通知等必须保序的信令 |
-| ctlg | `ctlg` | 可靠无序 | 临时远程协助手势整笔（v0.2.40：消 ctl 队头阻塞） |
+| 通道 | label | 传输 | 载荷 | 用途 |
+|---|---|---|---|---|
+| anno | `anno` | 不可靠（可丢包） | JSON | 笔迹、表情、特效、锁屏状态 |
+| ctl | `ctl` | 可靠有序 | JSON | 画质请求、被拒/错误通知等必须保序的信令 |
+| ctlg | `ctlg` | 可靠无序 | JSON | 临时远程协助手势整笔（v0.2.40：消 ctl 队头阻塞） |
+| aud | `aud` | 不可靠、不重传 | **二进制** | 设备内录音频帧（FR-16）：`[1B codec id][7B ADTS][AU]`，AAC-LC 48kHz 立体声 |
 
-观看端按 label 分流；通道存在即握手（旧版对端无 ctl 通道 → 不开放临时协助模式）。所有消息为 JSON，路由字段 `k`。
+观看端按 label 分流；通道存在即握手（旧版对端无 ctl 通道 → 不开放临时协助模式）。所有 JSON 消息路由字段 `k`。
+**`aud` 是唯一一条"存在≠可用"的通道**：它由共享端自己创建，所以对面认不认得它只能由对面亲口回 `audok` 证明
+（见 §3.1）；观看端的 `onDataChannel` 因此必须逐个显式列出 label，**不许 else 兜底**——兜底会让任何新 label 顶掉
+anno 并 `unregisterObserver()`，涂鸦随即静默失效（不崩、无日志、通道还在）。
 画质请求优先走可靠 `ctl`；旧版对端没有 `ctl` 时回退到 `anno`，以保持跨版本兼容。
 手势优先走 `ctlg`；旧版共享端没有 `ctlg` 时回退 `ctl`。授权"允许/收回"绝不能上无序通道（乱序=隐私事故）。
+JSON 信令不许走 `aud`（`channelByLabel` 里 `aud` 显式返回 null）：把音频通道的背压传染给笔迹不是一句比喻。
 
 ### 3.1 k= 目录
 
@@ -225,7 +286,8 @@
 | `res` | ctl（旧版回退 anno） | `edge`(960/1280/1600/1920) | 切换画质档；共享端弱网会按 RTT/丢包/带宽/FPS 自动逐档降级。**Android 14+ 这一档只改码率上限、不改采集分辨率**（改分辨率会触发系统撤销录屏授权，见 §2.3 `qos_tick` 第 4 格），13 及以下仍是真的重开采集 |
 | `emoji` | anno | `e`(字符), `x`(0.15–0.85) | 屏幕飘表情 |
 | `fx` | anno | `t`: `bomb`/`gift`/`rocket` | 满屏互动特效 |
-| `g` | ctlg（旧版回退 ctl） | `pts`: [[xn,yn],…]（4 位小数截断），`dur`(ms) | 临时远程协助手势一笔一消息；共享端经无障碍 dispatchGesture 注入，仅在共享端明确允许本次协助时 |
+| `g` | ctlg（旧版回退 ctl） | `pts`: [[xn,yn],…]（4 位小数截断），`dur`(ms) | 远程协助手势一笔一消息；共享端经无障碍 dispatchGesture 注入，仅在共享端明确允许本次协助时 |
+| `audok` | ctl | `codec`(`aac`), `sr`(48000), `ch`(2) | **FR-16 新增**：观看端确认自己解得这路内录音频。只在**本端 `aud` 通道进入 OPEN 之后**发一次（通道没 OPEN 就 ack，对面会起一个帧送不出去的采集）。共享端收到才允许按开关起 `AudioPlaybackCapture`；参数逐项核对，任何一项对不上都按"不支持"处理。**这条是内录唯一的开闸依据**——`aud` 由共享端自己创建，通道非空证明不了对面的版本，所以不许用 `controlSupported` 那类"通道存在即支持"的口径推断它。旧观看端不会发这条，也不会认得 `aud` 通道以外的音频载荷（`onMessage` 起手就丢二进制）⇒ 对它们是纯惰性通道，不影响涂鸦 |
 
 共享端 → 观看端：
 
@@ -237,6 +299,7 @@
 | `videoon` | anno + ctl（双通道补发） | — | **v0.2.64 新增**：重开授权成功、画面续流（同一视频轨、同一 PeerConnection，不重新协商、不重新 ICE）。它是收掉 `videooff` 横幅的**唯一**入口 |
 | `ctl_denied` | ctl | `reason`(可选: `screenoff`) | 手势被拒（未授权/收回/无障碍缺失），观看端横幅说明原因；共享端 4s 节流 |
 | `a` | anno | `id`(与 `s`/`p`/`e` 同一 UUID) | **v0.2.65 新增**：共享端已把这一笔**落墨**（0.2.65 起笔迹在她那边缓冲到收笔才画，见 §3.2「为什么共享端缓冲到收笔」）。观看端收到即把本地副本交棒淡出（150ms）；没收到则最多白留 600ms 后兜底淡出（`HANDOVER_FALLBACK_MS`，取 600 是为了升级期"新观看端+旧共享端"的重叠窗口按常量本身与 0.2.64 同量级）。故意走 **anno 而不是 ctl**：它既是交棒信号，也是 `echo_ack` 的测量对象——要量的就是"笔迹经过的那条队列"的排队+往返，走可靠通道会测到另一条队列、得出"很快"的假读数。旧版观看端不认这个 `k` ⇒ 落进 `SignalRouter` 的 `else`，静默忽略、无害；因此**不允许**任何代码假设"对端一定会回 ack" |
+| `aud` | ctl | `on`(0/1), `state`(`live`/`silent`) | **FR-16 新增**：共享端报来它自己那台手机的内录状况。`on`=他的开关意图，`state`=采集线程实际读到没有声音。**只有两态**，不是"live/silent/blocked"：`AudioPlaybackCapture` 读到全零 PCM 本身不携带结论（可能是那个 App 声明了不可录制，也可能当时本来就没声音在放），所以这一路不制造第三个态，`silent` 的文案必须把两种成因与出路一起说清。⚠️ **`on` 只认 0/1**：缺失或别的值一律按"没读数"处理（`DataAction.None`），不许把猜出来的 `false` 报成"TA 没开"。⚠️ **沿触发+去重**（`publishAudStatus` 按 `开关\|状态` 签名叫一次）：它是 ctl 上的一条 JSON，每帧一报会把有序信令队列当音频道用——而 `aud` 帧丢掉的那些时刻信令反而在排队。旧观看端不认这个 `k` ⇒ 落进 `SignalRouter` 的 `else`，静默无害 |
 
 ### 3.2 为什么共享端把笔迹缓冲到收笔才落墨（重影的物理根因，0.2.65）
 

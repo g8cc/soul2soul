@@ -616,6 +616,16 @@ PY
   if [ "${acksend:-0}" -lt 1 ] || [ "${ackroute:-0}" -lt 1 ]; then
     echo "静态检查: echo_ack 发送点/接收分支缺一（send=${acksend} route=${ackroute}，两者必须同时存在）"; fail=1
   fi
+  # (d) FR-16 内录状态推送两头成对：发送点（服务经 DeviceAudioHandshake.stateJson 发 k="aud"）
+  #     与接收分支（SignalRouter 的 "aud" ->）。这是 (c) 同一族的"只埋不接"：
+  #     少发送点＝她那行横幅永远停在"版本太旧"（其实他开着）；少接收分支＝落进 else -> None，
+  #     她的横幅整段不出现，而两侧都不崩、也没有日志。
+  local audpush audroute
+  audpush=$(grep -Fc 'DeviceAudioHandshake.stateJson(' "$ROOT/app/app/src/main/java/com/soul2soul/app/session/ScreenShareService.kt" || true)
+  audroute=$(grep -Fc '"aud" ->' "$ROOT/app/app/src/main/java/com/soul2soul/app/session/SignalRouter.kt" || true)
+  if [ "${audpush:-0}" -lt 1 ] || [ "${audroute:-0}" -lt 1 ]; then
+    echo "静态检查: k=aud 发送点/接收分支缺一（push=${audpush} route=${audroute}，两者必须同时存在）"; fail=1
+  fi
   [ "$fail" -eq 0 ]
 }
 
