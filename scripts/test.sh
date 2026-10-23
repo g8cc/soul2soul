@@ -303,7 +303,10 @@ PY
   # 而 safeTag 把等号与逗号一起磨成 `_`，所以文档必须同时给出日志侧对形（`k_123456…` / `q_29_h-s…`），
   # 否则复现时按带等号的写法 grep 必然 0 命中 → 又被读成"埋点坏了"。
   # `beat=` 是实现前计划稿里的名字，代码里从来没有过；文档一旦写它就是第三套假口径。
-  if grep -qF '`beat=`' "$ROOT/docs/PROTOCOL.md" "$ROOT/docs/AUDIT-MATRIX.md" "$ROOT/AGENTS.md" 2>/dev/null ||
+  # 10-23 把 AGENTS 的读日志口径外分到 docs/DIAG-READINGS.md / docs/MEASUREMENT.md，
+  # 禁令必须跟着搬——否则"以后没人看守的那份文档"就是下一个假口径。
+  if grep -qF '`beat=`' "$ROOT/docs/PROTOCOL.md" "$ROOT/docs/AUDIT-MATRIX.md" "$ROOT/AGENTS.md" \
+              "$ROOT/docs/DIAG-READINGS.md" "$ROOT/docs/MEASUREMENT.md" 2>/dev/null ||
      ! grep -qF 'k_123456' "$ROOT/docs/PROTOCOL.md" 2>/dev/null ||
      ! grep -qF 'q_29_h-s' "$ROOT/docs/PROTOCOL.md" 2>/dev/null; then
     echo "静态检查: 心跳锚点键名只能是 k=（代码里没有 beat=），且 docs/PROTOCOL.md 必须保留日志侧对形 k_123456… / q_29_h-s…" >&2
