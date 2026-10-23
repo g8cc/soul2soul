@@ -29,7 +29,7 @@ function mkClient(id, tokenHolder, onMsg) {
     ws.send(JSON.stringify(hello));
   });
   return {
-    ws,
+    ws, pending,
     send: (obj) => ws.send(JSON.stringify(obj)),
     waitFor: (pred, timeout = 3000, label = '?') =>
       new Promise((resolve, reject) => {
@@ -74,6 +74,12 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   await sleep(600);
   const online = await B.waitFor((m) => m.type === 'peer.online', 3000, 'peer.online');
   check('B 收到 peer.online（A 重连）', online.type === 'peer.online');
+  await sleep(150); // 让旧 socket 的异步 close 回调落地
+  check('旧 socket 延迟 close 不会把新连接误报为离线',
+    A2.ws.readyState === WebSocket.OPEN && !B.pending.some((m) => m.type === 'peer.gone'));
+  B.send({ type: 'invite' });
+  const reverseIncoming = await A2.waitFor((m) => m.type === 'incoming', 3000, 'incoming after replacement');
+  check('旧 socket close 后仍能向最新连接转发呼叫', reverseIncoming.type === 'incoming');
 
   // 呼叫
   A2.send({ type: 'invite' });

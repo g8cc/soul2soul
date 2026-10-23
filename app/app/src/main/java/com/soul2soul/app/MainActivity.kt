@@ -47,6 +47,8 @@ class MainActivity : AppCompatActivity() {
     private var peerOnline = false
     private var hasHistory = false // 服务端 30 天内配对历史：决定「找回TA」+摇一摇是否可用
     private var pendingUpdateInfo: com.soul2soul.app.util.Updater.Info? = null
+    /** 每个远端版本只自动提示一次；按钮始终保留作主动入口。 */
+    private var updatePromptedCode = 0
     private var pendingInstallFile: java.io.File? = null
     private val callTimeout = Handler(Looper.getMainLooper())
 
@@ -67,6 +69,7 @@ class MainActivity : AppCompatActivity() {
     /** 主叫状态标记（PresenceService 撞车裁决也要读，故放伴生对象） */
     companion object {
         private const val TAG = "S2S-Main"
+        private const val STATE_UPDATE_PROMPTED_CODE = "update_prompted_code"
         private const val CALL_TIMEOUT_MS = 30_000L
         private const val MEDIA_CONNECT_TIMEOUT_MS = 45_000L
         // 电池豁免引导节流：未豁免用户每 3 天最多被 gentle 提醒一次（首启仍走原时机）
@@ -181,6 +184,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        updatePromptedCode = savedInstanceState?.getInt(STATE_UPDATE_PROMPTED_CODE) ?: 0
         setContentView(R.layout.activity_main)
 
         // 会话进行中按返回 = 退到后台而不是退出：共享/待话状态绝不能被一次误触拆掉
@@ -567,15 +571,28 @@ class MainActivity : AppCompatActivity() {
             Log.d(TAG, "update check: remote=${info.versionCode} local=$local")
             reportVersionDiag(info, local)
             val btn = findViewById<TextView>(R.id.btnUpdate)
-            if (com.soul2soul.app.util.VersionManifest.hasUpdate(local, info)) {
+            val hasUpdate = com.soul2soul.app.util.VersionManifest.hasUpdate(local, info)
+            if (hasUpdate) {
                 pendingUpdateInfo = info
                 btn.visibility = View.VISIBLE
                 btn.text = getString(R.string.update_available_short) + " v" + info.versionName
+                promptPendingUpdateIfReady()
             } else {
                 // 无更新必须撤掉提示：否则安装成功后旧进程/后续场景里按钮永久残留
                 pendingUpdateInfo = null
                 btn.visibility = View.GONE
             }
+        }
+    }
+
+    private fun promptPendingUpdateIfReady() {
+        val info = pendingUpdateInfo ?: return
+        val canPrompt = !paused && !isFinishing && !isDestroyed &&
+            !outgoingPending && !ScreenShareService.isRunning()
+        if (com.soul2soul.app.util.UpdatePromptPolicy.shouldPrompt(
+                info.versionCode, updatePromptedCode, canPrompt
+            )) {
+            showUpdateDialog()
         }
     }
 
@@ -601,6 +618,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun showUpdateDialog() {
         val info = pendingUpdateInfo ?: return
+        updatePromptedCode = info.versionCode
         AlertDialog.Builder(this)
             .setTitle(getString(R.string.update_confirm_title, info.versionName))
             .setMessage(R.string.update_confirm_msg)
@@ -946,6 +964,7 @@ class MainActivity : AppCompatActivity() {
         tvStatus.setTextColor(paint(fgRes))
         tvStatus.setText(textRes)
         refreshPermissionRows()
+        promptPendingUpdateIfReady()
     }
 
     private fun refreshPermissionRows() {
@@ -1004,6 +1023,11 @@ class MainActivity : AppCompatActivity() {
 
     private var lastUpdateCheckAt = 0L
 
+    override fun onSaveInstanceState(outState: android.os.Bundle) {
+        outState.putInt(STATE_UPDATE_PROMPTED_CODE, updatePromptedCode)
+        super.onSaveInstanceState(outState)
+    }
+
     override fun onResume() {
         super.onResume()
         paused = false
@@ -1028,6 +1052,8 @@ class MainActivity : AppCompatActivity() {
             endOutgoing()
         }
         updateUi()
+        // 检查结果可能在后台/呼叫期间返回；回到可交互主页时重新评估，不等 10 分钟轮询。
+        promptPendingUpdateIfReady()
         maybePromptAccReset()
         // 后台时 PresenceService 落下的找回请求：回前台立刻补弹窗（60s 内有效）
         Presence.claimRecall()?.let { showRecallAskDialog() }

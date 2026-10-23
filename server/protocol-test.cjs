@@ -186,8 +186,45 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const inc2 = await A.waitFor((m) => m.type === 'incoming', 3000, 'incoming after storm');
   check('风暴后业务正常', inc2.type === 'incoming');
 
+  // 8. 注册身份必须绑定到单条 socket，不能用重复 hello 把配对私信导向其他身份
+  const leakA = mk('advLeakA');
+  const leakB = mk('advLeakB');
+  await sleep(300);
+  leakA.send({ type: 'pair.request' });
+  const leakCode = (await leakA.waitFor((m) => m.type === 'pair.code', 3000, 'leak pair code')).code;
+  leakB.send({ type: 'pair.enter', code: leakCode });
+  const leakPairA = await leakA.waitFor((m) => m.type === 'paired', 3000, 'leak paired A');
+  await leakB.waitFor((m) => m.type === 'paired', 3000, 'leak paired B');
+  const duplicateClosed = new Promise((resolve) => {
+    leakA.ws.once('close', (code) => resolve(code));
+  });
+  leakA.send({ type: 'hello', deviceId: 'advLeakAttacker' });
+  const duplicateCloseCode = await Promise.race([
+    duplicateClosed,
+    sleep(1000).then(() => -1),
+  ]);
+  check('重复 hello 关闭连接且不能切换已注册身份', duplicateCloseCode === 4002);
+  leakB.send({ type: 'msg.post', kind: 'text', text: 'private-pair-message' });
+  await sleep(300);
+  check('重复 hello 不能把配对私信泄漏到其他身份',
+    !leakA.pending.some((m) => m.type === 'msg.new' && m.text === 'private-pair-message'));
+
+  const retryHello = new WebSocket(URL);
+  const retryMessages = [];
+  retryHello.on('message', (raw) => retryMessages.push(JSON.parse(raw.toString())));
+  await new Promise((resolve) => retryHello.once('open', resolve));
+  retryHello.send(JSON.stringify({ type: 'hello', deviceId: '' }));
+  await sleep(100);
+  retryHello.send(JSON.stringify({ type: 'hello', deviceId: 'advRetryHello' }));
+  await sleep(200);
+  check('无效首个 hello 不占用连接身份，合法 hello 可重试',
+    retryMessages.some((m) => m.type === 'error' && m.reason === 'bad_device_id') &&
+    retryMessages.some((m) => m.type === 'registered'));
+
   console.log(failures === 0 ? '== 对抗测试全部通过 ==' : `== ${failures} 项失败 ==`);
-  [A, B, junk, bigPkt, PR, PRPeer, ghost, brute, s1, s2, s3, B2, storm].forEach((c) => c.ws.close?.());
+  [A, B, junk, bigPkt, PR, PRPeer, ghost, brute, s1, s2, s3, B2, storm, leakA, leakB]
+    .forEach((c) => c.ws.close?.());
+  retryHello.close();
   process.exit(failures === 0 ? 0 : 1);
 })().catch((e) => {
   console.error('PROTOCOL-TEST ERROR:', e.message);

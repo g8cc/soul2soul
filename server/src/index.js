@@ -370,8 +370,16 @@ wss.on('connection', (ws) => {
 
     // ---- hello: 注册并鉴权 ----
     if (type === 'hello') {
-      ws.deviceId = String(msg.deviceId || '').slice(0, 64);
-      if (!ws.deviceId) { send(ws, { type: 'error', reason: 'bad_device_id' }); return; }
+      // 注册身份是连接级不变量。允许同一 socket 再次 hello 会改写 deviceId，
+      // 但 online 仍保留旧键，进而把配对方的私信投递给新身份。
+      if (ws.deviceId !== null) {
+        send(ws, { type: 'error', reason: 'duplicate_hello' });
+        ws.close(4002, 'duplicate_hello');
+        return;
+      }
+      const deviceId = String(msg.deviceId || '').slice(0, 64);
+      if (!deviceId) { send(ws, { type: 'error', reason: 'bad_device_id' }); return; }
+      ws.deviceId = deviceId;
       const pairing = pairingOf(ws.deviceId);
       if (pairing) {
         // 已配对设备必须携带配对令牌，防止得知 deviceId 即可冒充
