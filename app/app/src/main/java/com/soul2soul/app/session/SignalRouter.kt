@@ -45,7 +45,13 @@ object SignalRouter {
          * 文案判定收在 [deviceAudioBannerRes] 一处——横幅要在"收到 k=aud"和"会话连上"两个时刻
          * 重算，把判定写进路由就等于写两遍。
          */
-        data class PeerDeviceAudio(val on: Boolean, val state: String?) : DataAction()
+        data class PeerDeviceAudio(
+            val on: Boolean,
+            val state: String?,
+            /** 对端是否明确声明能消费 `audplay`；缺失=旧版本，不发未知 k。 */
+            val playbackSupported: Boolean = false,
+        ) : DataAction()
+
     }
 
     fun routeData(
@@ -57,6 +63,7 @@ object SignalRouter {
         id: String = "",
         audOn: Int = -1,
         audState: String = "",
+        audPlayback: Int = -1,
     ): DataAction = when (k) {
         "screenoff" -> DataAction.PeerScreenOff
         "videooff" -> DataAction.PeerVideoOff
@@ -67,7 +74,11 @@ object SignalRouter {
         // 报成"TA 没开"——那会把一个还在起采集的会话读成一条故障
         "aud" -> when {
             audOn != 0 && audOn != 1 -> DataAction.None
-            else -> DataAction.PeerDeviceAudio(on = audOn == 1, state = audStateOrNull(audState))
+            else -> DataAction.PeerDeviceAudio(
+                on = audOn == 1,
+                state = audStateOrNull(audState),
+                playbackSupported = audPlayback == 1,
+            )
         }
         // 解锁 ≠ 画面回来了：她可能一直不点「重新开画面」。这一路必须什么都不做，
         // 否则 0.2.64 的保活会让横幅在画面仍然停着的时候先收起来，对方读成"好了"
@@ -105,7 +116,9 @@ object SignalRouter {
         peerState: String?,
         channelSeen: Boolean,
         live: Boolean,
+        playbackFailed: Boolean = false,
     ): Int? = when {
+        playbackFailed -> R.string.aud_playback_failed
         peerOn == false -> R.string.aud_peer_off
         peerOn == true && peerState == DeviceAudioPolicy.STATE_LIVE -> R.string.aud_peer_live
         peerOn == true && peerState == DeviceAudioPolicy.STATE_SILENT -> R.string.aud_peer_silent

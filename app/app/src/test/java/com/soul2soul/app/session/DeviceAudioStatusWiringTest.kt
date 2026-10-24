@@ -150,7 +150,7 @@ class DeviceAudioStatusWiringTest {
         val calls = session.indices.filter {
             session[it].contains("refreshAudBanner()") && it != refreshIdx
         }
-        assertTrue("必须有两个触发点（收 k=aud + 连通那一刻），实际 ${calls.size}", calls.size == 2)
+        assertTrue("必须覆盖 k=aud、连通與播放故障沿三个触发点，实际 ${calls.size}", calls.size == 3)
         // 判定不许在 Activity 里再抄一遍
         assertTrue("横幅判定只经 SignalRouter.deviceAudioBannerRes 一处",
             countOf(session, "deviceAudioBannerRes(") == 1)

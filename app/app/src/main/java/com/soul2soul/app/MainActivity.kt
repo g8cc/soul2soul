@@ -911,9 +911,15 @@ class MainActivity : AppCompatActivity() {
         boxSharing.visibility = if (sharing) View.VISIBLE else View.GONE
         // 内录那一行的文案：只从服务那份快照（audStatusForUi）生成，主页不参与判定。
         // 和上面三块同一处刷新=AGENTS「状态只在这里收口」，任何状态变化都必须走 updateUi
-        findViewById<TextView>(R.id.tvDeviceAudioState).setText(
-            DeviceAudioCopy.sharerStatusRes(ScreenShareService.audStatusForUi),
-        )
+        val audioState = findViewById<TextView>(R.id.tvDeviceAudioState)
+        if (ScreenShareService.peerPlaybackFailed) {
+            audioState.text = getString(
+                R.string.aud_share_state_with_peer_failure,
+                getString(DeviceAudioCopy.sharerStatusRes(ScreenShareService.audStatusForUi)),
+            )
+        } else {
+            audioState.setText(DeviceAudioCopy.sharerStatusRes(ScreenShareService.audStatusForUi))
+        }
         // 老搭档复配入口：仅未配对 + 服务端有 30 天内历史时出现
         val recallVisible = !paired && hasHistory
         findViewById<View>(R.id.btnRecall).visibility =

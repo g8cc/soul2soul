@@ -214,7 +214,7 @@ AOSP 的 Doze 网络限制对它根本不生效，所以凡涉及"真 Doze 行�
 | 弱网 / SCTP 积压 | N-A | PASS `backpressure_dropsAudioNeverVideo`（9600B 门，丢音频绝不丢视频/语音）；⬜ 真机弱网下她听到的是"跳"还是"停" | ⬜ | ⬜ |
 | 对面版本旧（不回 `audok`） | N-A | N-A（门拦住了，不起采集＝不白烧 140kbps） | N-A | PASS 她那侧的 `aud_peer_too_old` 由 `deviceAudioChannelSeen` 判（`旧对端判据只认观看端见过的通道`，M6 抽掉 `!isSharer` 即红）；⬜ 混跑一通（新观看端+旧共享端）的实际观感 |
 | 他那台是 Android < 29 | N-A | N-A（结构上做不到，不是开关问题） | N-A | PASS `sdk28_neverStarts_evenWithToggle`；⬜ Mi5 真机文案是否读得懂（只能人工看，那台驱动不了 UI） |
-| `aud` 通道 CLOSED / renegotiation / ICE restart | N-A | PASS `renegoAndQualitySwitchDoNotTouchAudChannel`（只重发 offer，不打断她正在听的声音）；⬜ 真机切网后声音是否续上 | ⬜ | N-A |
+| `aud` 通道 CLOSED / renegotiation / ICE restart | N-A | PASS `renegoAndQualitySwitchDoNotTouchAudChannel`；PASS `closedChannelRevokesAckAndRestartGate`（通道关闭撤销 ACK，未重新 ACK 前不能误起采集）；⬜ 真机切网后声音是否续上 | ⬜ | N-A |
 | 会话结束 / 服务销毁 | N-A | PASS `stopTapPrecedesClientClose`（先停采集再 close，顺序反了=往已关闭通道塞帧） | PASS 线程自杀那一路也有沿（`线程状态沿接到快照发布`） | N-A |
 | App 被系统杀 | N-A | ⬜ `aud_stopped` 能否经补报到达（与 `app_exit` 同一条死法，需真机） | ⬜ | ⬜ |
 | 采集线程读写出错 / 编码器坏 | N-A | PASS `RECORD_ERROR`/`CODEC_ERROR` 两个出口 + `aud_stopped` 单一发出点在 finally（`audStoppedEmittedOnceInFinally`）；**PASS(模) 10-22 双模拟器这条出口真被触发过一次**（不是注入：`AudioRecord.Builder` 里 `setAudioSource(MIC)` 与 `setAudioPlaybackCaptureConfig` 互斥，构造当场抛 ⇒ 零 `aud_started`/零 `aud_tick`，只剩 `aud_stopped detail=r_record_error`），当时暴露的第二条谎是"线程自杀后状态行永远停在「画面还没连上，声音还在等」"——已单独成态 `FAILED`（锁定 `recordBuilderDoesNotSetAudioSource` / `status_captureFailureIsNotWaitingVideo` / `lastFailureIsSetBeforeStateEdgeAndClearedOnStart`，三条逐条抽掉实测变红）；⬜ HyperOS/MIUI 的音频 HAL 会不会自己把采集打挂（只能真机） | 同左 | N-A |
@@ -243,7 +243,20 @@ awk '/^## 9\./,/^---$/' docs/AUDIT-MATRIX.md | grep -o '⬜' | wc -l
 ---
 维护规则（AUDIT.md §5）：每关一条真机 bug，本表加一行/填一格并登记 gate；新有状态功能上线前必须先有 §表头，格子可以 ⬜，表不能没有。
 
-## 9. 信令身份与连接注册（server/src/index.js）
+## 10. 观看端设备音频播放故障（DeviceAudioPlayer）
+
+状态：`未启动` / `播放中` / `解码或放音失败` / `通道关闭或会话收尾`
+
+| 事件＼状态 | 未启动 | 播放中 | 解码或放音失败 | 通道关闭或会话收尾 |
+|---|---|---|---|---|
+| 输入/输出解码器 dequeue 抛异常或返回未知负值 | N-A | PASS `DeviceAudioPlaybackPolicyTest` 分类异常/TRY_AGAIN/未知码；输入缓冲暂缺会保留原帧重试，未知结果进入 finally 故障出口 | PASS `aud_stopped r=codec_error` + `PlaybackState.FAILED` | ⬜ 厂商 AAC decoder 异常与真机恢复 |
+| `AudioTrack.write` 返回错误、零字节或部分写 | N-A | PASS `DeviceAudioPlaybackPolicyTest`；写前快照请求长度，部分写由 ByteBuffer position 自动前进后续写剩余段；负码/零进度/越界返回停止播放器 | PASS `aud_stopped r=playback_error` + 失败状态沿 | ⬜ 真机 `ERROR_DEAD_OBJECT` / 音频路由恢复 |
+| 播放失败向用户/共享端反馈 | N-A | PASS `audplay failed=1/0` 走可靠 ctl/anno；观看端横幅与共享端主页/通知分开显示播放故障，不篡改本机采集 `HEARD`；仅对显式声明 `playback=1` 且 aud 仍 OPEN 的新对端发送，旧共享端不收未知 k | PASS `SignalRouterTest.audplay…` + `playbackFailureFeedbackIsRoutedWithoutChangingCaptureTruth` | ⬜ 双真机弱网丢失/恢复边沿与实际提示时序 |
+| `aud` CLOSED / 会话结束 / 快速重开 | PASS `audioChannelOpen` 门在帧入口拦截 CLOSED 后迟到帧 | PASS CLOSED 异步停播放器且核对最新状态沿；关闭开关、会话收尾和 Activity 销毁均停；收尾帧受 `callInvalidated` 阻挡 | PASS 单一 finally 出口释放 decoder/AudioTrack 并报告 `aud_stopped` | ⬜ 真机切网、快速重协商后的声音续播 |
+
+播放器和反馈接线有 JVM/源码回归锁；真机矩阵格仍为空，不能用 JVM 测试替代厂商音频 HAL、路由、死对象恢复或实际听感验证。
+
+## 11. 信令身份与连接注册（server/src/index.js）
 
 状态：`未 hello` / `已注册未配对` / `已配对` / `连接被替换或关闭`
 
@@ -258,7 +271,7 @@ awk '/^## 9\./,/^---$/' docs/AUDIT-MATRIX.md | grep -o '⬜' | wc -l
 
 本轮审计按上述状态×事件逐格复核；未被协议测试覆盖、且未由代码证明的格子继续保留 `⬜`。
 
-## 10. 更新提示（MainActivity）
+## 12. 更新提示（MainActivity）
 
 状态：`检查中` / `有更新待提示` / `已提示` / `呼叫中` / `Activity 暂停或重建`
 

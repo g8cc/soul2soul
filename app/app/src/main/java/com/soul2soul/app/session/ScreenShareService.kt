@@ -214,6 +214,7 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
         videoPaused = false // 新会话从零开始：上一通的"画面已停"绝不能带进这一通
         audWanted = false   // 同上：内录开关默认关，不继承上一通的意图
         audStatusForUi = DeviceAudioPolicy.AudStatus.OFF
+        peerPlaybackFailed = false
         audPublishedSig = null   // 新会话的第一条 k=aud 必须发出去，不能被上一通的签名吞掉
 
         val projection: Intent? = intent?.let { it.getProjectionExtra(EXTRA_PROJECTION) }
@@ -377,6 +378,14 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
         watchdog.post {
             if (stopping) return@post
             when (json.optString("k")) {
+                "audplay" -> {
+                    val failed = DeviceAudioHandshake.parsePlayback(json) ?: return@post
+                    if (peerPlaybackFailed != failed) {
+                        peerPlaybackFailed = failed
+                        SignalBus.emit(JSONObject().put("type", "local.deviceAudioState"))
+                        updateNotification(statusText())
+                    }
+                }
                 "res" -> webRtc?.setCaptureLongEdgeOnMain(
                     json.optInt("edge", com.soul2soul.app.webrtc.VideoQualityPolicy.DEFAULT_EDGE)
                 )
@@ -662,6 +671,7 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
         }
         micMuted = false
         audWanted = false // 内录开关是会话级意图，默认关——上一通"让她听到视频声"不能带进这一通
+        peerPlaybackFailed = false
         consent.resetForNewSession() // 会话结束立即收回操控授权
         // 静音是发送轨属性，随 AudioSource 销毁而复位，无需再全局恢复系统麦克风
         com.soul2soul.app.util.WifiKeeper.release()
@@ -701,14 +711,17 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
     }
 
     /** 通知正文把"语音到底开没开"说清楚：无麦权限时根本没有上行音频，别让人以为按静音就行 */
-    private fun statusText(): String = getString(
-        ShareNoticePolicy.statusTextRes(
-            noMic = checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) !=
-                PackageManager.PERMISSION_GRANTED,
-            muted = micMuted,
-            videoPaused = videoPaused,
+    private fun statusText(): String {
+        val base = getString(
+            ShareNoticePolicy.statusTextRes(
+                noMic = checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) !=
+                    PackageManager.PERMISSION_GRANTED,
+                muted = micMuted,
+                videoPaused = videoPaused,
+            ),
         )
-    )
+        return if (peerPlaybackFailed) "$base · ${getString(R.string.aud_remote_playback_failed)}" else base
+    }
 
     /** Android 14 会校验 FGS 类型对应的运行时权限；无麦克风权限时只声明屏幕采集。 */
     private fun startSessionForeground() {
@@ -833,6 +846,11 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
          */
         @Volatile
         var audStatusForUi = DeviceAudioPolicy.AudStatus.OFF
+            private set
+
+        /** 对端观看端报告的放音故障；只做提示，不篡改本端采集状态。 */
+        @Volatile
+        var peerPlaybackFailed = false
             private set
 
         /** 操控授权状态机（会话级）：通知按钮与授权对话框都经它读写，跨 Activity/Service 共享 */

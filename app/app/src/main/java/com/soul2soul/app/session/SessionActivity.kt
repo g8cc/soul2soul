@@ -65,13 +65,13 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
         setControlsVisible(false)
     }
 
-    private var client: WebRtcClient? = null
+    @Volatile private var client: WebRtcClient? = null
     private val pendingSignals = mutableListOf<JSONObject>() // client 就绪前缓存 offer/ice
     private var accepted = false
     /** 本 Activity 是否占用了 Presence.sessionBusy；未接听退出也必须对称释放。 */
     private var sessionClaimed = false
     /** 来电已取消/拒绝/页面已退出时，拦住迟到的权限和 WebRTC 回调。 */
-    private var callInvalidated = false
+    @Volatile private var callInvalidated = false
     private var endedRemotely = false
     private var byeSent = false
     private var hdOn = false
@@ -81,10 +81,15 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
     /**
      * 最近一条 `k=aud` 的两格现值（FR-16）。**null = 从没收到过**，这与"收到过 on=0"是两件事：
      * 后者能判"TA 没开"，前者什么都不能判（旧共享端根本不会发这条）。
-     * 横幅文案由 SignalRouter.deviceAudioBannerRes 一处算，两个触发点（这条到达、连通那一刻）都只调它。
+     * 横幅文案由 SignalRouter.deviceAudioBannerRes 一处算；状态消息、连通及播放器状态沿都只调它。
      */
     private var peerAudOn: Boolean? = null
     private var peerAudState: String? = null
+    /** 只有对端 `k=aud` 明确带 playback=1 才能发送 `audplay`，兼容旧共享端。 */
+    @Volatile private var peerPlaybackCapable = false
+    @Volatile private var playbackFailed = false
+    @Volatile private var audioChannelOpen = false
+    @Volatile private var peerAudioEnabled = false
     /**
      * 「我收笔 → 她画布落墨」这一跳的账本。两个时刻都取本机 uptimeMillis，
      * 同一台设备可直接相减，不需要时钟同步。
@@ -99,13 +104,16 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
      * 起在构造期而不是懒建：`onDeviceAudioFrame` 回调在 WebRTC 的 binder 线程上，
      * 懒建那一下的竞态会造出两个播放器、两条 AudioTrack 抢同一个流。
      */
-    private val audPlayer = DeviceAudioPlayer { name, detail ->
-        // 刻意不复用 viewerEvent：它在 callInvalidated 之后直接 return，
-        // 而"会话结束""页面销毁"这两条出口的 aud_stopped 恰恰必须在那之后还发得出去
-        com.soul2soul.app.util.SelfCheck.reportEvent(
-            applicationContext, "viewer", name, client?.iceStateName ?: "-", detail,
-        )
-    }
+    private val audPlayer = DeviceAudioPlayer(
+        onEvent = { name, detail ->
+            // 刻意不复用 viewerEvent：它在 callInvalidated 之后直接 return，
+            // 而"会话结束""页面销毁"这两条出口的 aud_stopped 恰恰必须在那之后还发得出去
+            com.soul2soul.app.util.SelfCheck.reportEvent(
+                applicationContext, "viewer", name, client?.iceStateName ?: "-", detail,
+            )
+        },
+        onPlaybackState = ::onPlaybackState,
+    )
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private var ringtone: android.media.Ringtone? = null
@@ -346,6 +354,12 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
         if (intent?.getBooleanExtra(EXTRA_INCOMING, false) == true && !accepted) {
             sessionClaimed = true
             callInvalidated = false
+            peerAudOn = null
+            peerAudState = null
+            peerPlaybackCapable = false
+            playbackFailed = false
+            audioChannelOpen = false
+            peerAudioEnabled = false
             Presence.sessionBusy = true
             showIncoming()
             if (intent.getBooleanExtra(EXTRA_AUTO_ACCEPT, false)) ensureMicThenAccept()
@@ -763,6 +777,7 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
                 json.optString("k"), overlay.controlMode, live, json.optString("reason"),
                 remoteVideoPaused, json.optString("id"),
                 json.optInt("on", -1), json.optString("state"),
+                json.optInt("playback", -1),
             )) {
                 SignalRouter.DataAction.None -> Unit
                 is SignalRouter.DataAction.EchoAck -> {
@@ -816,16 +831,49 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
                 is SignalRouter.DataAction.PeerDeviceAudio -> {
                     peerAudOn = action.on
                     peerAudState = action.state
+                    peerPlaybackCapable = action.playbackSupported
+                    peerAudioEnabled = action.on
+                    if (!action.on) audPlayer.stop(DeviceAudioPlayer.Exit.PEER_DISABLED)
+                    // capability 与通道 OPEN 谁先到都可能；两边都补发当前快照，避免上次
+                    // 通道关闭时丢掉的 failed=0 让共享端主页一直残留旧故障。
+                    publishPlaybackStateIfSupported()
                     refreshAudBanner()
                 }
             }
         }
     }
 
+    /** 播放器线程只改变状态沿；UI 与 ctl 通知都由该状态回调唯一接线。 */
+    private fun onPlaybackState(state: DeviceAudioPlayer.PlaybackState) {
+        val failed = when (state) {
+            DeviceAudioPlayer.PlaybackState.FAILED -> true
+            DeviceAudioPlayer.PlaybackState.STARTED,
+            DeviceAudioPlayer.PlaybackState.STOPPED -> false
+        }
+        val changed = playbackFailed != failed
+        playbackFailed = failed
+        if (!changed) return
+        // DataChannel 与 Activity 状态统一回主线程串行，且只发送最新沿，避免清理后补发旧故障。
+        mainHandler.post {
+            if (callInvalidated || isFinishing || isDestroyed) return@post
+            publishPlaybackStateIfSupported()
+            refreshAudBanner()
+        }
+    }
+
+    /** 只向明确声明支持、且当前仍 OPEN 的新对端发播放状态；旧共享端不能收到未知 k。 */
+    private fun publishPlaybackStateIfSupported() {
+        if (peerPlaybackCapable && client?.deviceAudioChannelOpen() == true) {
+            client?.sendControl(
+                com.soul2soul.app.webrtc.DeviceAudioHandshake.playbackJson(playbackFailed),
+            )
+        }
+    }
+
     /**
      * 「TA 手机里的声音我听到没有」这一行的唯一写入点（显示与隐藏都在这一处，
-     * AGENTS「成对操作收口为单一方法」）。两个触发时刻共用同一个判定函数：
-     * 收到 `k=aud`、以及连通那一刻（后者专门用来出"对面版本太旧"——那条永远不会有消息来报）。
+     * AGENTS「成对操作收口为单一方法」）。`k=aud`、连通、播放状态沿共用同一个判定函数；
+     * 连通触发专门用来出"对面版本太旧"，那条永远不会有消息来报。
      */
     private fun refreshAudBanner() {
         val res = SignalRouter.deviceAudioBannerRes(
@@ -833,6 +881,7 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
             peerState = peerAudState,
             channelSeen = client?.deviceAudioChannelSeen == true,
             live = live,
+            playbackFailed = playbackFailed,
         )
         if (res == null) {
             tvAudState.visibility = View.GONE
@@ -940,7 +989,7 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
      * 于是"她已经挂了，我这边还在放 TA 的视频声"。
      */
     override fun onDeviceAudioFrame(packet: ByteArray) {
-        if (callInvalidated) return
+        if (callInvalidated || !audioChannelOpen || !peerAudioEnabled) return
         audPlayer.offer(packet)
     }
 
@@ -950,10 +999,15 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
      * （播放器是懒启动的，这里再"预建"只会多一条没声音的 AudioTrack）。
      */
     override fun onDeviceAudioChannelState(state: String) {
+        audioChannelOpen = state == "OPEN"
+        if (state == "OPEN") mainHandler.post {
+            if (!callInvalidated && !isFinishing && !isDestroyed) publishPlaybackStateIfSupported()
+        }
         // stop() 会 join 播放线程（最多 500ms），这条回调在 libwebrtc 的 sigthread 上——
         // 在那儿阻塞等于把涂鸦/操控的入站消息一起卡住，所以挪回主线程做
         if (state == "CLOSED") mainHandler.post {
-            audPlayer.stop(DeviceAudioPlayer.Exit.CHANNEL_CLOSED)
+            // CLOSED 回调排进主线程后可能已经快速重开；只按最新沿决定是否停，避免旧沿停掉新播放器。
+            if (!audioChannelOpen) audPlayer.stop(DeviceAudioPlayer.Exit.CHANNEL_CLOSED)
         }
     }
 

@@ -213,7 +213,7 @@ class DiagEventRegistryTest {
         // 本轮埋点存在的理由，一个都不许从扫描结果里漏掉
         listOf("heartbeat", "qos_tick", "qos_bad", "gather_done", "ice_failed", "aexit", "app_exit",
             "backlog_drop", "session_end", "bucket_", "net_up", "doze_on", "wake_fail", "peer_signal",
-            "aud_started", "aud_stopped", "aud_silent", "aud_tick", "aud_play")
+            "aud_started", "aud_stopped", "aud_silent", "aud_tick", "aud_play", "aud_playback_error")
             .forEach { assertTrue("扫描器没抓到 $it", emitted.containsKey(it)) }
         // 同名私有包装函数分处两个文件时，两边的调用点都必须被收到
         //（10-22 的失效形状：Map 覆盖 ⇒ DeviceAudioPlayer 的 `audEvent` 被当成"别人的私有函数"整体跳过，

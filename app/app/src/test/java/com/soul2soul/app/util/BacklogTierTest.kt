@@ -98,6 +98,8 @@ class BacklogTierTest {
         assertEquals(BacklogTiers.TIER_DEATH, BacklogTiers.tierOf(line("aud_started")))
         assertEquals(BacklogTiers.TIER_DEATH, BacklogTiers.tierOf(line("aud_stopped")))
         assertEquals(BacklogTiers.TIER_DEATH, BacklogTiers.tierOf(line("aud_silent")))
+        assertEquals("播放失败原因是 P0 现场证据，不可与 10s 播放心跳一起降级",
+            BacklogTiers.TIER_DEATH, BacklogTiers.tierOf(line("aud_playback_error")))
     }
 
     // T7b（#78，10-19 双真机实测后新增）：静止画面的 stall 洪水不许挤掉死亡现场。

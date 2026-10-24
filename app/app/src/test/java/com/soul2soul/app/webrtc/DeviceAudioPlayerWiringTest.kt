@@ -16,6 +16,7 @@ class DeviceAudioPlayerWiringTest {
 
     private val playerPath = "app/src/main/java/com/soul2soul/app/webrtc/DeviceAudioPlayer.kt"
     private val sessionPath = "app/src/main/java/com/soul2soul/app/session/SessionActivity.kt"
+    private val servicePath = "app/src/main/java/com/soul2soul/app/session/ScreenShareService.kt"
 
     private fun file(rel: String): List<String> {
         var dir: File? = File("").absoluteFile
@@ -65,7 +66,7 @@ class DeviceAudioPlayerWiringTest {
             val uses = lines.filter { it.contains("Exit.$name") && !it.contains("$name(") }
             assertTrue("出口 $name 没有调用点（枚举里声明了却没人用=那条路径不会停表）", uses.isNotEmpty())
         }
-        val fallback = player.filter { it.contains("pendingExit ?: Exit.CODEC_ERROR") }
+        val fallback = player.filter { it.contains("pendingExit ?: threadFailure ?: Exit.CODEC_ERROR") }
         assertTrue("CODEC_ERROR 只能是 finally 里的 fallback（线程自己撞墙时没有别的诚实读数）",
             fallback.isNotEmpty())
     }
@@ -108,10 +109,10 @@ class DeviceAudioPlayerWiringTest {
     @Test
     fun `lateFrameAfterCleanupIsDropped`() {
         val body = functionBody(file(sessionPath), "override fun onDeviceAudioFrame(")
-        val guard = body.indexOfFirst { it.contains("if (callInvalidated) return") }
+        val guard = body.indexOfFirst { it.contains("callInvalidated") && it.contains("audioChannelOpen") }
         val offer = body.indexOfFirst { it.contains("audPlayer.offer(") }
         assertTrue("帧入口必须先挡收尾后的迟到帧：guard@$guard", guard >= 0)
-        assertTrue("挡在 offer 之前才有意义：guard@$guard offer@$offer", guard in 0 until offer)
+        assertTrue("收尾/通道关闭门都必须挡在 offer 之前：guard@$guard offer@$offer", guard in 0 until offer)
     }
 
     /**
@@ -197,11 +198,109 @@ class DeviceAudioPlayerWiringTest {
         assertTrue("播放器必须是 val 字段，不许懒建（binder 线程竞态=两条 AudioTrack）",
             session.any { it.contains("private val audPlayer = DeviceAudioPlayer") })
         assertTrue("构造点只许一处",
-            session.count { it.contains("DeviceAudioPlayer {") } == 1)
+            session.count { it.contains("private val audPlayer = DeviceAudioPlayer(") } == 1)
         val stops = session.filter { it.contains("audPlayer.stop(") }
         assertTrue(
-            "停表只许出自通道 CLOSED/会话结束/页面销毁三处，实际 ${stops.size} 处：$stops",
-            stops.size == 3,
+            "停表只许出自对端关音/通道 CLOSED/会话结束/页面销毁四处，实际 ${stops.size} 处：$stops",
+            stops.size == 4,
         )
+    }
+
+    @Test
+    fun `decoderFailuresAreNotCollapsedIntoTryAgain`() {
+        val player = file(playerPath)
+        val feed = functionBody(player, "private fun feedInput(")
+        val drain = functionBody(player, "private fun drainOutputs(")
+        assertTrue("输入 dequeue 必须把异常和未知负值交给失败分类器",
+            feed.any { it.contains("inputDequeueResult(idx") } && feed.any { it.contains("InputResult.FAILURE") })
+        assertTrue("输出 dequeue 必须把异常和未知负值交给失败分类器",
+            drain.any { it.contains("outputDequeueResult(") } &&
+                drain.any { it.contains("Dequeue.FAILURE -> return false") })
+        assertTrue("格式/缓冲通知只能作为明确事件继续 drain",
+            drain.any { it.contains("Dequeue.OUTPUT_EVENT -> continue") })
+    }
+
+    @Test
+    fun `audioTrackWriteErrorsAndPartialWritesAreHandled`() {
+        val player = file(playerPath)
+        val write = functionBody(player, "private fun writeFully(")
+        assertTrue("播放器必须判写入进度，负数和零字节不可被当作成功",
+            write.any { it.contains("writeMadeProgress(result, requested)") })
+        assertTrue("部分写入必须继续处理剩余缓冲区",
+            write.any { it.contains("while (buffer.hasRemaining())") })
+        val request = write.indexOfFirst { it.contains("val requested = buffer.remaining()") }
+        val call = write.indexOfFirst { it.contains("track.write(buffer, requested") }
+        assertTrue("校验基准必须在 write 前快照，否则完整写后 remaining=0 会误报失败",
+            request >= 0 && request < call && write.any { it.contains("writeMadeProgress(result, requested)") })
+        assertTrue("write API 的缓冲区 position 自动前进语义必须写明，不能手动二次推进",
+            write.any { it.contains("会把 position 前进 result 字节") } &&
+                write.none { it.contains("buffer.position(buffer.position() + result)") })
+        assertTrue("AudioTrack 错误必须返回失败给 finally 收尾",
+            write.any { it.contains("return false") })
+        assertTrue("写错误要保留为独立受保护的诊断事件",
+            write.any { it.contains("audEvent(\"aud_playback_error\"") })
+        val pump = functionBody(player, "private fun pump(")
+        assertTrue("write 错误出口不能被误记成普通 codec_error",
+            pump.any { it.contains("pendingExit ?: threadFailure ?: Exit.CODEC_ERROR") } &&
+                write.any { it.contains("threadFailure = Exit.PLAYBACK_ERROR") })
+    }
+
+    @Test
+    fun `playbackStateReportsOnlyAfterPcmAndChannelClosureBlocksLateFrames`() {
+        val player = file(playerPath)
+        val drain = functionBody(player, "private fun drainOutputs(")
+        val pump = functionBody(player, "private fun pump(")
+        assertTrue("只有 PCM 成功写入后才报告播放开始", drain.any { it.contains("onPcmWritten()") })
+        assertTrue("连续创建 decoder/AudioTrack 失败时必须限速重试", pump.any { it.contains("retryAfterMs = SystemClock.elapsedRealtime() +") })
+        val session = file(sessionPath)
+        val frame = functionBody(session, "override fun onDeviceAudioFrame(")
+        val gate = frame.indexOfFirst { it.contains("!audioChannelOpen") }
+        val offer = frame.indexOfFirst { it.contains("audPlayer.offer(") }
+        assertTrue("会话结束、通道 CLOSED 或共享关闭后迟到帧必须在 offer 前被挡住",
+            gate >= 0 && gate < offer && frame[gate].contains("peerAudioEnabled"))
+        val channel = functionBody(session, "override fun onDeviceAudioChannelState(")
+        val stateEdge = channel.indexOfFirst { it.contains("audioChannelOpen =") }
+        val post = channel.indexOfFirst { it.contains("mainHandler.post") }
+        val currentStateGuard = channel.indexOfFirst { it.contains("if (!audioChannelOpen)") }
+        assertTrue("通道状态必须先更新门再异步 stop", stateEdge >= 0 && post > stateEdge)
+        assertTrue("排队中的旧 CLOSED 沿必须核对最新状态，不能停掉已重开的播放器",
+            currentStateGuard > post)
+        val onLive = functionBody(session, "override fun onLive(")
+        assertTrue("LIVE 沿不能清掉可能已提前到达的 aud 状态/首帧门控",
+            onLive.none {
+                it.contains("peerAudioEnabled = false") ||
+                    it.contains("peerAudOn = null") ||
+                    it.contains("peerAudState = null")
+            })
+    }
+
+    @Test
+    fun `playbackFailureFeedbackIsRoutedWithoutChangingCaptureTruth`() {
+        val session = file(sessionPath)
+        val callback = functionBody(session, "private fun onPlaybackState(")
+        assertTrue("失败与恢复沿必须经过统一能力门控发布",
+            callback.any { it.contains("publishPlaybackStateIfSupported()") })
+        val publisher = functionBody(session, "private fun publishPlaybackStateIfSupported(")
+        assertTrue("只向明确声明能力且仍 OPEN 的新对端发 audplay",
+            publisher.any { it.contains("peerPlaybackCapable") } &&
+                publisher.any { it.contains("deviceAudioChannelOpen()") } &&
+                publisher.any { it.contains("DeviceAudioHandshake.playbackJson(playbackFailed)") })
+        val state = functionBody(session, "override fun onDataMessage(")
+        assertTrue("k=aud 状态到达时要记录反馈能力", state.any { it.contains("peerPlaybackCapable = action.playbackSupported") })
+        assertTrue("通道先后顺序不确定时 OPEN 沿要重发最新状态",
+            functionBody(session, "override fun onDeviceAudioChannelState(")
+                .any { it.contains("publishPlaybackStateIfSupported()") })
+        val service = file(servicePath)
+        val inbound = functionBody(service, "override fun onDataMessage(")
+        assertTrue("共享端必须显式消费 audplay，不能落到涂鸦未知消息 hook",
+            inbound.any { it.contains("\"audplay\" ->") })
+        assertTrue("共享端对端播放故障只更新展示状态，不得改本端采集状态",
+            inbound.any { it.contains("peerPlaybackFailed = failed") } &&
+                inbound.none { it.contains("audStatusForUi =") || it.contains("audWanted =") })
+        assertTrue("故障/恢复必须触发主页状态行及通知刷新",
+            inbound.any { it.contains("local.deviceAudioState") } &&
+                inbound.any { it.contains("updateNotification(statusText())") })
+        val status = functionBody(service, "private fun statusText(")
+        assertTrue("通知正文要提示对端的播放故障", status.any { it.contains("aud_remote_playback_failed") })
     }
 }

@@ -736,7 +736,9 @@ class WebRtcClient(
     // ---------- 设备内录音频通道（FR-16） ----------
 
     /** 观看端亲口回过 audok：内录的唯一开闸依据（aud 由本端创建，非空证明不了对面版本） */
-    val deviceAudioPeerSupported: Boolean get() = deviceAudioPeerAcked
+    /** ACK 只在对应的 aud 通道仍 OPEN 时有效；通道关闭后旧 ACK 不得让采集重启。 */
+    val deviceAudioPeerSupported: Boolean
+        get() = deviceAudioPeerAcked && deviceAudioChannelOpen()
 
     /**
      * **观看端专用**：对面创建过 `aud` 通道吗？这是"那台手机认得 FR-16"的唯一机器判据——
@@ -785,6 +787,12 @@ class WebRtcClient(
 
         override fun onStateChange() {
             val state = runCatching { dc.state().name }.getOrNull() ?: return
+            if (state == DataChannel.State.CLOSED.name && dc === audChannel) {
+                // ACK 是通道级能力，不是会话级永久能力。CLOSED 后必须撤销，防止共享端
+                // 关开关时重新起一个没有出口的采集线程。
+                deviceAudioPeerAcked = false
+                audAckSent = false
+            }
             if (!isSharer) sendAudAckOnce(dc)
             listener.onDeviceAudioChannelState(state)
         }
@@ -1359,6 +1367,7 @@ class WebRtcClient(
             CtlChannelPolicy.AUD -> {
                 runCatching { audChannel?.unregisterObserver() }
                 audChannel = dc
+                if (!isSharer) audAckSent = false
                 audObserverFor(dc)
             }
             else -> {
@@ -1478,6 +1487,8 @@ class WebRtcClient(
 
     override fun onStateChange() {
         flushPendingQuality()
+        // aud 可能先 OPEN、ctl 后 OPEN；第一次 ack 发送失败时，ctl 的状态沿必须补发。
+        if (!isSharer) audChannel?.let { sendAudAckOnce(it) }
     }
 
     override fun onMessage(buffer: DataChannel.Buffer) {

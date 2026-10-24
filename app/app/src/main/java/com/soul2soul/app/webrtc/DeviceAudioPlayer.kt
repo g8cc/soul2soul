@@ -24,13 +24,19 @@ import java.util.ArrayDeque
  */
 class DeviceAudioPlayer(
     private val onEvent: (name: String, detail: String) -> Unit,
+    private val onPlaybackState: (PlaybackState) -> Unit = {},
 ) {
+
+    /** 播放状态给本地 UI/共享端的反馈；不要把采集端 HEARD 当成观看端已放音。 */
+    enum class PlaybackState { STARTED, FAILED, STOPPED }
 
     /** 停止的全部出口：`aud_stopped r=<出口名>` 只能出自这份枚举（与共享端同名事件，role 区分是谁停的） */
     enum class Exit(val tag: String) {
         CHANNEL_CLOSED("channel_closed"),
+        PEER_DISABLED("peer_disabled"),
         SESSION_ENDED("session_ended"),
         ACTIVITY_DESTROY("activity_destroy"),
+        PLAYBACK_ERROR("playback_error"),
         CODEC_ERROR("codec_error"),
     }
 
@@ -42,7 +48,10 @@ class DeviceAudioPlayer(
     private var droppedBadFormat = 0L
 
     @Volatile private var running = false
-    private var thread: Thread? = null
+    @Volatile private var generation = 0L
+    @Volatile private var consecutiveFailures = 0
+    @Volatile private var retryAfterMs = 0L
+    @Volatile private var thread: Thread? = null
 
     /** 队尾入队时刻（pacing 与"最新一帧"的锚），跨线程读写 ⇒ volatile */
     @Volatile private var lastFrameAtMs = 0L
@@ -53,6 +62,7 @@ class DeviceAudioPlayer(
      * 让它回答，等于给 `aud_stopped` 写一个编出来的 detail。
      */
     @Volatile private var pendingExit: Exit? = null
+    @Volatile private var threadFailure: Exit? = null
 
     val isRunning: Boolean get() = running
 
@@ -86,33 +96,45 @@ class DeviceAudioPlayer(
         return true
     }
 
-    /** 幂等：没在跑就什么都不发（一次停止只配一行 `aud_stopped`，与采集侧同一条纪律） */
+    /** 幂等：遥测只由活跃线程的 finally 发一次；状态回调可重复，宿主按边沿发送。 */
     @Synchronized
     fun stop(exit: Exit) {
-        if (!running) return
-        pendingExit = exit
-        running = false
-        synchronized(queue) { queue.clear() }
-        thread?.let { t ->
-            runCatching { t.interrupt() }
-            runCatching { t.join(JOIN_TIMEOUT_MS) }
+        if (running || thread?.isAlive == true) {
+            pendingExit = exit
+            running = false
+            generation++
+            thread?.let { t ->
+                runCatching { t.interrupt() }
+                runCatching { t.join(JOIN_TIMEOUT_MS) }
+            }
+            if (thread?.isAlive != true) thread = null
         }
-        thread = null
+        // 即使播放器线程刚好已失败退出，也不能把那一轮积压音频带进快速重开。
+        synchronized(queue) { queue.clear() }
+        onPlaybackState(PlaybackState.STOPPED)
     }
 
     @Synchronized
     private fun start() {
         if (running) return
+        // pump 的 finally 已释放 decoder/track 后可能只差最后几条语句就退出；若刚好有新帧
+        // 入队，允许该线程在 finally 内交接到新代，避免 offer 看到旧线程仍 alive 后丢掉唤醒。
+        if (thread?.isAlive == true && thread !== Thread.currentThread()) return
+        if (SystemClock.elapsedRealtime() < retryAfterMs) return
         pendingExit = null
+        threadFailure = null
         running = true
-        thread = Thread({ pump() }, "DeviceAudioPlayer").also { it.isDaemon = true; it.start() }
+        val thisGeneration = ++generation
+        val playerThread = Thread({ pump(thisGeneration) }, "DeviceAudioPlayer").apply { isDaemon = true }
+        thread = playerThread
+        playerThread.start()
     }
 
     /**
      * 解码+放音的唯一循环。整体包在 try/finally：`aud_stopped` 只有一个发出点（finally），
      * 任何一条出口——关通道、会话结束、解码器抛异常、线程被叫醒——都必然带出一行读数。
      */
-    private fun pump() {
+    private fun pump(thisGeneration: Long) {
         var decoder: MediaCodec? = null
         var track: AudioTrack? = null
         try {
@@ -149,36 +171,64 @@ class DeviceAudioPlayer(
             audioTrack.play()
             val info = MediaCodec.BufferInfo()
             var frameIndex = 0L
+            var playbackStarted = false
             var tickStartedAt = SystemClock.elapsedRealtime()
 
             while (running) {
                 val item = nextPlayable()
+                var retryInput = false
                 if (item != null) {
-                    if (!feedInput(codec, item, frameIndex * SAMPLES_PER_FRAME_US)) return
-                    frameIndex++
+                    when (feedInput(codec, item, frameIndex * SAMPLES_PER_FRAME_US)) {
+                        InputResult.FAILURE -> return
+                        InputResult.RETRY -> {
+                            synchronized(queue) { queue.addFirst(item) }
+                            retryInput = true
+                        }
+                        InputResult.QUEUED -> frameIndex++
+                    }
                 }
                 // 没帧可播也要 drain：解码器有几帧流水线延迟，最后一帧的 PCM 常常晚一拍才出来，
                 // 只在"刚喂进一帧"之后取输出会把它永远留在缓冲区里
-                drainOutputs(codec, audioTrack, info)
+                val drained = drainOutputs(codec, audioTrack, info) {
+                        if (!playbackStarted && generation == thisGeneration && running) {
+                            playbackStarted = true
+                            consecutiveFailures = 0
+                            retryAfterMs = 0L
+                            onPlaybackState(PlaybackState.STARTED)
+                        }
+                    }
+                if (!drained) return
                 if (SystemClock.elapsedRealtime() - tickStartedAt >= TICK_INTERVAL_MS) {
                     emitTick(SystemClock.elapsedRealtime() - tickStartedAt)
                     tickStartedAt = SystemClock.elapsedRealtime()
                 }
-                if (item == null) sleepQuietly(POLL_MS)
+                if (item == null || retryInput) sleepQuietly(POLL_MS)
             }
         } catch (e: InterruptedException) {
             Log.d(TAG, "player interrupted (stop)")
         } catch (e: Exception) {
             Log.w(TAG, "device audio player crashed", e)
         } finally {
-            running = false
             runCatching { decoder?.stop() }
             runCatching { decoder?.release() }
             runCatching { track?.stop() }
             runCatching { track?.release() }
             // pendingExit 为空＝线程自己撞墙死的（解码器配不起来/AudioTrack 起不来/异常），
             // 这一档只有 codec_error 一个诚实的读数，别替它编一个"她关了"
-            audEvent("aud_stopped", "r_${(pendingExit ?: Exit.CODEC_ERROR).tag}")
+            audEvent("aud_stopped", "r_${(pendingExit ?: threadFailure ?: Exit.CODEC_ERROR).tag}")
+            if (generation == thisGeneration) {
+                running = false
+                if (pendingExit == null) {
+                    consecutiveFailures++
+                    retryAfterMs = SystemClock.elapsedRealtime() +
+                        DeviceAudioPlaybackPolicy.retryDelayMs(consecutiveFailures)
+                    onPlaybackState(PlaybackState.FAILED)
+                }
+            }
+            if (thread === Thread.currentThread()) thread = null
+            if (!running && synchronized(queue) { queue.isNotEmpty() }) {
+                start()
+            }
         }
     }
 
@@ -203,40 +253,91 @@ class DeviceAudioPlayer(
         }
     }
 
-    private fun feedInput(decoder: MediaCodec, item: Item, ptsUs: Long): Boolean {
-        val idx = runCatching { decoder.dequeueInputBuffer(INPUT_TIMEOUT_US) }.getOrDefault(-1)
-        if (idx < 0) return true // 暂时无输入缓冲＝这一拍先播后面的，不算解码器坏了
-        val buf = decoder.getInputBuffer(idx) ?: return false
+    private enum class InputResult { QUEUED, RETRY, FAILURE }
+
+    private fun feedInput(decoder: MediaCodec, item: Item, ptsUs: Long): InputResult {
+        val idx = runCatching { decoder.dequeueInputBuffer(INPUT_TIMEOUT_US) }.getOrNull()
+        when (DeviceAudioPlaybackPolicy.inputDequeueResult(idx, MediaCodec.INFO_TRY_AGAIN_LATER)) {
+            DeviceAudioPlaybackPolicy.Dequeue.RETRY -> return InputResult.RETRY
+            DeviceAudioPlaybackPolicy.Dequeue.READY -> Unit
+            else -> return InputResult.FAILURE
+        }
+        if (idx == null || idx < 0) return InputResult.FAILURE
+        val buf = decoder.getInputBuffer(idx) ?: return InputResult.FAILURE
         buf.clear()
         buf.put(item.au)
         decoder.queueInputBuffer(idx, 0, item.au.size, ptsUs, 0)
-        return true
+        return InputResult.QUEUED
     }
 
     /** 把已就绪的 PCM 一次取空写进 AudioTrack；不等下一帧（等＝把解码延迟再叠进放音延迟） */
-    private fun drainOutputs(decoder: MediaCodec, track: AudioTrack, info: MediaCodec.BufferInfo) {
+    private fun drainOutputs(
+        decoder: MediaCodec,
+        track: AudioTrack,
+        info: MediaCodec.BufferInfo,
+        onPcmWritten: () -> Unit,
+    ): Boolean {
         while (true) {
-            val idx = runCatching { decoder.dequeueOutputBuffer(info, 0) }.getOrDefault(-1)
-            if (idx < 0) return // TRY_AGAIN_LATER / 格式变化通知都不是缓冲区下标
+            val idx = runCatching { decoder.dequeueOutputBuffer(info, 0) }.getOrNull()
+            when (
+                DeviceAudioPlaybackPolicy.outputDequeueResult(
+                    idx,
+                    tryAgain = MediaCodec.INFO_TRY_AGAIN_LATER,
+                    formatChanged = MediaCodec.INFO_OUTPUT_FORMAT_CHANGED,
+                    buffersChanged = MediaCodec.INFO_OUTPUT_BUFFERS_CHANGED,
+                )
+            ) {
+                DeviceAudioPlaybackPolicy.Dequeue.FAILURE -> return false
+                DeviceAudioPlaybackPolicy.Dequeue.RETRY -> return true
+                DeviceAudioPlaybackPolicy.Dequeue.OUTPUT_EVENT -> continue
+                DeviceAudioPlaybackPolicy.Dequeue.READY -> Unit
+            }
+            if (idx == null || idx < 0) return false
             val buf = decoder.getOutputBuffer(idx)
             val playable = buf != null && info.size > 0 &&
                 info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG == 0
             if (playable) {
                 buf!!.position(info.offset)
                 buf.limit(info.offset + info.size)
-                runCatching { track.write(buf, info.size, AudioTrack.WRITE_BLOCKING) }
-                    .onFailure { Log.w(TAG, "AudioTrack.write failed", it) }
+                if (!writeFully(track, buf)) {
+                    runCatching { decoder.releaseOutputBuffer(idx, false) }
+                    return false
+                }
+                onPcmWritten()
             }
-            runCatching { decoder.releaseOutputBuffer(idx, false) }
-            if (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) return
+            if (runCatching { decoder.releaseOutputBuffer(idx, false) }.isFailure) {
+                return false
+            }
+            if (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) return true
         }
     }
 
+    /** 部分写继续推进；零字节/负错误码/异常都结束当前播放器，不能吞掉 PCM 尾段或空转。 */
+    private fun writeFully(track: AudioTrack, buffer: ByteBuffer): Boolean {
+        while (buffer.hasRemaining()) {
+            // ByteBuffer 重载会在成功写入后自动推进 position；校验必须和写入前
+            // 的请求长度比较，否则完整写入后 remaining==0 会被误判成失败。
+            val requested = buffer.remaining()
+            val result = runCatching {
+                track.write(buffer, requested, AudioTrack.WRITE_BLOCKING)
+            }.getOrDefault(WRITE_EXCEPTION)
+            if (!DeviceAudioPlaybackPolicy.writeMadeProgress(result, requested)) {
+                Log.w(TAG, "AudioTrack.write failed rc=$result")
+                threadFailure = Exit.PLAYBACK_ERROR
+                audEvent("aud_playback_error", "r_write_error")
+                return false
+            }
+            // AudioTrack.write(ByteBuffer, ...) 会把 position 前进 result 字节；下一轮只写剩余 PCM。
+        }
+        return true
+    }
+
     private fun emitTick(windowMs: Long) {
+        val queued = synchronized(queue) { queue.size }
         audEvent(
             "aud_play",
             "dl_${DeviceAudioPolicy.AUD_PLAYOUT_DELAY_MS}" +
-                "_q_${queue.size}" +
+                "_q_$queued" +
                 "_l_$droppedLate" +
                 "_w_$droppedBadFormat" +
                 "_t_$windowMs",
@@ -306,6 +407,8 @@ class DeviceAudioPlayer(
         private const val POLL_MS = 10L
         private const val JOIN_TIMEOUT_MS = 500L
         private const val TICK_INTERVAL_MS = 10_000L
+        /** 不与 AudioTrack 错误码重叠。 */
+        private const val WRITE_EXCEPTION = Int.MIN_VALUE
         private const val SAMPLES_PER_FRAME_US =
             1_000_000L * AudioFrameCodec.SAMPLES_PER_FRAME / AudioFrameCodec.SAMPLE_RATE
     }

@@ -353,4 +353,7 @@
     <string name="aud_peer_silent">TA 开了声音共享，但现在没有声音过来：可能是那个 App 不允许被录制（不是坏了），也可能 TA 那边本来就没在放。让 TA 换个播放器，或者直接外放。</string>
     <string name="aud_peer_off">TA 没开「让TA听到我手机里的声音」，你只听得到 TA 说话</string>
     <string name="aud_peer_too_old">TA 的 App 版本太旧，还听不到手机里的声音</string>
+    <string name="aud_playback_failed">这台手机播放 TA 的内部声音失败了；语音通话仍正常。可尝试重新连接或检查媒体音量。</string>
+    <string name="aud_remote_playback_failed">对方手机播放内部声音失败；语音通话仍正常。</string>
+    <string name="aud_share_state_with_peer_failure">%1$s\n对方手机播放内部声音失败；语音通话仍正常。</string>
 </resources>

@@ -152,7 +152,7 @@
   判"交棒遥测坏了"之前先对提交 `1da0158`。
   **`ice_failed` 与 `ice_outage` 必须在日志里分得开**：`ice_outage`（DISCONNECTED）会等恢复、`ice_failed` 是打洞彻底失败（detail 带 `established=`、`restarts=`、`path=` 的缩码）。取证必须排在恢复策略判定之前，否则 `established` 已被改掉。
   下面这一行是**机器读的**：`DiagEventRegistryTest` 把它与 main 源码扫出的事件名逐一比对，两个方向都不许有差（新增事件名不写进来，t1 直接红；写了没在发，也直接红）。以 `_` 结尾的是前缀项——`bucket_` 覆盖 `bucket_act`/`bucket_wset`/`bucket_freq`/`bucket_rare`/`bucket_rst`。上面那些散文段落是会腐烂的，这行不会。
-  <!-- DIAG-EVENT-NAMES: screen_off/screen_on/capture_ok/capture_fail/ice_outage/ice_recovered/ice_failed/video_stall/video_resumed/viewer_paused/viewer_resumed/surface_created/surface_size/surface_destroyed/sink_attached/fgs_start_failed/webrtc_start_failed/leave_hint_screen_off/pip_enter/pip_exit/peer_signal/gather_done/qos_tick/qos_bad/stop_tap/signaling_down/signaling_up/app_exit/probe_start/heartbeat/net_up/net_down/net_type/doze_on/doze_off/bucket_/wake_ok/wake_off/wake_fail/aexit/session_end/backlog_drop/projection_revoked/projection_resumed/projection_reopen_fail/echo_ack/aud_started/aud_stopped/aud_silent/aud_tick/aud_play -->
+  <!-- DIAG-EVENT-NAMES: screen_off/screen_on/capture_ok/capture_fail/ice_outage/ice_recovered/ice_failed/video_stall/video_resumed/viewer_paused/viewer_resumed/surface_created/surface_size/surface_destroyed/sink_attached/fgs_start_failed/webrtc_start_failed/leave_hint_screen_off/pip_enter/pip_exit/peer_signal/gather_done/qos_tick/qos_bad/stop_tap/signaling_down/signaling_up/app_exit/probe_start/heartbeat/net_up/net_down/net_type/doze_on/doze_off/bucket_/wake_ok/wake_off/wake_fail/aexit/session_end/backlog_drop/projection_revoked/projection_resumed/projection_reopen_fail/echo_ack/aud_started/aud_stopped/aud_silent/aud_tick/aud_play/aud_playback_error -->
   **FR-16 设备内录一族（`aud_*`，`role=sharer` 是采集侧、`role=viewer` 是放音侧）**：`aud_started detail=sr_48000_ch_2_c_aac_r_<起因>`
   （起因 ∈ toggle_on/peer_ack/channel_open/live/rebind，回答"这次采集是谁叫起来的"）、
   `aud_stopped detail=r_<出口>`（共享端出口 ∈ toggle_off/projection_stopped/session_close/channel_closed/record_error/codec_error/service_destroy/rebind，
@@ -167,6 +167,7 @@
   `aud_silent detail=f_25`（沿触发：一段长静音只报一条）、
   `aud_tick detail=d_<ms>_q_<字节>_l_<丢帧>_di_<编码器没收下输入>_do_<编码器这一帧没出产物>_ds_<通道拒收或帧超限>_b_<字节>`（10s 一条，与 `qos_tick` 同族、已进 P2）、
   `aud_play detail=dl_<放音延迟ms>_q_<排队帧>_l_<迟到丢帧>_w_<线格式不符帧>_t_<窗口ms>`（观看端 10s 一条，同进 P2）。
+  观看端 `AudioTrack.write()` 返回错误时另发 `aud_playback_error detail=r_<playback_error>`，与 codec/dequeue 失败的 `aud_stopped r_codec_error` 区分；这不等同于共享端采集失败。
   ⚠️ **`aud_tick` 的 `d_` 是发送端的帧间隔（节流自证），不是单程延迟**：两端没有共享时钟，
   真正的"她听到晚了多少"只能由观看端的 `aud_play detail=dl_…` 给出；读 `d_` 只能判"采集线程有没有在正常节奏上跑"，
   把它读成延迟＝把这一族的第一个格子就读歪。
@@ -299,7 +300,8 @@ JSON 信令不许走 `aud`（`channelByLabel` 里 `aud` 显式返回 null）：�
 | `videoon` | anno + ctl（双通道补发） | — | **v0.2.64 新增**：重开授权成功、画面续流（同一视频轨、同一 PeerConnection，不重新协商、不重新 ICE）。它是收掉 `videooff` 横幅的**唯一**入口 |
 | `ctl_denied` | ctl | `reason`(可选: `screenoff`) | 手势被拒（未授权/收回/无障碍缺失），观看端横幅说明原因；共享端 4s 节流 |
 | `a` | anno | `id`(与 `s`/`p`/`e` 同一 UUID) | **v0.2.65 新增**：共享端已把这一笔**落墨**（0.2.65 起笔迹在她那边缓冲到收笔才画，见 §3.2「为什么共享端缓冲到收笔」）。观看端收到即把本地副本交棒淡出（150ms）；没收到则最多白留 600ms 后兜底淡出（`HANDOVER_FALLBACK_MS`，取 600 是为了升级期"新观看端+旧共享端"的重叠窗口按常量本身与 0.2.64 同量级）。故意走 **anno 而不是 ctl**：它既是交棒信号，也是 `echo_ack` 的测量对象——要量的就是"笔迹经过的那条队列"的排队+往返，走可靠通道会测到另一条队列、得出"很快"的假读数。旧版观看端不认这个 `k` ⇒ 落进 `SignalRouter` 的 `else`，静默忽略、无害；因此**不允许**任何代码假设"对端一定会回 ack" |
-| `aud` | ctl | `on`(0/1), `state`(`live`/`silent`) | **FR-16 新增**：共享端报来它自己那台手机的内录状况。`on`=他的开关意图，`state`=采集线程实际读到没有声音。**只有两态**，不是"live/silent/blocked"：`AudioPlaybackCapture` 读到全零 PCM 本身不携带结论（可能是那个 App 声明了不可录制，也可能当时本来就没声音在放），所以这一路不制造第三个态，`silent` 的文案必须把两种成因与出路一起说清。⚠️ **`on` 只认 0/1**：缺失或别的值一律按"没读数"处理（`DataAction.None`），不许把猜出来的 `false` 报成"TA 没开"。⚠️ **沿触发+去重**（`publishAudStatus` 按 `开关\|状态` 签名叫一次）：它是 ctl 上的一条 JSON，每帧一报会把有序信令队列当音频道用——而 `aud` 帧丢掉的那些时刻信令反而在排队。旧观看端不认这个 `k` ⇒ 落进 `SignalRouter` 的 `else`，静默无害 |
+| `aud` | ctl | `on`(0/1), `state`(`live`/`silent`), `playback`(1) | **FR-16 新增**：共享端报来它自己那台手机的内录状况。`on`=他的开关意图，`state`=采集线程实际读到没有声音。**只有两态**，不是"live/silent/blocked"：`AudioPlaybackCapture` 读到全零 PCM 本身不携带结论（可能是那个 App 声明了不可录制，也可能当时本来就没声音在放），所以这一路不制造第三个态，`silent` 的文案必须把两种成因与出路一起说清。`playback=1` 声明共享端能消费观看端的 `audplay` 播放故障反馈；缺失/未知按旧端处理，观看端不得发送该扩展消息。⚠️ **`on` 只认 0/1**：缺失或别的值一律按"没读数"处理（`DataAction.None`），不许把猜出来的 `false` 报成"TA 没开"。⚠️ **沿触发+去重**（`publishAudStatus` 按 `开关\|状态` 签名叫一次）：它是 ctl 上的一条 JSON，每帧一报会把有序信令队列当音频道用——而 `aud` 帧丢掉的那些时刻信令反而在排队。旧观看端不认这个 `k` ⇒ 落进 `SignalRouter` 的 `else`，静默无害 |
+| `audplay` | ctl，未 OPEN 时兼容回退 anno | `failed`(0/1) | 新版观看端→声明 `playback=1` 且当前 `aud` OPEN 的共享端，稀疏发送播放器失败/恢复沿。旧共享端不会声明能力，观看端不发，避免旧端把未知控制消息交给涂鸦层。共享端显式消费该消息，只更新对端播放提示，不改本机采集状态 |
 
 ### 3.2 为什么共享端把笔迹缓冲到收笔才落墨（重影的物理根因，0.2.65）
 

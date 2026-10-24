@@ -216,8 +216,8 @@ class SignalRouterTest {
     @Test
     fun `k=aud 的 on 只认 0 与 1 别的值都是没读数`() {
         assertEquals(
-            SignalRouter.DataAction.PeerDeviceAudio(on = true, state = "live"),
-            SignalRouter.routeData("aud", controlMode = false, live = true, audOn = 1, audState = "live"),
+            SignalRouter.DataAction.PeerDeviceAudio(on = true, state = "live", playbackSupported = true),
+            SignalRouter.routeData("aud", controlMode = false, live = true, audOn = 1, audState = "live", audPlayback = 1),
         )
         assertEquals(
             SignalRouter.DataAction.PeerDeviceAudio(on = false, state = null),
@@ -232,6 +232,21 @@ class SignalRouterTest {
             SignalRouter.DataAction.None,
             SignalRouter.routeData("aud", controlMode = false, live = true, audOn = 2, audState = "live"),
         )
+    }
+
+    @Test
+    fun `playback反馈只对显式声明能力的新共享端开放`() {
+        val oldPeer = SignalRouter.routeData(
+            "aud", controlMode = false, live = true, audOn = 1, audState = "live",
+        ) as SignalRouter.DataAction.PeerDeviceAudio
+        val newPeer = SignalRouter.routeData(
+            "aud", controlMode = false, live = true, audOn = 1, audState = "live", audPlayback = 1,
+        ) as SignalRouter.DataAction.PeerDeviceAudio
+        assertEquals(false, oldPeer.playbackSupported)
+        assertEquals(true, newPeer.playbackSupported)
+        assertEquals(false, SignalRouter.routeData(
+            "aud", controlMode = false, live = true, audOn = 1, audState = "live", audPlayback = 2,
+        ).let { (it as SignalRouter.DataAction.PeerDeviceAudio).playbackSupported })
     }
 
     /** 认识的 state 才透传，其余 null——协议里加第三态的先决条件是一条可信的第二路信号（见 DeviceAudioPolicy 文件头） */

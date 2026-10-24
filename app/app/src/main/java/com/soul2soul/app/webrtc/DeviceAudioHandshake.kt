@@ -19,6 +19,12 @@ object DeviceAudioHandshake {
     /** 共享端 → 观看端（ctl）：内录开关与状态；发送方在采集那一步接上 */
     const val K_STATE = "aud"
 
+    /** `audplay` 反馈能力；没有这个字段的旧共享端不得收到未知控制消息。 */
+    const val CAP_PLAYBACK = "playback"
+
+    /** 观看端 → 共享端（ctl）：解码/放音是否已经失败。旧端会安全忽略未知 k。 */
+    const val K_PLAYBACK = "audplay"
+
     const val CODEC_AAC = "aac"
 
     /** 只在 aud 通道确认 OPEN 之后发：通道没通就 ack，对面会起一个送不出去的采集 */
@@ -41,4 +47,24 @@ object DeviceAudioHandshake {
         .put("k", K_STATE)
         .put("on", if (on) 1 else 0)
         .put("state", state)
+        .put(CAP_PLAYBACK, 1)
+
+    /** 能力字段缺失按旧端处理，不能把普通 `k=aud` 误当成支持反馈。 */
+    fun playbackCapability(json: JSONObject): Boolean =
+        json.optString("k") == K_STATE && json.optInt(CAP_PLAYBACK, -1) == 1
+
+    /** 播放失败是另一台设备的事实，不能伪装成共享端本地的 HEARD。 */
+    fun playbackJson(failed: Boolean): JSONObject = JSONObject()
+        .put("k", K_PLAYBACK)
+        .put("failed", if (failed) 1 else 0)
+
+    /** 缺失/未知状态是无读数，绝不能被猜成恢复。 */
+    fun parsePlayback(json: JSONObject): Boolean? {
+        if (json.optString("k") != K_PLAYBACK) return null
+        return when (json.optInt("failed", -1)) {
+            0 -> false
+            1 -> true
+            else -> null
+        }
+    }
 }
