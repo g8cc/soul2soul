@@ -2,6 +2,30 @@
 
 倒序。锚点为 git 短哈希（`git log --grep='v0\.2\.'` 可复核）。App 内更新通道自 v0.2.16 起可用。
 
+## v0.2.66 — 2026-10-24（本批，已上通道）
+
+发版四证（本轮实测，不是抄上一版）：
+- 远端 `version.json` = `{66, "0.2.66", sha256 afeec77d…af23}`，同一个 sha256 **三处逐字符一致**——本地 `dist/Soul2Soul-v0.2.66-release.apk` 的 `shasum -a 256`、服务器上 `sha256sum soul2soul-latest.apk`、清单里的 `sha256` 字段。
+- `apksigner` 报证书 SHA-256 仍是 `ae7fb8ec4f610e4c8f111c6913726e63f231b6384c3bb116a253fba322f53e4f`（与 0.2.64/0.2.65 **逐位相同** ⇒ 已装的手机是覆盖安装、不用卸载，也不会抹掉 `deviceId`），v1/v2 双签 `true`（v3 `false`，与历史各版一致）。
+- `aapt dump badging` 读回 `versionCode='66' versionName='0.2.66'`——不是 BuildConfig 常量被内联留下的旧值（脚本内置 `:app:clean`）。
+- HTTPS 分段取包回 `HTTP/1.1 206 Partial Content`，`Content-Range: bytes 0-1023/69773886`，总长与本地 dist 文件字节数一致。
+
+额外一格通路证据：产物 `classes3.dex` 里按字节能搜到 `msg2`（1 处）与「留言提醒」（1 处）。这只证明**代码确实进了包**，不证明她听到了声音。
+
+### 本版内容
+
+- **留言提醒改出声（`a5af868`，用户 10-23 改口径「不要静默了」，推翻 10-20 的「静静躺在通知里」）**：渠道**只能换新 id** 才生效——Android 8+ 已建渠道的声音/档位在系统侧持有，`createNotificationChannel` 只补建不覆盖，沿用 `msg` 等于装过 0.2.64/0.2.65 的手机永远不响。所以 `msg` → `msg2`=`IMPORTANCE_DEFAULT`（出声、**仍不弹横幅**，这次只要求有声）+ 显式 `setSound`，并 `deleteNotificationChannel("msg")` 删掉旧静音渠道（否则设置里留两条同名「留言提醒」）。`setOnlyAlertOnce` 不再焊死 `true`，改由"这批未读里有没有从没响过的 id"决定——读掉一条后剩下那条重排、留言页切走再切回来，都不许催第二遍。26 以下（`minSdk 23`，Mi5 这台）没有渠道概念，声音挂在 Builder 上，否则那条路径仍然彻底静音。锁：`UnreadNotifierTest` M4~M7（原 M4 锁的是"不许响"，口径翻转后重写）+ 9 种抽法逐条实测各自变红。
+- **更新提示每个远端版本自动弹一次确认框（`0517612`，#73）**：这条 10-22 就写完了，但**不在 0.2.65 的包里**——机器可查：`git merge-base --is-ancestor 0517612 5f4b54b` 返回非 0（0.2.65 的记账提交是那棵树的头，10-23 13:32 打包；这笔代码 21:25 才随 `b5f6926` 合进来）。本版首次带出。行为：拿到清单且有更新时，只要不在通话/共享/暂停态就弹框，一个远端版本只自动弹一次（`updatePromptedCode` 随 `onSaveInstanceState` 存住，转屏不重复弹），内联按钮保留作主动入口。
+- ⚠️ **`0517612` 的另一半在服务器上，没上线，所以"连接身份污染"这个包只修了一半**：那笔提交同时给 `server/src/index.js` 加了 `duplicate_hello` 守卫。本轮只读取证：线上 `grep -c duplicate_hello` = **0**、线上 md5 `4472d1de…` ≠ repo `d4eeed1e…` ⇒ 服务器那半仍要走"备份→diff 读完→`node --check`→重启验证"四步并等当场确认，**没做**。别把本版读成"身份污染已修"。
+
+### 诚实边界（本版主体）
+
+- **真机零读数**：发布这一刻 `adb devices` 为空，`scripts/test.sh --tier t4` 明写 `需要 2 台在线模拟器/设备（当前 0）` + `t4 SKIP`（默认汇总里连 t4 这一行都不打印，别把"没显示"读成"过了"）。本版两条新行为全部停在 JVM/源码锁级：
+  - **V-07 三格 ⬜**：① HyperOS/MIUI 会不会把新建渠道按系统侧默认设成静默（`IMPORTANCE_DEFAULT` ≠ 她一定听得到）；② 删旧渠道后设置里是否只剩一条「留言提醒」；③ 旧消息重排到底响不响第二遍。
+  - **#73 的弹窗到底弹没弹 ⬜**：`UpdatePromptWiringTest`/`UpdatePromptPolicyTest` 锁的是判定与接线，真机上"她打开 App 有没有看到框"零采样——这次升级本身就是第一次读数机会。
+- 0.2.65 欠的两道门一条没动：**V-06**（FR-16 内录四项真机必测）与 **#90 的 E1–E6**（重影/混跑重叠窗口）仍是零读数。
+- 门控读数：`bash scripts/test.sh` rc=0，t0/t1/t2/t3 全 PASS（t1 = 58 个测试类 / 458 条用例 / 0 failures / 0 errors / 0 skipped）；审计矩阵空格 **159**（10-23 的 158 + V-07 那格新欠账）、0 个 GAP。
+
 ## v0.2.65 — 2026-10-23（本批，已上通道）
 
 远端 `version.json` = `{65, "0.2.65", sha256 a2b8e174…}`，线上包与本地构建产物逐字节一致；`apksigner` 报证书 SHA-256 仍是 `ae7fb8ec…3e4f`（与 0.2.64 及更早**逐位相同** ⇒ 已装的手机是覆盖安装、不用卸载）且 v1/v2 双签都为 true；`aapt dump badging` 读回 `versionCode='65' versionName='0.2.65'`（不是 BuildConfig 内联留下的旧值）；HTTPS 分段取包回 206。
