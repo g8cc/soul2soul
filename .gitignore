@@ -1,6 +1,9 @@
 *.iml
 .gradle
-/local.properties
+# 机器相关的 SDK 绝对路径一律不入库。注意规则必须**不带前导斜杠**：
+# 原来写的是 `/local.properties`（只匹配仓库根），而 Gradle 根是 `app/`，
+# 于是 `app/local.properties` 一直是被跟踪状态、开发机的路径跟着进了仓库（10-23 远端为此把它删了）。
+local.properties
 /.idea
 .DS_Store
 build/

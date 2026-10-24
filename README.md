@@ -63,7 +63,7 @@ adb install -r app/app/build/outputs/apk/prod/debug/app-prod-debug.apk
 ./scripts/publish-release.sh 0.2.23 23
 ```
 
-- 工程约定/服务器漂移警告见根目录 `AGENTS.md`；测试怎么写见 `docs/TESTING.md`；线上协议以 `docs/PROTOCOL.md` 为准。
+- 工程约定/服务器漂移警告见根目录 `AGENTS.md`；**读数口径**按用途外分：日志怎么读 `docs/DIAG-READINGS.md`、真机/模拟器量程 `docs/MEASUREMENT.md`、签名与发版验收 `docs/SIGNING.md`；测试怎么写见 `docs/TESTING.md`；线上协议以 `docs/PROTOCOL.md` 为准。
 
 ## 当前已知限制
 

@@ -278,6 +278,23 @@ PY
     echo "静态检查: .gitignore 必须保留 keystore.properties 这一行（口令文件不许被跟踪）"
     fail=1
   fi
+  # SDK 绝对路径文件同样不许入库，而且 ignore 规则**必须不带前导斜杠**：
+  # 原先写的是 `/local.properties`（只匹配仓库根），而 Gradle 根是 `app/` ⇒ `app/local.properties`
+  # 一直是被跟踪状态、开发机路径跟着进了仓库（10-23 远端因此把它从仓库删了）。
+  # 用 `grep -qx` 就是为了让 `/local.properties` 这种写法过不了这条。
+  if ! grep -qx 'local.properties' "$ROOT/.gitignore"; then
+    echo "静态检查: .gitignore 必须有一行不带斜杠的 local.properties（带前导斜杠只锚仓库根，盖不住 app/ 那份）"
+    fail=1
+  fi
+  # 删掉仓库里那份之后，SDK 路径的来源就只剩"本机自己建"——这条只能锁文档还在说，不能锁"环境缺了要红"。
+  # ⚠️ 我第一版写的正是"四条来源全缺即红"，实测是**恒不触发的空锁**（把 app/local.properties 移走，t0 照绿）：
+  # 本脚本第 25-36 行会自己探测 `$HOME/Library/Android/sdk` 等三个候选并 `export ANDROID_HOME`，
+  # 所以任何在 t0 里读 `${ANDROID_HOME:-}` 的判据都恒为"已设"。现象与坑㉘「只验正常态会造出恒红守卫」同族，
+  # 只是方向相反：这条是恒绿。真要判"构建坏了"由 t1 自己报（SDK 探测不到时它出 SKIP + 设置 ANDROID_HOME 的提示）。
+  if ! grep -q 'sdk.dir=' "$ROOT/AGENTS.md"; then
+    echo "静态检查: AGENTS.md 构建节必须保留「新机器自建 app/local.properties（sdk.dir=…）」那一条——该文件不入库，缺了 assembleProdDebug 直接报 SDK location not found"
+    fail=1
+  fi
   # v0.2.57 生产日志复盘实锤：[relay] 把 paired.token（长期重连凭证，16 条）与
   # pair.code（六位配对码，12 条）原样落盘。隐私名单收在 logpolicy.js，
   # index.js 必须走它——把 send() 改回内联 quiet 判定就是拆线，必须红。
@@ -303,7 +320,10 @@ PY
   # 而 safeTag 把等号与逗号一起磨成 `_`，所以文档必须同时给出日志侧对形（`k_123456…` / `q_29_h-s…`），
   # 否则复现时按带等号的写法 grep 必然 0 命中 → 又被读成"埋点坏了"。
   # `beat=` 是实现前计划稿里的名字，代码里从来没有过；文档一旦写它就是第三套假口径。
-  if grep -qF '`beat=`' "$ROOT/docs/PROTOCOL.md" "$ROOT/docs/AUDIT-MATRIX.md" "$ROOT/AGENTS.md" 2>/dev/null ||
+  # 10-23 把 AGENTS 的读日志口径外分到 docs/DIAG-READINGS.md / docs/MEASUREMENT.md，
+  # 禁令必须跟着搬——否则"以后没人看守的那份文档"就是下一个假口径。
+  if grep -qF '`beat=`' "$ROOT/docs/PROTOCOL.md" "$ROOT/docs/AUDIT-MATRIX.md" "$ROOT/AGENTS.md" \
+              "$ROOT/docs/DIAG-READINGS.md" "$ROOT/docs/MEASUREMENT.md" 2>/dev/null ||
      ! grep -qF 'k_123456' "$ROOT/docs/PROTOCOL.md" 2>/dev/null ||
      ! grep -qF 'q_29_h-s' "$ROOT/docs/PROTOCOL.md" 2>/dev/null; then
     echo "静态检查: 心跳锚点键名只能是 k=（代码里没有 beat=），且 docs/PROTOCOL.md 必须保留日志侧对形 k_123456… / q_29_h-s…" >&2

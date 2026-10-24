@@ -222,7 +222,7 @@
   - `diag.session` 四条的 `path`/`proj` **一条 `_` 都没有**（`s-s`/`r-o`/`o-r` + `live`/`stopped`），且三种终止原因同轮到手（`projection_stopped`＝共享期锁屏被系统撤授权 / `remote_bye` / `user_hangup`）⇒ 上一条那句"当前唯一可行的采法是她发起共享、Mi10 作观看端接"已经走完，那一格从 ⬜ 结清。
   - 同轮两条建立成功的会话都跨了一次真实换网（18:09:05 wifi→蜂窝、18:09:32 回 wifi），`liveMs=916267` 那通最后是**本端挂断**（viewer `user_hangup`）⇒ **换网杀信令、不杀媒体**在真机上第二次成立。
   - 本轮仍零读数：`stop_tap`（两次结束分别是本端挂断与系统撤授权，没人走主页/通知那两个入口——要它必须专门让**她**按一次"结束共享"）、`app_exit`（修法见上面 `app_exit` 条，0.2.64 之后才有读数）、`ice_failed`/`doze_on`/`video_resumed`/`surface_destroyed`/`backlog_drop`/`wake_fail`（都是"这一轮没发生那件事"，不是通路坏）。
-  ⚠️ **认领机器的新办法：`deviceId` ≠ 物理机（10-19 靠它才发现生产上是"两台机器、三个身份"）**：把任意一条心跳的「服务器行时间 − `k=`」当作该设备内核 boot 的时刻戳，同 boot ⇒ 同物理机。本轮 `106db351` 与 `1a1d64ea` 算出来都是 `1791523055`（差 0s，并与本机 Mi10 `cat /proc/uptime` 反算的 boot 完全一致）⇒ 两台身份同在 Mi10 上（HyperOS 分身 + `Prefs.kt` 的 deviceId 存在 App 私有 SharedPreferences，卸载重装/分身各生成一个新 UUID）；`deba9443` 差 1103033s（12.8 天）⇒ 确是另一台。**后果**：AGENTS 那张"生产只有两台 deviceId"的表只在"每台各只有一个身份"时成立；判"某台手机掉线几次"要按物理机聚合，判"某次死是被杀还是被冻"必须按 deviceId 分开，而 `peer.gone A -> B` 里 B 是**哪个身份**还取决于服务器绑定指向谁（本轮 17:48:10 重新配对才把米15 的 peer 从 `106db351` 挪到 `1a1d64ea`，这正是 #61 陈旧绑定的现场样本）。
+  ⚠️ **认领机器的新办法：`deviceId` ≠ 物理机（10-19 靠它才发现生产上是"两台机器、三个身份"）**：把任意一条心跳的「服务器行时间 − `k=`」当作该设备内核 boot 的时刻戳，同 boot ⇒ 同物理机。本轮 `106db351` 与 `1a1d64ea` 算出来都是 `1791523055`（差 0s，并与本机 Mi10 `cat /proc/uptime` 反算的 boot 完全一致）⇒ 两台身份同在 Mi10 上（HyperOS 分身 + `Prefs.kt` 的 deviceId 存在 App 私有 SharedPreferences，卸载重装/分身各生成一个新 UUID）；`deba9443` 差 1103033s（12.8 天）⇒ 确是另一台。**后果**：`docs/MEASUREMENT.md` 那张"生产只有两台 deviceId"的表只在"每台各只有一个身份"时成立；判"某台手机掉线几次"要按物理机聚合，判"某次死是被杀还是被冻"必须按 deviceId 分开，而 `peer.gone A -> B` 里 B 是**哪个身份**还取决于服务器绑定指向谁（本轮 17:48:10 重新配对才把米15 的 peer 从 `106db351` 挪到 `1a1d64ea`，这正是 #61 陈旧绑定的现场样本）。
   ⚠️ **落盘时 `detail` 要过 `safeTag`**（非 `[\w.-]` 的字符一律换成 `_`，生产版同样如此）：下文写作 `sig=gone`、`afterMs=`、`downMs=` 的字段，在日志行里渲染成 `detail=sig_gone`、`afterMs_…`（10-18 拿生产 `[diag.event]` 实测：`detail=established_true_restarts_0`）。**按语义 grep，别按等号 grep**。
   **`peer_signal`（detail `sig=gone|bye`）是"秒断"的取证点**：`bye` 是对方真挂断，`peer.gone` 只代表对端**信令 socket** 没了（服务器 30s pong 超时即广播，见 §2.3 末），而媒体是 P2P 的、与信令死活无关。所以 `[diag.event] … event=peer_signal detail=sig=gone` 若带 `ice=CONNECTED`，就是"画面语音都还在、会话被一句信令离线拆掉"的直接证据；客户端当前**照旧**结束会话（是否改成 ICE 存活时宽限，等证据回来再定），上报必须排在拆除之前，否则 `ice` 只会是 `CLOSED`。
   `fg` + `capture_fail`/`fgs_start_failed` 是 Android 14+/HyperOS "后台起屏幕采集被拒"的判据。**信令掉线的断口长度读 `signaling_up`（detail `reconnectAttempt=… downMs=… n=<transport> d=<Doze>`）**：`signaling_down` 按定义发生在 socket 已断时，v0.2.58 之前它发不出去（只进本机 logcat），v0.2.59 起它会进补报队列、复活后带 `at=` 到达——**它的到达时刻是补报时刻，真实断口起点看 `at=`，也看它排在 `signaling_up` 之前还是之后**。复活那条现在自带网络与 Doze 现场（`n=`/`d=`，探针没起来时这两个字段整体不出现，不是 `n=unk`），一次复活就能同时回答"断了多久"和"当时是不是在 Doze/换了网"。**`downMs` 由 `SystemClock.elapsedRealtime()` 相减得出**（v0.2.59）：复活那一刻正是系统重新同步时钟的时刻，wall-clock 相减会把"断了 4 分钟"读成"断了 -3.8 小时"。（v0.2.57 校正的"down 永远收不到"到 0.2.59 已不成立，按版本读。）
@@ -307,7 +307,7 @@ JSON 信令不许走 `aud`（`channelByLabel` 里 `aud` 显式返回 null）：�
 
 **她的屏幕就是镜头。** Android 没有任何"按窗口把某一层从采集中排除"的能力：`MediaProjection`
 录的是合成后的整块显示表面，我们的悬浮窗只要画出来了就在视频里；`FLAG_SECURE` 不是"挖掉这块"，
-而是让它变成一个**黑块**（AGENTS 已登记的 MIUI 坑）。所以"从采集里删掉我们的 UI"这条路是关着的，
+而是让它变成一个**黑块**（`docs/MEASUREMENT.md` 已登记的 MIUI 坑）。所以"从采集里删掉我们的 UI"这条路是关着的，
 唯一可行的原则是：**我们的 chrome 不进被采集的画面；笔迹只留一份真值。**
 
 重影的机制因此是结构性的，不是时序bug：观看端本地 0 延迟渲染一条，笔点同时经 anno（丢包通道）
