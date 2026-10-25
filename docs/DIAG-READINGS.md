@@ -76,9 +76,12 @@
   排除 ③ 之前不允许下"通路坏了"的结论；这一格的产品处置仍是 `⬜`（见 `docs/AUDIT-MATRIX.md` §1 末行）。
 - **"连上几秒就自动断开"在 Android 14+ 上有一个自因**：带宽估计器爬坡期把 `availableOutgoingBitrate`
   钉在 300kbps 初值（实测连读两拍 300、触发降档那一刻已是 5.38Mbps）→ 3 连拍降档 →
-  在同一 `ScreenCapturerAndroid` 上 stop+start → 系统判"第二次开采集"撤销录屏授权 →
-  `reason=projection_stopped`。米15 那两通 14.1s/16.1s 与 Mi10（Android 12 容忍 token 复用）能撑 155s
-  的设备差异由此解释。v0.2.62 起 14+ 只降码率不动采集尺寸，画质档与采集尺寸正式分家。
+  旧实现曾在同一 `ScreenCapturerAndroid` 上 stop+start → 系统判"第二次开采集"撤销录屏授权 →
+  `reason=projection_stopped`。现行实现 Android 14+ 初始物理采集长边为 1920，切档走
+  `VideoSource.adaptOutputFormat` 改编码输出尺寸，完全不重启 `MediaProjection`；读数用
+  `capture_ok`/`projection_resumed` 的 `cap=…_out=…` 与 `S2S_QOS` 的 `cap`/`out` 复核。Android 13 及以下通过
+  `ScreenCapturerAndroid.changeCaptureFormat` 改 VirtualDisplay 格式，也不触发投影停止回调；失败会回滚尺寸，
+  不许把 `proj=live` 留成假值。
 - **`heartbeat` 的缺口本身就是判据**：连续两条 `k=`（elapsedRealtime 秒，单调锚点）读数差 > 2×300s 说明进程被冻或被杀，
   不需要额外事件；日志侧这一格渲染成 `k_…`（safeTag 磨平等号与逗号）。设备墙钟不可信（实测 Mi5 慢 ~10.5h），任何"间隔"都不许用 wall-clock 相减。
 - **"待机为什么断"要两条读数一起定：最后一条 `heartbeat` 的时刻 + 复活时那条 `aexit` 的 `a=`**，只看 socket 的 `code=1006` 会把被杀误读成断网。

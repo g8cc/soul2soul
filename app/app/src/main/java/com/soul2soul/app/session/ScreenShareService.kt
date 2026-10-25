@@ -519,7 +519,8 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
             Log.d(
                 "S2S-Geom",
                 "sharer display=${sw}x${sh} app=${resources.displayMetrics.widthPixels}x${resources.displayMetrics.heightPixels} " +
-                    "capture=${webRtc?.captureWidth}x${webRtc?.captureHeight}",
+                    "capture=${webRtc?.captureWidth}x${webRtc?.captureHeight} " +
+                    "output=${webRtc?.outputWidth}x${webRtc?.outputHeight}",
             )
         }
     }

@@ -80,7 +80,7 @@ class ProjectionKeepAliveTest {
     // P1：撤销授权不再是终止原因。这条是整版改动的核心，也是最容易被写回去的一格
     @Test
     fun `projection onStop no longer ends the session`() {
-        val body = code(functionBody(webrtc(), "private fun projectionCallback()"))
+        val body = code(functionBody(webrtc(), "private fun projectionCallback("))
         assertTrue(
             "onStop 必须交给上层保活，不许自己结束会话",
             body.any { it.contains("listener.onProjectionRevoked()") },
@@ -123,13 +123,45 @@ class ProjectionKeepAliveTest {
             "成功才许把 proj 写回 live，失败必须退回 stopped，读数不许说谎",
             body.count { it.contains("projectionState = ") } >= 2,
         )
-        // 旧采集器只 dispose、不 stopCapture：ScreenCapturerAndroid.dispose() 只置一个标志位，
-        // 而 stopCapture() 会去 MediaProjection.stop()，那会**异步**再回调一次旧 callback 的 onStop，
-        // 时机落在 proj=live 写回之后 ⇒ 通知栏重新显示"画面已停"，而画面其实活着。
-        assertTrue("旧采集器必须走 dispose 收口", body.any { it.contains("old?.dispose()") })
+        val stop = body.indexOfFirst { it.contains("releaseCapturer(old)") }
+        val newCapture = body.indexOfFirst { it.contains("ScreenCapturerAndroid(projectionData") }
+        assertTrue("替换前必须释放旧采集器的虚拟显示，不能只 dispose 留下旧投影", stop >= 0)
+        assertTrue("必须先释放旧采集器再创建新投影，避免两个 VirtualDisplay 同时存活", stop in 0 until newCapture)
         assertTrue(
-            "重开路径里不许出现 stopCapture（那是第二个 onStop 来源，会把 proj 改回 stopped）",
-            body.none { it.contains(".stopCapture(") },
+            "旧回调必须被代际号隔离，释放旧投影不能把新画面误标 stopped",
+            body.any { it.contains("captureGeneration.incrementAndGet()") },
+        )
+    }
+
+    @Test
+    fun `projection state follows the capturer callback instead of the start request`() {
+        val start = code(functionBody(webrtc(), "fun startSharer(projectionData: Intent)"))
+        assertTrue(
+            "startSharer 不能在 startCapture 回调前宣称 live，启动抛异常时会留下假状态",
+            start.none { it.contains("projectionState = \"live\"") },
+        )
+        val observer = code(functionBody(webrtc(), "private fun captureObserver("))
+        assertTrue(
+            "采集成功回调必须把投影状态置为 live",
+            observer.any { it.contains("projectionState = \"live\"") },
+        )
+        assertTrue(
+            "采集失败回调必须把投影状态置为 stopped",
+            observer.any { it.contains("projectionState = \"stopped\"") },
+        )
+    }
+
+    @Test
+    fun `late callbacks from an old capturer cannot reach the shared video source`() {
+        val observer = code(functionBody(webrtc(), "private fun captureObserver("))
+        assertTrue(
+            "旧采集器的停止回调不能把新一代 VideoSource 标成 stopped",
+            observer.any { it.contains("override fun onCapturerStopped()") } &&
+                observer.any { it.contains("if (generation != captureGeneration.get()) return") },
+        )
+        assertTrue(
+            "旧采集器的迟到帧必须 release，不能泄漏 native VideoFrame",
+            observer.any { it.contains("frame.release()") },
         )
     }
 

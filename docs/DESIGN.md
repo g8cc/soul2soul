@@ -40,12 +40,12 @@
 
 | 项 | 选择 | 理由 |
 |---|---|---|
-| 客户端 | 原生 Kotlin, minSdk 29 | MediaProjection/悬浮窗/WebRTC 原生 API 最稳；两台目标机都是近年的安卓机 |
+| 客户端 | 原生 Kotlin, minSdk 23 | MediaProjection/悬浮窗/WebRTC 原生 API 兼容 Android 7+；旧机型保留降级路径 |
 | UI | 经典 View 体系 + Material3 | 悬浮窗层必须是 View；全 View 保持一致性，工程最简单 |
 | WebRTC | `io.getstream:stream-webrtc-android`（预编译 libwebrtc AAR） | 避免自编译 libwebrtc（极其痛苦）；API 即官方 `org.webrtc.*` |
 | 信令 | Node.js + ws，JSON 协议 | 几百行搞定，服务器上 `npm i && node` 即跑；后续想换语言也容易 |
 | NAT 穿透 | coturn（Docker），STUN+TURN，静态密钥 HMAC 时限凭证 | 国内移动网络 P2P 成功率低，TURN 是必须的兜底 |
-| 屏幕编码 | libwebrtc 默认（硬编 H.264，720p@30 起，自动码率自适应） | 屏幕内容静态占比高，码率约 0.5~2.5 Mbps |
+| 屏幕编码 | `DefaultVideoEncoderFactory`，offer 优先 VP9，H.264 兼容回退；屏幕内容保持分辨率优先 | 同码率下文字/UI 更清晰；码率与档位按网络和编码器限制自适应 |
 
 ## 三、会话流程（呼叫模型）
 
@@ -78,7 +78,7 @@ TURN 凭证为 HMAC-SHA1(静态密钥) 时限凭证（过期时间 = now+1h）�
 
 ### 5.1 屏幕采集链路（共享端）
 - `MediaProjectionManager.createScreenCaptureIntent()` 拿授权 → **必须先启动 `foregroundServiceType="mediaProjection|microphone"` 的前台服务并 `startForeground()`**，再创建 VirtualDisplay（Android 14+ 硬性顺序）。
-- 采集分辨率：默认长边 1600，支持 960/1280/1600/1920 档位，均偶数对齐、最高 30fps；弱网按 RTT/丢包/带宽/FPS 逐档降级，libwebrtc `ScreenCapturerAndroid` 自动处理屏幕旋转/尺寸变化。
+- 采集分辨率：新会话默认以长边 1920 的物理尺寸启动，支持 960/1280/1600/1920 质量档位，均偶数对齐、最高 30fps。Android 14+ 保持同一个 MediaProjection，通过 `VideoSource.adaptOutputFormat()` 切换编码输出尺寸；Android 13 及以下通过 `ScreenCapturerAndroid.changeCaptureFormat()` 切换同一 VirtualDisplay 的格式，不停止投影。弱网按 RTT/丢包/可用带宽和编码器限制逐档降级，`ScreenCapturerAndroid` 自动处理屏幕旋转/尺寸变化。
 - 系统会在通知栏显示"正在录制屏幕"，这是系统行为，无法隐藏。
 - Netflix/银行类 App（FLAG_SECURE）会黑屏，系统保护，不处理。
 - 锁屏后 VirtualDisplay 停止出帧：曾做成"无帧/锁屏 N 秒自动结束会话"（防挂死），v0.2.56 撤销——两人边语音边各玩各的必然锁屏，自动结束=打断陪伴。现在锁屏只暂停画面（观看端冻在最后一帧+横幅说明），语音与会话继续。

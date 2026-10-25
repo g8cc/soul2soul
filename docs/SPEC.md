@@ -13,7 +13,7 @@ soul2soul/
 ├── server/                   # 信令服务器 (Node.js + ws) + TURN(docker compose)
 │   ├── src/index.js
 │   └── turn/docker-compose.yml
-└── app/                      # Android (Kotlin, minSdk 24)
+└── app/                      # Android (Kotlin, minSdk 23)
     ├── settings.gradle.kts / build.gradle.kts / gradle.properties
     └── app/src/main/
         ├── AndroidManifest.xml
@@ -148,7 +148,7 @@ yn = (touchY - videoRect.top)  / videoRect.height
 
 1. **屏幕授权与 FGS 顺序（Android 14+ 强制）**：
    `createScreenCaptureIntent()` → onActivityResult → `startForegroundService(ScreenShareService)` → `onStartCommand` 内**先 `startForeground()`** → 再构造 `ScreenCapturerAndroid(resultData, callback)`。
-2. **采集参数**：`isScreencast=true` 的 VideoSource；默认长边 1600，档位为 960/1280/1600/1920，宽高取偶、最高 30fps；弱网自动逐档降级，`ScreenCapturerAndroid` 自适应旋转。
+2. **采集参数**：`isScreencast=true` 的 VideoSource；新会话默认以长边 1920 的物理采集尺寸启动，质量档为 960/1280/1600/1920，宽高取偶、最高 30fps。Android 14+ 用 `VideoSource.adaptOutputFormat()` 切换编码输出，不重建 `MediaProjection`；Android 13 及以下用 `ScreenCapturerAndroid.changeCaptureFormat()` 切换同一 VirtualDisplay 的格式，也不停止投影。弱网按 RTT/丢包/可用带宽与编码器限制逐档降级。
 3. **音频**：`JavaAudioDeviceModule` 默认实现；`AudioManager.mode = IN_COMMUNICATION` + speakerphone on；libwebrtc 自带 AEC3/NS/AGC。
 4. **悬浮窗**（共享端）：
    - 层1 笔迹：`TYPE_APPLICATION_OVERLAY`，`FLAG_NOT_TOUCHABLE|NOT_FOCUSABLE|LAYOUT_NO_LIMITS`，透明全屏，不干扰游戏。

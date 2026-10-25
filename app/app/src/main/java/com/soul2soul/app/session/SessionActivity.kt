@@ -74,7 +74,7 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
     @Volatile private var callInvalidated = false
     private var endedRemotely = false
     private var byeSent = false
-    private var hdOn = false
+    private var hdOn = true
     private var live = false
     /** 共享端报过 videooff 且还没报 videoon：解锁不许把横幅收起来（画面仍然停着） */
     private var remoteVideoPaused = false
@@ -123,7 +123,7 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
     private val elapsedTicker = object : Runnable {
         override fun run() {
             if (!live) return
-            val s = (System.currentTimeMillis() - elapsedBase) / 1000
+            val s = (android.os.SystemClock.elapsedRealtime() - elapsedBase).coerceAtLeast(0L) / 1000
             tvElapsed.text = String.format(Locale.US, "%02d:%02d", s / 60, s % 60)
             mainHandler.postDelayed(this, 1000)
         }
@@ -957,9 +957,11 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
             micGranted = checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) ==
                 android.content.pm.PackageManager.PERMISSION_GRANTED
             refreshMicChip()
-            elapsedBase = System.currentTimeMillis()
+            elapsedBase = android.os.SystemClock.elapsedRealtime()
             mainHandler.removeCallbacks(elapsedTicker)
             mainHandler.post(elapsedTicker)
+            // 新共享端默认以高清档启动；这里补发一次也兼容仍以均衡档启动的旧共享端。
+            client?.sendQuality(com.soul2soul.app.webrtc.VideoQualityPolicy.STARTUP_EDGE)
             // 机型/权限自检矩阵上报（对方手机不在手边时的远程诊断依据）
             com.soul2soul.app.util.SelfCheck.report(
                 this, "viewer",

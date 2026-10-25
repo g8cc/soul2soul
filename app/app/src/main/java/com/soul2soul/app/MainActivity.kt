@@ -54,7 +54,7 @@ class MainActivity : AppCompatActivity() {
 
     private var shakeListening = false
     private var paused = false
-    private val shakeDetector = ShakeDetector(clock = { System.currentTimeMillis() })
+    private val shakeDetector = ShakeDetector(clock = { android.os.SystemClock.elapsedRealtime() })
     private val shakeListener = object : SensorEventListener {
         override fun onSensorChanged(event: SensorEvent) {
             if (event.sensor.type != Sensor.TYPE_ACCELEROMETER) return

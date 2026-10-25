@@ -159,7 +159,7 @@ class WebRtcClient(
     private val qualityLock = Any()
     private var pendingQualityEdge: Int? = null
     private var surfaceHelper: SurfaceTextureHelper? = null
-    private var closed = false
+    @Volatile private var closed = false
     private val rttHandler = android.os.Handler(android.os.Looper.getMainLooper())
     private var highRttStreak = 0
     private var lowRttStreak = 0
@@ -217,7 +217,7 @@ class WebRtcClient(
             resumedSurfaceAtMs = 0L
         } else {
             viewerZeroFpsStreak = 0
-            resumedSurfaceAtMs = System.currentTimeMillis()
+            resumedSurfaceAtMs = android.os.SystemClock.elapsedRealtime()
         }
     }
     private val endedNotified = java.util.concurrent.atomic.AtomicBoolean(false)
@@ -252,6 +252,7 @@ class WebRtcClient(
     @Volatile private var projectionState = "-"
     private val candidateTally = java.util.concurrent.atomic.AtomicIntegerArray(4) // host/srflx/relay/prflx
     @Volatile private var gatherReported = false
+    private val captureGeneration = java.util.concurrent.atomic.AtomicLong(0L)
 
     private val connectTimeoutRunner = Runnable {
         if (!closed && !established) notifyEnded("connect_TIMEOUT")
@@ -276,12 +277,12 @@ class WebRtcClient(
         }
     }
 
-    /** 当前采集长边上限（观看端可通过 DataChannel 切 960/1280/1600/1920） */
+    /** 当前传给 ScreenCapturerAndroid 的物理采集长边上限。 */
     @Volatile
-    var captureLongEdge = VideoQualityPolicy.DEFAULT_EDGE
+    var captureLongEdge = VideoQualityPolicy.STARTUP_EDGE
         private set
 
-    /** 当前传给 ScreenCapturerAndroid 的尺寸（用于真机尺寸诊断）。 */
+    /** 当前传给 ScreenCapturerAndroid 的物理采集尺寸（用于真机尺寸诊断）。 */
     @Volatile
     var captureWidth: Int = 0
         private set
@@ -290,24 +291,34 @@ class WebRtcClient(
     var captureHeight: Int = 0
         private set
 
+    /** VideoSource 当前送入编码器的输出尺寸；API 34+ 切档只改变这里，不重建投影。 */
+    @Volatile
+    var outputWidth: Int = 0
+        private set
+
+    @Volatile
+    var outputHeight: Int = 0
+        private set
+
     /** 用户意图档位（观看端高清/流畅设定）：弱网自动降档后，网络好转回升到这里 */
     @Volatile
-    private var preferredLongEdge = VideoQualityPolicy.DEFAULT_EDGE
+    private var preferredLongEdge = VideoQualityPolicy.STARTUP_EDGE
 
     /**
      * 画质档：码率上限跟着它走，自适应阶梯也在它上面爬。
      *
-     * Android 13 及以下它与 [captureLongEdge]（真实采集尺寸）同步移动；**Android 14 起它单独移动**——
-     * 那一版开始 MediaProjection 的 token 是一次性的，改分辨率只能 `stopCapture()`+`startCapture()`，
-     * 系统把第二次开采集判为越权并撤销授权（双模拟器实测 `SecurityException: Don't re-use the resultData`
-     * → `MediaProjection.onStop` → 会话在 4.5s 死掉，reason=projection_stopped）。所以 14+ 只降码率、
-     * 不动采集尺寸：画质让路，会话保住。
+     * Android 13 及以下它与 [captureLongEdge]（真实采集尺寸）同步移动；**Android 14 起画质档独立于采集源**，
+     * 但通过 VideoSource.adaptOutputFormat 改变编码输出，不重建 MediaProjection——
+     * 那一版开始 MediaProjection 的 token 是一次性的，不能用 `stopCapture()`+`startCapture()` 切档，
+     * 系统会把第二次开采集判为越权并撤销授权（双模拟器实测 `SecurityException: Don't re-use the resultData`
+     * → `MediaProjection.onStop` → 会话在 4.5s 死掉，reason=projection_stopped）；因此改用
+     * `VideoSource.adaptOutputFormat` 改变编码输出。
      */
     @Volatile
-    private var qualityLongEdge = VideoQualityPolicy.DEFAULT_EDGE
+    private var qualityLongEdge = VideoQualityPolicy.STARTUP_EDGE
 
-    /** 唯一允许重启采集的门槛（见 [qualityLongEdge] 的 Android 14 语义） */
-    private val captureRestartSupported = android.os.Build.VERSION.SDK_INT < ANDROID_14
+    /** Android 13 及以下允许在同一投影上切换 VirtualDisplay 格式；14+ 只改 VideoSource 输出。 */
+    private val captureFormatChangeSupported = android.os.Build.VERSION.SDK_INT < ANDROID_14
 
     /** 临时协助授权期间为 true：锁低档+保帧率，收回授权恢复（仅共享端会置位） */
     @Volatile
@@ -333,57 +344,87 @@ class WebRtcClient(
      *
      * @return false 表示画面没起来但会话照旧（音频还活着），调用方只该提示重试，不许拆会话
      */
+    @Synchronized
     fun restartCapture(projectionData: Intent): Boolean {
         val source = videoSource ?: return false
         val helper = surfaceHelper ?: return false
         if (closed || pc == null) return false
         val old = capturer
-        val capturer = ScreenCapturerAndroid(projectionData, projectionCallback())
+        val generation = captureGeneration.incrementAndGet()
+        releaseCapturer(old)
+        val capturer = ScreenCapturerAndroid(projectionData, projectionCallback(generation))
         this.capturer = capturer
-        runCatching { old?.dispose() }
+        projectionState = "starting"
         return runCatching {
             capturer.initialize(helper, context, captureObserver(source, restart = true))
             capturer.startCapture(captureWidth, captureHeight, CAPTURE_FPS)
+            check(projectionState == "live") { "capture did not report started" }
+            if (outputWidth > 0 && outputHeight > 0) {
+                runCatching { source.adaptOutputFormat(outputWidth, outputHeight, CAPTURE_FPS) }
+                    .onFailure { Log.w(TAG, "restore output format failed", it) }
+            }
         }.fold(
             onSuccess = {
-                projectionState = "live"
-                com.soul2soul.app.util.SelfCheck.reportEvent(
-                    context, "sharer", "projection_resumed",
-                    latestIceState, "${captureWidth}x${captureHeight}",
-                )
                 true
             },
             onFailure = { e ->
                 Log.w(TAG, "restartCapture failed", e)
-                // 起不来就退回 stopped，别让 proj=live 成为第二个真值来源（读数会说谎）
                 projectionState = "stopped"
+                if (this.capturer === capturer) {
+                    captureGeneration.incrementAndGet()
+                    releaseCapturer(capturer)
+                    this.capturer = null
+                }
                 false
             },
         )
     }
 
     /**
-`restart=false` 是首次开采集：起不来就等于这通电话没有画面，
+     * `restart=false` 是首次开采集：起不来就等于这通电话没有画面，
      * 必须响亮结束会话（旧行为）。`restart=true` 是撤销授权后的重试：音频与数据通道本来就活着，
      * 一次重试失败只能报读数、不许把整通电话拆掉（0.2.64 的保活语义）。
      */
     private fun captureObserver(source: VideoSource, restart: Boolean): CapturerObserver {
         val upstream = source.capturerObserver
+        val generation = captureGeneration.get()
         return object : CapturerObserver {
             override fun onCapturerStarted(success: Boolean) {
+                if (generation != captureGeneration.get()) return
+                if (success) {
+                    projectionState = "live"
+                    if (restart) {
+                        com.soul2soul.app.util.SelfCheck.reportEvent(
+                            context, "sharer", "projection_resumed",
+                            latestIceState, captureDetail(),
+                        )
+                    }
+                } else {
+                    projectionState = "stopped"
+                }
                 upstream.onCapturerStarted(success)
                 com.soul2soul.app.util.SelfCheck.reportEvent(
                     context, "sharer",
                     if (success) "capture_ok" else "capture_fail",
                     latestIceState,
-                    "${captureWidth}x${captureHeight}",
+                    captureDetail(),
                 )
                 if (!success && !restart) notifyEnded("capture_START_FAILED")
             }
 
-            override fun onCapturerStopped() = upstream.onCapturerStopped()
+            override fun onCapturerStopped() {
+                if (generation != captureGeneration.get()) return
+                projectionState = "stopped"
+                upstream.onCapturerStopped()
+            }
 
-            override fun onFrameCaptured(frame: VideoFrame) = upstream.onFrameCaptured(frame)
+            override fun onFrameCaptured(frame: VideoFrame) {
+                if (generation != captureGeneration.get()) {
+                    frame.release()
+                    return
+                }
+                upstream.onFrameCaptured(frame)
+            }
         }
     }
 
@@ -393,9 +434,10 @@ class WebRtcClient(
      * 而语音与数据通道跟 MediaProjection 没有任何关系（10-19 双真机日志实测 `ice=CONNECTED`
      * 且 rtt 正常，只有画面死了）。0.2.64 起这里只把画面标成 stopped 并交给上层保活。
      */
-    private fun projectionCallback(): android.media.projection.MediaProjection.Callback =
+    private fun projectionCallback(generation: Long): android.media.projection.MediaProjection.Callback =
         object : android.media.projection.MediaProjection.Callback() {
             override fun onStop() {
+                if (captureGeneration.get() != generation) return
                 projectionState = "stopped"
                 // closed 必须先判：close() 里 capturer.stopCapture() 会主动走一遍 onStop，
                 // 那是我们自己收尾，不是系统撤销——报出去就成了每通电话一条假事件
@@ -409,14 +451,15 @@ class WebRtcClient(
         }
 
     /** 共享端入口。projectionData 为系统屏幕录制授权返回的 Intent */
+    @Synchronized
     fun startSharer(projectionData: Intent) {
         projectionState = "starting"
         val pc = createPeerConnection()
         this.pc = pc
         startConnectTimeout()
 
-        val capturer: VideoCapturer = ScreenCapturerAndroid(projectionData, projectionCallback())
-        projectionState = "live"
+        val generation = captureGeneration.incrementAndGet()
+        val capturer: VideoCapturer = ScreenCapturerAndroid(projectionData, projectionCallback(generation))
         this.capturer = capturer
         val source = factory.createVideoSource(true) // isScreencast: 启用内容编码模式
         videoSource = source
@@ -426,11 +469,22 @@ class WebRtcClient(
         val (w, h) = captureSize()
         captureWidth = w
         captureHeight = h
+        outputWidth = w
+        outputHeight = h
         val helper = SurfaceTextureHelper.create("s2s-capture", eglContext)
         surfaceHelper = helper
         // 保留异步启动失败通知，但不再为每一帧做 AtomicLong 计数。
-        capturer.initialize(helper, context, captureObserver(source, restart = false))
-        capturer.startCapture(w, h, CAPTURE_FPS)
+        try {
+            capturer.initialize(helper, context, captureObserver(source, restart = false))
+            capturer.startCapture(w, h, CAPTURE_FPS)
+            check(projectionState == "live") { "capture did not report started" }
+        } catch (e: Exception) {
+            projectionState = "stopped"
+            captureGeneration.incrementAndGet()
+            releaseCapturer(capturer)
+            if (this.capturer === capturer) this.capturer = null
+            throw e
+        }
 
         val videoTrack = factory.createVideoTrack("v0", source)
         videoSender = pc.addTrack(videoTrack, listOf(STREAM))?.also { applyBitrate(it) }
@@ -503,7 +557,7 @@ class WebRtcClient(
         }
     }
 
-    /** 观看端切清晰度（用户意图）：记录档位并立即重启采集 + 调整码率上限 */
+    /** 观看端切清晰度（用户意图）：记录档位并立即调整输出尺寸与码率上限。 */
     fun setCaptureLongEdge(edge: Int) {
         val normalized = VideoQualityPolicy.normalizeEdge(edge)
         if (controlMode) {
@@ -540,22 +594,41 @@ class WebRtcClient(
             }
             videoSender?.let { applyBitrate(it) } // 立即切换保分辨率/保帧率偏好
             Log.d(TAG, "control mode video profile: on=$on edge=$qualityLongEdge " +
-                "cap=${captureWidth}x${captureHeight} restartAllowed=$captureRestartSupported")
+                "cap=${captureWidth}x${captureHeight} formatChangeAllowed=$captureFormatChangeSupported")
         }
     }
 
+    @Synchronized
     private fun applyCaptureLongEdge(edge: Int) {
         val normalized = VideoQualityPolicy.normalizeEdge(edge)
+        if (closed) return
         val capturer = capturer ?: return
-        if (!captureRestartSupported) {
-            // Android 14+：token 一次性，重启采集 = 系统撤销录屏授权（实测 SecurityException
+        if (!captureFormatChangeSupported) {
+            // Android 14+：token 一次性，重启采集会触发系统撤销录屏授权（实测 SecurityException
             // "Don't re-use the resultData … createVirtualDisplay multiple times" → 整通会话当场死）。
-            // 所以这一版起档位只动码率上限，采集尺寸留在建会那一档。
-            qualityLongEdge = normalized
+            // VideoSource 的适配器可以在不触碰 MediaProjection 的情况下改变编码输出尺寸，
+            // 这样高清按钮和自适应降档都能真正改变像素，而不是只改变码率。
+            val source = videoSource ?: return
+            val (w, h) = captureSize(normalized)
+            if (qualityLongEdge == normalized && outputWidth == w && outputHeight == h) {
+                videoSender?.let { applyBitrate(it) }
+                return
+            }
+            val adapted = runCatching {
+                source.adaptOutputFormat(w, h, CAPTURE_FPS)
+            }.isSuccess
+            if (adapted) {
+                outputWidth = w
+                outputHeight = h
+                qualityLongEdge = normalized
+            } else {
+                Log.w(TAG, "output resolution switch failed; keeping ${outputWidth}x${outputHeight}")
+            }
             videoSender?.let { applyBitrate(it) }
-            Log.d(TAG, "quality edge=$normalized (bitrate only; capture size stays " +
-                "${captureWidth}x${captureHeight} — restart is forbidden on API " +
-                "${android.os.Build.VERSION.SDK_INT})")
+            Log.d(TAG, "quality edge=$normalized capture=${captureWidth}x${captureHeight} " +
+                "output=${outputWidth}x${outputHeight} " +
+                "source=${if (adapted) "adapted" else "unchanged"} restartForbidden=true " +
+                "api=${android.os.Build.VERSION.SDK_INT}")
             return
         }
         val (w, h) = captureSize(normalized)
@@ -566,23 +639,30 @@ class WebRtcClient(
         val oldEdge = captureLongEdge
         val oldWidth = captureWidth
         val oldHeight = captureHeight
-        captureWidth = w
-        captureHeight = h
+        val oldOutputWidth = outputWidth
+        val oldOutputHeight = outputHeight
         val switched = runCatching {
-            capturer.stopCapture()
-            capturer.startCapture(w, h, CAPTURE_FPS)
+            capturer.changeCaptureFormat(w, h, CAPTURE_FPS)
         }.isSuccess
         if (switched) {
             captureLongEdge = normalized
             qualityLongEdge = normalized
+            captureWidth = w
+            captureHeight = h
+            outputWidth = w
+            outputHeight = h
         } else {
-            Log.w(TAG, "resolution switch failed; restoring ${oldWidth}x${oldHeight}")
+            Log.w(TAG, "capture format switch failed; restoring ${oldWidth}x${oldHeight}")
             captureLongEdge = oldEdge
             captureWidth = oldWidth
             captureHeight = oldHeight
+            outputWidth = oldOutputWidth
+            outputHeight = oldOutputHeight
             if (oldWidth > 0 && oldHeight > 0) {
-                runCatching { capturer.startCapture(oldWidth, oldHeight, CAPTURE_FPS) }
-                    .onFailure { Log.w(TAG, "resolution rollback failed", it) }
+                runCatching {
+                    capturer.changeCaptureFormat(oldWidth, oldHeight, CAPTURE_FPS)
+                }
+                    .onFailure { Log.w(TAG, "capture format rollback failed", it) }
             }
         }
         videoSender?.let { applyBitrate(it) }
@@ -598,6 +678,16 @@ class WebRtcClient(
         val w = ((sw * scale).toInt() / 2 * 2).coerceAtLeast(2)
         val h = ((sh * scale).toInt() / 2 * 2).coerceAtLeast(2)
         return w to h
+    }
+
+    private fun captureDetail(): String =
+        "cap=${captureWidth}x${captureHeight}_out=${outputWidth}x${outputHeight}"
+
+    private fun releaseCapturer(capturer: VideoCapturer?) {
+        runCatching { capturer?.stopCapture() }
+            .onFailure { Log.w(TAG, "stop old capture failed", it) }
+        runCatching { capturer?.dispose() }
+            .onFailure { Log.w(TAG, "dispose old capture failed", it) }
     }
 
     private fun applyBitrate(sender: org.webrtc.RtpSender) {
@@ -1047,6 +1137,10 @@ class WebRtcClient(
                     var inboundVideoFrames = -1L
                     var outboundVideoFps = -1.0
                     var inboundVideoFps = -1.0
+                    var encoderLimitation = "unknown"
+                    val outboundVideoCandidates = mutableListOf<RtpStatsSelector.VideoStatRef>()
+                    val inboundVideoCandidates = mutableListOf<RtpStatsSelector.VideoStatRef>()
+                    val remoteInboundVideoCandidates = mutableListOf<RtpStatsSelector.VideoStatRef>()
                     var inboundAudioQuality: RtpQualityWindow.Counters? = null
                     var inboundVideoQuality: RtpQualityWindow.Counters? = null
                     // Prefer the pair selected by transport. Older stats reports
@@ -1055,8 +1149,14 @@ class WebRtcClient(
                     for ((_, stats) in report.statsMap) {
                         if (stats.type == "transport") {
                             selectedPairId = stats.members["selectedCandidatePairId"]?.toString()
+                                ?.takeIf { it.isNotBlank() }
                             if (selectedPairId != null) break
                         }
+                    }
+                    val usableSelectedPairId = selectedPairId?.takeIf { id ->
+                        report.statsMap[id]?.let { pair ->
+                            pair.type == "candidate-pair" && pair.members["state"] == "succeeded"
+                        } == true
                     }
                     for ((id, stats) in report.statsMap) {
                         if (stats.type == "candidate-pair" &&
@@ -1066,18 +1166,29 @@ class WebRtcClient(
                             val ms = if (rtt != null && rtt >= 0) (rtt * 1000).toLong() else -1L
                             val available =
                                 (stats.members["availableOutgoingBitrate"] as? Number)?.toLong() ?: -1L
-                            val selected = id == selectedPairId ||
-                                (selectedPairId == null && stats.members["nominated"] == true)
+                            val selected = id == usableSelectedPairId ||
+                                (usableSelectedPairId == null && stats.members["nominated"] == true)
                             if (selected) {
-                                if (ms >= 0 && (selectedRtt < 0 || ms < selectedRtt)) selectedRtt = ms
-                                if (available >= 0) selectedAvailable = available
-                                val localId = stats.members["localCandidateId"]?.toString()
-                                val remoteId = stats.members["remoteCandidateId"]?.toString()
-                                val localType = localId?.let { report.statsMap[it]?.members?.get("candidateType") }
-                                    ?.toString() ?: "?"
-                                val remoteType = remoteId?.let { report.statsMap[it]?.members?.get("candidateType") }
-                                    ?.toString() ?: "?"
-                                selectedPath = "$localType->$remoteType"
+                                val betterSelected = when {
+                                    selectedRtt < 0L && ms >= 0L -> true
+                                    selectedRtt >= 0L && ms >= 0L -> ms < selectedRtt
+                                    selectedRtt < 0L && selectedAvailable < 0L -> true
+                                    selectedRtt < 0L && ms < 0L && available > selectedAvailable -> true
+                                    else -> false
+                                }
+                                if (betterSelected) {
+                                    selectedRtt = ms
+                                    selectedAvailable = available
+                                    val localId = stats.members["localCandidateId"]?.toString()
+                                    val remoteId = stats.members["remoteCandidateId"]?.toString()
+                                    val localType = localId?.let {
+                                        report.statsMap[it]?.members?.get("candidateType")
+                                    }?.toString() ?: "?"
+                                    val remoteType = remoteId?.let {
+                                        report.statsMap[it]?.members?.get("candidateType")
+                                    }?.toString() ?: "?"
+                                    selectedPath = "$localType->$remoteType"
+                                }
                             }
                             if (rtt != null && rtt >= 0) {
                                 if (fallbackRtt < 0 || ms < fallbackRtt) fallbackRtt = ms
@@ -1087,31 +1198,15 @@ class WebRtcClient(
                         val mediaKind = stats.members["kind"]?.toString()
                             ?: stats.members["mediaType"]?.toString()
                         if (isSharer && stats.type == "remote-inbound-rtp" && mediaKind == "video") {
-                            remoteVideoLost =
-                                (stats.members["packetsLost"] as? Number)?.toLong()?.coerceAtLeast(0L) ?: -1L
-                            remoteVideoReceived =
-                                (stats.members["packetsReceived"] as? Number)?.toLong()?.coerceAtLeast(0L) ?: -1L
-                            inboundVideoQuality = RtpQualityWindow.Counters(
-                                packetsLost = (stats.members["packetsLost"] as? Number)?.toLong() ?: -1L,
-                                packetsReceived = (stats.members["packetsReceived"] as? Number)?.toLong() ?: -1L,
-                                jitterSeconds = (stats.members["jitter"] as? Number)?.toDouble() ?: -1.0,
+                            remoteInboundVideoCandidates += videoStatRef(
+                                stats, report, frameKey = "framesReceived",
                             )
                         }
                         if (isSharer && stats.type == "outbound-rtp" && mediaKind == "video") {
-                            outboundVideoSent =
-                                (stats.members["packetsSent"] as? Number)?.toLong()?.coerceAtLeast(0L) ?: -1L
-                            // 累计已发送帧数（这一版没有 framesPerSecond，帧率靠区间相减）
-                            outboundVideoFrames =
-                                (stats.members["framesSent"] as? Number)?.toLong()?.coerceAtLeast(0L) ?: -1L
+                            outboundVideoCandidates += videoStatRef(stats, report, frameKey = "framesSent")
                         }
                         if (!isSharer && stats.type == "inbound-rtp" && mediaKind == "video") {
-                            inboundVideoFrames =
-                                (stats.members["framesReceived"] as? Number)?.toLong()?.coerceAtLeast(0L) ?: -1L
-                            inboundVideoQuality = RtpQualityWindow.Counters(
-                                packetsLost = (stats.members["packetsLost"] as? Number)?.toLong() ?: -1L,
-                                packetsReceived = (stats.members["packetsReceived"] as? Number)?.toLong() ?: -1L,
-                                jitterSeconds = (stats.members["jitter"] as? Number)?.toDouble() ?: -1.0,
-                            )
+                            inboundVideoCandidates += videoStatRef(stats, report, frameKey = "framesReceived")
                         }
                         if (stats.type == "inbound-rtp" && mediaKind == "audio") {
                             inboundAudioQuality = RtpQualityWindow.Counters(
@@ -1122,6 +1217,45 @@ class WebRtcClient(
                                     (stats.members["concealedSamples"] as? Number)?.toLong() ?: -1L,
                             )
                         }
+                    }
+                    val primaryOutboundRef = RtpStatsSelector.selectPrimaryVideoStats(outboundVideoCandidates)
+                    val primaryOutboundVideoStats = primaryOutboundRef?.id?.let { report.statsMap[it] }
+                    val primaryInboundRef = RtpStatsSelector.selectPrimaryVideoStats(inboundVideoCandidates)
+                    val primaryInboundVideoStats = primaryInboundRef?.id?.let { report.statsMap[it] }
+                    val primaryRemoteInboundRef = RtpStatsSelector.selectRemoteInboundVideoStats(
+                        remoteInboundVideoCandidates,
+                        primaryOutboundRef,
+                    )
+                    val primaryRemoteInboundVideoStats =
+                        primaryRemoteInboundRef?.id?.let { report.statsMap[it] }
+                    primaryOutboundVideoStats?.let { stats ->
+                        outboundVideoSent =
+                            (stats.members["packetsSent"] as? Number)?.toLong()?.coerceAtLeast(0L) ?: -1L
+                        // 累计已发送帧数（这一版没有 framesPerSecond，帧率靠区间相减）
+                        outboundVideoFrames =
+                            (stats.members["framesSent"] as? Number)?.toLong()?.coerceAtLeast(0L) ?: -1L
+                        encoderLimitation = stats.members["qualityLimitationReason"]?.toString()
+                            ?.lowercase() ?: "unknown"
+                    }
+                    primaryRemoteInboundVideoStats?.let { stats ->
+                        remoteVideoLost =
+                            (stats.members["packetsLost"] as? Number)?.toLong()?.coerceAtLeast(0L) ?: -1L
+                        remoteVideoReceived =
+                            (stats.members["packetsReceived"] as? Number)?.toLong()?.coerceAtLeast(0L) ?: -1L
+                        inboundVideoQuality = RtpQualityWindow.Counters(
+                            packetsLost = (stats.members["packetsLost"] as? Number)?.toLong() ?: -1L,
+                            packetsReceived = (stats.members["packetsReceived"] as? Number)?.toLong() ?: -1L,
+                            jitterSeconds = (stats.members["jitter"] as? Number)?.toDouble() ?: -1.0,
+                        )
+                    }
+                    primaryInboundVideoStats?.let { stats ->
+                        inboundVideoFrames =
+                            (stats.members["framesReceived"] as? Number)?.toLong()?.coerceAtLeast(0L) ?: -1L
+                        inboundVideoQuality = RtpQualityWindow.Counters(
+                            packetsLost = (stats.members["packetsLost"] as? Number)?.toLong() ?: -1L,
+                            packetsReceived = (stats.members["packetsReceived"] as? Number)?.toLong() ?: -1L,
+                            jitterSeconds = (stats.members["jitter"] as? Number)?.toDouble() ?: -1.0,
+                        )
                     }
                     // 帧率只能按区间算：这一版 libwebrtc 的 outbound/inbound-rtp 没有
                     // framesPerSecond（实测 videoFps=x），而"读不到"绝不能顺手当成"0 帧"——
@@ -1163,7 +1297,8 @@ class WebRtcClient(
                             val mediaKind = stats.members["kind"]?.toString()
                                 ?: stats.members["mediaType"]?.toString()
                             when {
-                                stats.type == "outbound-rtp" && mediaKind == "video" -> {
+                                stats.type == "outbound-rtp" && mediaKind == "video" &&
+                                    stats.id == primaryOutboundVideoStats?.id -> {
                                     val impl = stats.members["encoderImplementation"]?.toString() ?: "?"
                                     val sent = (stats.members["bytesSent"] as? Number)?.toLong() ?: 0L
                                     // avgEncodeMs 高 / limitationReason=cpu → 软编瓶颈；
@@ -1172,14 +1307,20 @@ class WebRtcClient(
                                         (stats.members["avgEncodeMs"] as? Number)?.toDouble() ?: -1.0
                                     val limitation =
                                         stats.members["qualityLimitationReason"]?.toString() ?: "?"
+                                    val width =
+                                        (stats.members["frameWidth"] as? Number)?.toInt() ?: -1
+                                    val height =
+                                        (stats.members["frameHeight"] as? Number)?.toInt() ?: -1
                                     Log.d(
                                         TAG,
                                         "ENC impl=$impl fps=${formatMetric(outboundVideoFps)} " +
+                                            "size=${if (width > 0 && height > 0) "${width}x${height}" else "na"} " +
                                             "avgEncodeMs=${formatMetric(encodeMs)} " +
                                             "limitation=$limitation bytes=$sent",
                                     )
                                 }
-                                !isSharer && stats.type == "inbound-rtp" && mediaKind == "video" -> {
+                                !isSharer && stats.type == "inbound-rtp" && mediaKind == "video" &&
+                                    stats.id == primaryInboundVideoStats?.id -> {
                                     val impl = stats.members["decoderImplementation"]?.toString() ?: "?"
                                     Log.d(TAG, "DEC impl=$impl fps=${formatMetric(inboundVideoFps)}")
                                 }
@@ -1201,7 +1342,7 @@ class WebRtcClient(
                             "S2S_QOS role=${if (isSharer) "sharer" else "viewer"} " +
                                 "ice=$latestIceState rttMs=$best path=$selectedPath " +
                                 "availableBps=$availableOutgoingBps edge=$qualityLongEdge " +
-                                "cap=${captureWidth}x${captureHeight} " +
+                                "cap=${captureWidth}x${captureHeight} out=${outputWidth}x${outputHeight} " +
                                 "videoLossPct=${formatMetric(videoWindow.packetLossPercent)} " +
                                 "videoJitterMs=${formatMetric(videoWindow.jitterMs)} " +
                                 "videoFps=${formatMetric(videoFps)} " +
@@ -1272,7 +1413,7 @@ class WebRtcClient(
                                     // 只有 video_stall 没有它，就分不清"流停了"和"渲染链没重挂"。
                                     com.soul2soul.app.util.SelfCheck.reportEvent(
                                         context, "viewer", "video_resumed", latestIceState,
-                                        "afterMs=${System.currentTimeMillis() - since}",
+                                        "afterMs=${android.os.SystemClock.elapsedRealtime() - since}",
                                     )
                                 }
                                 viewerZeroFpsStreak = 0
@@ -1304,6 +1445,7 @@ class WebRtcClient(
                                 lossPercent = lossPercent,
                                 availableBitrateBps = availableOutgoingBps,
                                 outboundFps = outboundVideoFps,
+                                encoderLimitation = encoderLimitation,
                                 // 估计器爬坡期（前 BANDWIDTH_SETTLE_POLLS 拍）的 300kbps 是初值不是实测，
                                 // 拿它判坏会在 6s 内必然攒出一次降档（v0.2.62 双模拟器实测）
                                 bandwidthSettled = statsPollCount > BANDWIDTH_SETTLE_POLLS,
@@ -1317,7 +1459,7 @@ class WebRtcClient(
                             Log.d(TAG, "adaptive video quality rtt=${best}ms " +
                                 "loss=${"%.1f".format(lossPercent)}% available=${availableOutgoingBps} " +
                                 "edge=${qualityLongEdge}->${target} cap=${captureWidth}x${captureHeight} " +
-                                "restartAllowed=$captureRestartSupported")
+                                "formatChangeAllowed=$captureFormatChangeSupported")
                             rttHandler.post { if (!closed) applyCaptureLongEdge(target) }
                             // 切档后重新积累连续样本，避免同一份坏指标在下一次轮询立即连降两档。
                             highRttStreak = 0
@@ -1340,6 +1482,31 @@ class WebRtcClient(
         } else {
             "na"
         }
+
+    private fun videoStatRef(
+        stats: org.webrtc.RTCStats,
+        report: org.webrtc.RTCStatsReport,
+        frameKey: String,
+    ): RtpStatsSelector.VideoStatRef {
+        val codecId = stats.members["codecId"]?.toString()
+        val codecMimeType = codecId?.let { report.statsMap[it]?.members?.get("mimeType")?.toString() }
+            ?: stats.members["mimeType"]?.toString()
+        return RtpStatsSelector.VideoStatRef(
+            id = stats.id,
+            localId = stats.members["localId"]?.toString(),
+            ssrc = (stats.members["ssrc"] as? Number)?.toLong(),
+            codecMimeType = codecMimeType,
+            frameCount = (stats.members[frameKey] as? Number)?.toLong() ?: -1L,
+            packetCount = (stats.members["packetsSent"] as? Number)?.toLong()
+                ?: (stats.members["packetsReceived"] as? Number)?.toLong()
+                ?: (stats.members["framesReceived"] as? Number)?.toLong()
+                ?: -1L,
+            byteCount = (stats.members["bytesSent"] as? Number)?.toLong()
+                ?: (stats.members["bytesReceived"] as? Number)?.toLong()
+                ?: -1L,
+            active = stats.members["active"] as? Boolean,
+        )
+    }
 
     override fun onDataChannel(dc: DataChannel) {
         // 观看端：channel 均由共享端创建，按 label 分流。
@@ -1518,9 +1685,11 @@ class WebRtcClient(
 
     // ---------- 释放 ----------
 
+    @Synchronized
     fun close() {
         if (closed) return
         closed = true
+        captureGeneration.incrementAndGet()
         reportSessionEnd()
         synchronized(qualityLock) { pendingQualityEdge = null }
         iceHandler.removeCallbacksAndMessages(null)
@@ -1529,10 +1698,8 @@ class WebRtcClient(
             pendingRemoteIce.clear()
             remoteDescriptionSet = false
         }
-        try {
-            capturer?.stopCapture()
-        } catch (_: Exception) {}
-        capturer?.dispose(); capturer = null
+        releaseCapturer(capturer)
+        capturer = null
         videoSource?.dispose(); videoSource = null
         audioTrack?.dispose(); audioTrack = null
         audioSource?.dispose(); audioSource = null

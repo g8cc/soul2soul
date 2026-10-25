@@ -33,8 +33,9 @@ object DiagDetail {
      * `q=<rtt>,<选路>,<可用kbps>,<画质档>,<视频丢包×10>,<视频抖动>,<视频帧率>,<音频丢包×10>,<音频抖动>,<音频消隐>`
      * 例：`q=29,h-s,1200,1598,5,21,29,0,3,0`（丢包保留一位小数×10，抖动/消隐按整数毫秒截断）
      *
-     * `<画质档>`：Android 13 及以下它就是采集长边；**Android 14+ 它是码率档**——那一版起采集尺寸
-     * 中途改不了（见 WebRtcClient.qualityLongEdge），真实像素尺寸看同一会话的 `capture_ok` detail。
+     * `<质量档>`：Android 13 及以下它与物理采集长边同步；**Android 14+ 它是编码输出目标档**，
+     * 通过 `VideoSource.adaptOutputFormat` 切换，不重建 MediaProjection。真实物理与输出像素看
+     * `capture_ok`/`projection_resumed` 的 `cap=…_out=…` 以及 `S2S_QOS` 的 `cap`/`out`。
      * `<视频帧率>`：v0.2.62 起由累计帧计数按区间相减得到（这一版 libwebrtc 没有 framesPerSecond），
      * `x` 从此只代表"这一段没读数"，不再代表"0 帧"。
      *

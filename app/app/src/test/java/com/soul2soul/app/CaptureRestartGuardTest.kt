@@ -55,17 +55,18 @@ class CaptureRestartGuardTest {
         t.startsWith("//") || t.startsWith("/*") || t.startsWith("*")
     }
 
-    // C1：重启采集必须被平台门槛挡住，而且门槛在它之前就 return
+    // C1：Android 14+ 不能重建投影，旧机型只改同一 VirtualDisplay 的格式
     @Test
     fun capture_restart_is_gated_by_the_android_14_token_rule() {
         val body = between(webrtc(), "private fun applyCaptureLongEdge(", "private fun captureSize(")
-        val restart = body.indexOfFirst { it.contains("capturer.stopCapture()") }
-        val gate = body.indexOfFirst { it.contains("if (!captureRestartSupported)") }
-        assertTrue("必须保留 stopCapture 这条路径（Android 13- 还要能真切分辨率）", restart >= 0)
-        assertTrue("必须有「14+ 不重启采集」的分支：少了它就是重现 token 被撤销→会话几秒死", gate >= 0)
-        assertTrue("门槛必须在 stopCapture 之前 return，否则 14+ 照样走到致命那一步", gate in 0 until restart)
-        assertTrue("14+ 分支改的是画质档不是采集尺寸（尺寸一改就得重启采集，等于没挡）",
-            body.subList(gate, restart).any { it.contains("qualityLongEdge = normalized") })
+        val formatChange = body.indexOfFirst { it.contains("capturer.changeCaptureFormat(w, h, CAPTURE_FPS)") }
+        val gate = body.indexOfFirst { it.contains("if (!captureFormatChangeSupported)") }
+        assertTrue("旧机型必须保留同一投影的格式切换路径", formatChange >= 0)
+        assertTrue("必须有 Android 14+ 的输出适配分支：不能再重建投影", gate >= 0)
+        assertTrue("平台门槛必须在旧机型格式切换之前 return", gate in 0 until formatChange)
+        assertTrue("14+ 分支必须改输出尺寸与质量档，而不是触碰 MediaProjection",
+            body.subList(gate, formatChange).any { it.contains("adaptOutputFormat(") } &&
+                body.subList(gate, formatChange).any { it.contains("qualityLongEdge = normalized") })
         assertTrue("门槛只能由 SDK_INT 决定，不许是可被远端消息左右的开关",
             webrtc().any { it.contains("android.os.Build.VERSION.SDK_INT < ANDROID_14") })
     }
@@ -74,7 +75,7 @@ class CaptureRestartGuardTest {
     @Test
     fun quality_edge_is_a_separate_field_from_capture_size() {
         val lines = webrtc()
-        val decl = indexOf(lines, "private var qualityLongEdge = VideoQualityPolicy.DEFAULT_EDGE")
+        val decl = indexOf(lines, "private var qualityLongEdge = VideoQualityPolicy.STARTUP_EDGE")
         assertTrue("画质档必须 @Volatile（rttHandler 线程与调用线程都会写）",
             lines[decl - 1].contains("@Volatile"))
         val bitrate = window(lines, "private fun applyBitrate(sender: org.webrtc.RtpSender)", 20)
@@ -120,5 +121,121 @@ class CaptureRestartGuardTest {
         val gate = window(lines, "if (diagDue && !isSharer && established && !remoteScreenPaused)", 14)
         assertTrue("零帧判定必须用 == 0.0", gate.any { it.contains("inboundVideoFps == 0.0") })
         assertTrue("必须有「没读数：不判也不清零」的分支", gate.any { it.contains("inboundVideoFps < 0.0") })
+    }
+
+    // C5：API 34+ 不重建 MediaProjection，但必须真正改变 VideoSource 的编码输出尺寸
+    @Test
+    fun api14_quality_switch_adapts_video_source_without_restarting_projection() {
+        val lines = webrtc()
+        assertTrue("共享端初始采集必须以高清档启动，不能先把高分辨率屏幕压成 1600",
+            lines.any { it.contains("var captureLongEdge = VideoQualityPolicy.STARTUP_EDGE") })
+        val body = between(lines, "private fun applyCaptureLongEdge(", "private fun captureSize(")
+        val formatChange = body.indexOfFirst { it.contains("capturer.changeCaptureFormat(w, h, CAPTURE_FPS)") }
+        val gate = body.indexOfFirst { it.contains("if (!captureFormatChangeSupported)") }
+        assertTrue("API 14+ 分支必须先于旧机型格式切换路径", gate in 0 until formatChange)
+        val branch = body.subList(gate, formatChange)
+        assertTrue("API 14+ 画质切换必须调用 VideoSource.adaptOutputFormat，否则只改码率仍会糊",
+            branch.any { it.contains("adaptOutputFormat(") })
+        assertTrue("API 14+ 动态切档不得 stopCapture/startCapture",
+            code(branch).none { it.contains("stopCapture(") || it.contains("startCapture(") })
+    }
+
+    @Test
+    fun api14_failed_output_adaptation_keeps_the_previous_quality_state() {
+        val lines = webrtc()
+        val body = between(lines, "private fun applyCaptureLongEdge(", "private fun captureSize(")
+        val formatChange = body.indexOfFirst { it.contains("capturer.changeCaptureFormat(w, h, CAPTURE_FPS)") }
+        val gate = body.indexOfFirst { it.contains("if (!captureFormatChangeSupported)") }
+        val branch = code(body.subList(gate, formatChange))
+        assertTrue(
+            "API 14+ 失败时不能无条件写入新档位，否则码率与真实输出尺寸会失配",
+            branch.count { it.contains("qualityLongEdge = normalized") } == 1 &&
+                branch.any { it.contains("if (adapted)") } &&
+                between(branch, "if (adapted) {", "} else {")
+                    .any { it.contains("qualityLongEdge = normalized") },
+        )
+    }
+
+    @Test
+    fun encoder_limitation_reason_reaches_quality_policy() {
+        val lines = webrtc()
+        val stats = between(lines, "var encoderLimitation = \"unknown\"", "val audioWindow =")
+        assertTrue(
+            "编码器限制原因必须从 outbound-rtp stats 读取，静止画面低帧率才能与带宽/CPU瓶颈区分",
+            stats.any { it.contains("qualityLimitationReason") },
+        )
+        val decision = between(lines, "val decision = VideoQualityPolicy.step(", "highRttStreak = decision.highStreak")
+        assertTrue(
+            "读取到的限制原因必须传入 VideoQualityPolicy.Metrics",
+            decision.any { it.contains("encoderLimitation = encoderLimitation") },
+        )
+    }
+
+    @Test
+    fun outbound_quality_stats_must_not_be_overwritten_by_rtx_streams() {
+        val lines = webrtc()
+        val stats = between(lines, "val primaryOutboundVideoStats =", "val audioWindow =")
+        assertTrue(
+            "必须先锁定带 framesSent 的主 outbound 视频统计，不能让 RTX 覆盖帧率/限制原因",
+            stats.any { it.contains("framesSent") } &&
+                stats.any { it.contains("primaryOutboundVideoStats") },
+        )
+        assertTrue(
+            "编码器限制原因必须从选中的主视频统计读取",
+            stats.any { it.contains("qualityLimitationReason") } &&
+                stats.any { it.contains("primaryOutboundVideoStats") },
+        )
+        assertTrue(
+            "ENC 诊断也必须只打印主视频统计，避免 RTX 行污染现场判断",
+            stats.any { it.contains("stats.id == primaryOutboundVideoStats?.id") },
+        )
+    }
+
+    @Test
+    fun failed_legacy_resolution_switch_cannot_leave_a_fake_live_projection() {
+        val lines = webrtc()
+        val body = between(lines, "private fun applyCaptureLongEdge(", "private fun captureSize(")
+        val branch = code(body)
+        assertTrue(
+            "旧机型切档必须调用同一采集器的格式切换，不能 stop/start 触发投影回调竞态",
+            branch.any { it.contains("capturer.changeCaptureFormat(w, h, CAPTURE_FPS)") },
+        )
+        assertTrue(
+            "格式切换失败必须保留旧尺寸并走一次回滚",
+            branch.any { it.contains("restoring ${'$'}{oldWidth}x${'$'}{oldHeight}") } &&
+                branch.any { it.contains("capturer.changeCaptureFormat(oldWidth, oldHeight, CAPTURE_FPS)") },
+        )
+        assertTrue(
+            "旧机型切档不许 stop/start，避免 onStop 把活跃投影误报 stopped",
+            branch.none { it.contains("stopCapture(") || it.contains("startCapture(") },
+        )
+    }
+
+    @Test
+    fun empty_selected_candidate_pair_id_uses_the_nominated_pair_fallback() {
+        val lines = webrtc()
+        val poll = between(lines, "var selectedPairId: String?", "val audioWindow =")
+        assertTrue(
+            "空的 selectedCandidatePairId 等价于缺失，必须允许 nominated 回退",
+            poll.any { it.contains("takeIf { it.isNotBlank() }") },
+        )
+        assertTrue(
+            "没有有效 selected id 时仍必须选择 nominated candidate pair",
+            poll.any { it.contains("usableSelectedPairId == null && stats.members[\"nominated\"] == true") },
+        )
+    }
+
+    @Test
+    fun stale_selected_candidate_pair_id_also_uses_the_nominated_pair_fallback() {
+        val lines = webrtc()
+        val poll = between(lines, "var selectedPairId: String?", "val audioWindow =")
+        assertTrue(
+            "transport 指向不存在或未 succeeded 的 pair 时，必须先归一成不可用 id",
+            poll.any { it.contains("usableSelectedPairId") },
+        )
+        assertTrue(
+            "候选对选择必须使用归一后的 id，不能让 stale id 阻断 nominated 回退",
+            poll.any { it.contains("id == usableSelectedPairId") },
+        )
     }
 }

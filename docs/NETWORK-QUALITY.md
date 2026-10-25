@@ -30,7 +30,9 @@ adb -s <设备序列号> logcat -v time -s WebRtcClient:I WebRtcClient:W
 - `audioLossPct`：本统计窗口内的音频 RTP 丢包率。
 - `audioJitterMs`：当前采样的接收抖动缓冲输入指标，不是本窗口平均值。
 - `audioConcealedMs`：窗口内解码器用隐藏/补偿音频填补的累计时长；这是“短杂音/断续感”的代理指标，不等价于主观听感。
-- `videoLossPct` / `videoJitterMs` / `videoFps`：视频窗口丢包、抖动与帧率。`edge` 是当前采集长边。
+- `videoLossPct` / `videoJitterMs` / `videoFps`：视频窗口丢包、抖动与帧率。
+- `edge`：当前质量/编码输出目标档（960/1280/1600/1920），不是所有 Android 版本上的物理采集尺寸。
+- `cap` / `out`：共享端分别为物理采集尺寸与编码输出尺寸；Android 14+ 切档通常保持 `cap` 不变、通过 `adaptOutputFormat` 改 `out`。
 - `na`：缺少有效的前后计数样本，不能当作 0 丢包或 0 杂音。
 
 ### 是否 P2P 打洞成功：看 `path`
@@ -49,7 +51,7 @@ adb -s <设备序列号> logcat -v time -s WebRtcClient:I WebRtcClient:W
 ### 操控模式与编码诊断（v0.2.40+）
 
 - 标记 `S2S-Lag`（共享端）：每笔被注入手势的分段延迟。`wait`=收到消息→调系统注入（网络+排队）；`play`=系统回放时长；`overflow`=系统串行队列溢出；`inflight`=还压在队列里的手势数。wait 大→网络/排队问题；overflow/inflight 大→注入串行瓶颈；都小但主观仍卡→视频往返（下行）地板。
-- 标记 `WebRtcClient` 的 `ENC` 行：`impl=` 含 `Hardware`/`Software`（当前 VP9 走软编是刻意选择，H264 硬编档是后续候选）；`avgEncodeMs`=单帧编码耗时；`limitation=` `none`/`cpu`/`bandwidth`（`cpu` 高=软编吃不消，`bandwidth`=带宽不够）。`DEC` 行是观看端解码器。
+- 标记 `WebRtcClient` 的 `ENC` 行：`impl=` 含 `Hardware`/`Software`（VP9/H.264 是否硬编以实际日志为准，不能从 SDP 直接推断）；`size=` 是主视频编码输出尺寸，`avgEncodeMs`=单帧编码耗时；`limitation=` `none`/`cpu`/`bandwidth`（`cpu` 高=软编吃不消，`bandwidth`=带宽不够）。`DEC` 行是观看端解码器。
 - 「允许TA操控」期间共享端自动降到 960 长边档并把降级偏好改为**保帧率**（`control mode video profile: on=true`），收回授权自动恢复用户原档位；操控期间的远端画质请求只记录意图、退出后生效（日志 `edge=` 可见）。
 
 第一条 `S2S_QOS` 常会出现 `na`，因为累计计数需要前后两个样本才能计算窗口值；重点看后续连续采样。共享端与观看端的日志都要保留，才能区分发送侧、接收侧和所选中继路径。

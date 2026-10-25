@@ -81,8 +81,23 @@ class VideoQualityPolicyTest {
     }
 
     @Test
-    fun `编码帧率过低时即使RTT很好也降档`() {
-        val metrics = VideoQualityPolicy.Metrics(60L, 0.2, 8_000_000L, outboundFps = 14.0)
+    fun `静止画面低帧率不应误触发降档`() {
+        val metrics = VideoQualityPolicy.Metrics(
+            60L, 0.2, 8_000_000L, outboundFps = 0.0, encoderLimitation = "none",
+        )
+        var high = 0
+        repeat(2) {
+            high = VideoQualityPolicy.step(1920, 1920, metrics, high, 0).highStreak
+        }
+        assertEquals(0, high)
+        assertNull(VideoQualityPolicy.step(1920, 1920, metrics, high, 0).targetEdge)
+    }
+
+    @Test
+    fun `编码器明确受带宽限制时才按低帧率降档`() {
+        val metrics = VideoQualityPolicy.Metrics(
+            60L, 0.2, 8_000_000L, outboundFps = 14.0, encoderLimitation = "bandwidth",
+        )
         var high = 0
         repeat(2) {
             high = VideoQualityPolicy.step(1920, 1920, metrics, high, 0).highStreak

@@ -431,7 +431,7 @@ class MessageActivity : AppCompatActivity() {
             return
         }
         recFile = file
-        recStartAt = System.currentTimeMillis()
+        recStartAt = android.os.SystemClock.elapsedRealtime()
         holdStarted = true
         showRecordingVisuals()
         uiTick.post(tickStop)
@@ -450,7 +450,8 @@ class MessageActivity : AppCompatActivity() {
     }
 
     private fun updateRecDisplay() {
-        val secs = ((System.currentTimeMillis() - recStartAt) / 1000).toInt().coerceAtMost(30)
+        val secs = ((android.os.SystemClock.elapsedRealtime() - recStartAt).coerceAtLeast(0L) / 1000)
+            .toInt().coerceAtMost(30)
         tvRecTimer.text = "$secs″"
         // 微信式跳动音柱：每拍随机高度
         val density = resources.displayMetrics.density
@@ -467,7 +468,7 @@ class MessageActivity : AppCompatActivity() {
         override fun run() {
             if (recorder == null) return
             updateRecDisplay()
-            if (System.currentTimeMillis() - recStartAt >= REC_MAX_MS) {
+            if (android.os.SystemClock.elapsedRealtime() - recStartAt >= REC_MAX_MS) {
                 endRecording("send")
                 return
             }
@@ -483,7 +484,7 @@ class MessageActivity : AppCompatActivity() {
         cancelState = false
         val rec = recorder ?: return
         recorder = null
-        val durMs = System.currentTimeMillis() - recStartAt
+        val durMs = (android.os.SystemClock.elapsedRealtime() - recStartAt).coerceAtLeast(0L)
         val file = recFile
         recFile = null
         // stop() 必须调（m4a 落盘要收尾），失败/取消场景也一样，文件随后删掉

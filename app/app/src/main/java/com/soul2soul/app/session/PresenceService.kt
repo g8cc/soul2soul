@@ -52,14 +52,14 @@ object Presence {
 
     fun offerRecall(from: String?) {
         pendingRecallFrom = from
-        pendingRecallAt = System.currentTimeMillis()
+        pendingRecallAt = SystemClock.elapsedRealtime()
     }
 
     /** @return 60s 内的待答找回请求发起方；领取即清空（与服务端 pendingTtl 对齐） */
     fun claimRecall(): String? = synchronized(this) {
         val v = pendingRecallFrom ?: return null
         pendingRecallFrom = null
-        if (System.currentTimeMillis() - pendingRecallAt > 60_000) null else v
+        if (SystemClock.elapsedRealtime() - pendingRecallAt > 60_000) null else v
     }
 
     fun ensureStarted(ctx: Context) {

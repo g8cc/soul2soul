@@ -6,6 +6,8 @@ internal object VideoQualityPolicy {
     const val LEGACY_EDGE = 1280
     const val DEFAULT_EDGE = 1600
     const val HD_EDGE = 1920
+    /** 新会话的首选档位：文字共享不能在连接建立时先被压到均衡档。 */
+    const val STARTUP_EDGE = HD_EDGE
 
     private const val BAD_RTT_MS = 350L
     private const val GOOD_RTT_MS = 150L
@@ -19,6 +21,7 @@ internal object VideoQualityPolicy {
         val lossPercent: Double,
         val availableBitrateBps: Long,
         val outboundFps: Double = -1.0,
+        val encoderLimitation: String = "unknown",
         /**
          * `availableOutgoingBitrate` 是否已经脱离了带宽估计器的爬坡期。
          * 建会头几秒它钉在 **300kbps 的估计初值**上而不是实测值：v0.2.62 双模拟器实测
@@ -118,7 +121,7 @@ internal object VideoQualityPolicy {
     private fun isBad(currentEdge: Int, metrics: Metrics): Boolean {
         if (metrics.rttMs >= BAD_RTT_MS) return true
         if (metrics.lossPercent >= BAD_LOSS_PERCENT) return true
-        if (metrics.outboundFps >= 0.0 && metrics.outboundFps < 18.0) return true
+        if (metrics.encoderLimitation == "bandwidth" || metrics.encoderLimitation == "cpu") return true
         val available = metrics.availableBitrateBps
         if (!metrics.bandwidthSettled) return false
         return available > 0 && available < requiredBitrateBps(currentEdge) * 72 / 100
@@ -127,7 +130,7 @@ internal object VideoQualityPolicy {
     private fun isGood(preferredEdge: Int, metrics: Metrics): Boolean {
         if (metrics.rttMs < 0 || metrics.rttMs >= GOOD_RTT_MS) return false
         if (metrics.lossPercent >= 0 && metrics.lossPercent >= GOOD_LOSS_PERCENT) return false
-        if (metrics.outboundFps >= 0.0 && metrics.outboundFps < 24.0) return false
+        if (metrics.encoderLimitation == "bandwidth" || metrics.encoderLimitation == "cpu") return false
         val available = metrics.availableBitrateBps
         // 爬坡期的低带宽既不该判坏，也不该被"available<=0 当作未知→放行"当成好：
         // 未知才放行，读得到但还没稳的不计回升条件。
