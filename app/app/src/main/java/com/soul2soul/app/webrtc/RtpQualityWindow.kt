@@ -64,4 +64,17 @@ internal object RtpQualityWindow {
         if (elapsedMs < MIN_FPS_WINDOW_MS) return -1.0
         return (currentFrames - previousFrames) * 1000.0 / elapsedMs
     }
+
+    fun bitrateBps(previousBytes: Long, currentBytes: Long, elapsedMs: Long): Long {
+        if (previousBytes < 0 || currentBytes < 0 || currentBytes < previousBytes) return -1L
+        if (elapsedMs < MIN_FPS_WINDOW_MS) return -1L
+        val deltaBytes = currentBytes - previousBytes
+        val bitsPerSecond = deltaBytes.toDouble() * 8_000.0 / elapsedMs.toDouble()
+        if (!bitsPerSecond.isFinite() || bitsPerSecond < 0.0) return -1L
+        return if (bitsPerSecond >= Long.MAX_VALUE.toDouble()) {
+            Long.MAX_VALUE
+        } else {
+            bitsPerSecond.toLong()
+        }
+    }
 }

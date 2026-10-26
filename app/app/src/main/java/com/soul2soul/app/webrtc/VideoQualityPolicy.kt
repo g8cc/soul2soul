@@ -8,6 +8,7 @@ internal object VideoQualityPolicy {
     const val HD_EDGE = 1920
     /** 新会话的首选档位：文字共享不能在连接建立时先被压到均衡档。 */
     const val STARTUP_EDGE = HD_EDGE
+    const val TRAFFIC_BUDGET_BPS = 3_500_000L
 
     private const val BAD_RTT_MS = 350L
     private const val GOOD_RTT_MS = 150L
@@ -32,6 +33,8 @@ internal object VideoQualityPolicy {
          * 爬坡期只按 rtt/丢包/帧率判——不拿一个还没测准的带宽去动画质。
          */
         val bandwidthSettled: Boolean = true,
+        val actualBitrateBps: Long = -1L,
+        val trafficBudgetBps: Long = TRAFFIC_BUDGET_BPS,
     )
 
     data class Decision(val targetEdge: Int?, val highStreak: Int, val lowStreak: Int)
@@ -118,23 +121,36 @@ internal object VideoQualityPolicy {
         else -> 1_800_000L
     }
 
+    fun transportBitrateBps(edge: Int): Long =
+        minOf(requiredBitrateBps(edge), TRAFFIC_BUDGET_BPS)
+
+    fun isConstrained(currentEdge: Int, metrics: Metrics): Boolean =
+        isBad(normalizeEdge(currentEdge), metrics)
+
     private fun isBad(currentEdge: Int, metrics: Metrics): Boolean {
         if (metrics.rttMs >= BAD_RTT_MS) return true
         if (metrics.lossPercent >= BAD_LOSS_PERCENT) return true
         if (metrics.encoderLimitation == "bandwidth" || metrics.encoderLimitation == "cpu") return true
         val available = metrics.availableBitrateBps
         if (!metrics.bandwidthSettled) return false
-        return available > 0 && available < requiredBitrateBps(currentEdge) * 72 / 100
+        val target = transportBitrateBps(currentEdge)
+        val budget = metrics.trafficBudgetBps.takeIf { it > 0L } ?: target
+        if (metrics.actualBitrateBps > budget * 110 / 100) return true
+        return available > 0 && available < target * 72 / 100
     }
 
     private fun isGood(preferredEdge: Int, metrics: Metrics): Boolean {
         if (metrics.rttMs < 0 || metrics.rttMs >= GOOD_RTT_MS) return false
         if (metrics.lossPercent >= 0 && metrics.lossPercent >= GOOD_LOSS_PERCENT) return false
         if (metrics.encoderLimitation == "bandwidth" || metrics.encoderLimitation == "cpu") return false
+        val budget = metrics.trafficBudgetBps.takeIf { it > 0L }
+            ?: transportBitrateBps(preferredEdge)
+        if (metrics.actualBitrateBps > budget * 110 / 100) return false
         val available = metrics.availableBitrateBps
         // 爬坡期的低带宽既不该判坏，也不该被"available<=0 当作未知→放行"当成好：
         // 未知才放行，读得到但还没稳的不计回升条件。
         if (!metrics.bandwidthSettled) return available <= 0
-        return available <= 0 || available >= requiredBitrateBps(preferredEdge) * 115 / 100
+        val target = transportBitrateBps(preferredEdge)
+        return available <= 0 || available >= target * 115 / 100
     }
 }

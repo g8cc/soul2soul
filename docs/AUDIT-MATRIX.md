@@ -207,6 +207,25 @@ AOSP 的 Doze 网络限制对它根本不生效，所以凡涉及"真 Doze 行�
 
 ---
 
+## 8.2 屏幕共享画质自适应（WebRtcClient）
+
+状态：`启动/活动` / `静态省电` / `运动探测` / `网络或编码器受限` / `远程操控` / `投影重建`
+
+| 事件＼状态 | 启动/活动 | 静态省电 | 运动探测 | 网络或编码器受限 | 远程操控 | 投影重建 |
+|---|---|---|---|---|---|---|
+| 硬件 codec 能力探测与首选 | PASS `VideoCodecPolicyTest` + `CaptureRestartGuardTest` 源码锁；实际 `ENC codec/impl` 仍待真机 | N-A | N-A | N-A | N-A | ⬜ 真机重建后实际 codec 是否保持 |
+| `bytesSent` 首样本、缺失或计数回退 | PASS `RtpQualityWindowTest`；未知码率不参与预算调整 | PASS 静态状态不因未知码率改预算 | PASS 探测等待有效窗口 | PASS 缺统计不伪造流量 | N-A | ⬜ 真机统计字段兼容性 |
+| 真实码率进入质量/预算策略 | PASS `VideoTrafficPolicyTest` + 源码锁；`actualBps`/`budgetBps` 已入 `ENC`/`S2S_QOS` | PASS 静态保持当前预算，避免恢复时起步过低 | PASS 允许稳定带宽收紧预算 | PASS 受限时不进入省电模式，质量可降档 | PASS 预算重置 | ⬜ 真机 `bytesSent`、可用带宽和主观画质 A/B |
+| 连续低活动进入 8 FPS | PASS `VideoActivityPolicyTest` 状态机锁 | PASS `targetFps=8`；静态每 8s 安排探测 | N-A | N-A（受限条件阻止进入） | N-A（远控强制 30 FPS） | ⬜ 真机静态页耗电/温升 |
+| 8 秒探测与运动恢复 | PASS 状态机锁 | PASS 进入探测 | PASS `targetFps=30`，运动后回活动态 | N-A | N-A | ⬜ 真机滚动/动画恢复速度 |
+| Android 14+ 分辨率/帧率调节 | PASS 源码守卫；`adaptOutputFormat` 不重建投影 | PASS 同一 `VideoSource` 调到 8 FPS | PASS 同一 `VideoSource` 调回 30 FPS | PASS 降档改变 `out` 不动 `cap` | PASS 保持 30 FPS | ⬜ 真机连续切档无 `projection_revoked` |
+| Android 13 及以下调节 | PASS 源码守卫；复用 `changeCaptureFormat` | PASS 同一 capturer 降帧 | PASS 同一 capturer 恢复 | PASS 不走 stop/start | PASS 保持 30 FPS | ⬜ 真机旧机型格式切换稳定性 |
+| 控制模式进入/退出 | PASS 远控锁定测试；进入前不伪写 FPS 状态 | N-A | N-A | PASS 受限时仍保帧率 | PASS 进入 960/30，退出恢复用户档位 | ⬜ 真机授权收回/重建后的档位一致性 |
+
+本表中 `PASS` 仅表示代码、JVM 或源码不变式已锁定；`⬜` 的真实编码器、画质、功耗、温升和投影授权结果必须由 V-04/V-05 真机记录补齐，不能由模拟器或单测改判。
+
+---
+
 ## 9. 设备音频共享（FR-16，`AudioPlaybackCapture` → AAC → `aud` 通道 → 对端 `AudioTrack`）
 
 状态：`关`（默认） / `开·live`（采到非零 PCM） / `开·silent`（连续 25 帧全零） / `开·门没过`（五条件里缺一条：旧机型 / 没录音权限 / 没画面 / 对面没回 `audok`）

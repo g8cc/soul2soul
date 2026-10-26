@@ -57,4 +57,17 @@ class RtpQualityWindowTest {
         assertEquals("真·零帧：计数没涨但窗口够长，这才是 0.0", 0.0,
             RtpQualityWindow.framesFps(100, 100, 10_000), 0.001)
     }
+
+    @Test
+    fun `视频字节累计值按真实窗口换算发送码率`() {
+        assertEquals(800_000L, RtpQualityWindow.bitrateBps(100_000, 200_000, 1_000))
+        assertEquals(400_000L, RtpQualityWindow.bitrateBps(200_000, 250_000, 1_000))
+    }
+
+    @Test
+    fun `视频码率首样本回退和短窗口返回未知`() {
+        assertEquals(-1L, RtpQualityWindow.bitrateBps(-1, 100, 2_000))
+        assertEquals(-1L, RtpQualityWindow.bitrateBps(200, 100, 2_000))
+        assertEquals(-1L, RtpQualityWindow.bitrateBps(100, 110, 500))
+    }
 }

@@ -113,6 +113,44 @@ class VideoQualityPolicyTest {
         assertEquals(VideoQualityPolicy.DEFAULT_EDGE, VideoQualityPolicy.normalizeEdge(1600))
         assertEquals(VideoQualityPolicy.HD_EDGE, VideoQualityPolicy.normalizeEdge(2000))
         assertEquals(4_500_000L, VideoQualityPolicy.requiredBitrateBps(1920))
+        assertEquals(3_500_000L, VideoQualityPolicy.transportBitrateBps(1920))
+    }
+
+    @Test
+    fun `实际发送码率超过当前预算时才进入受限状态`() {
+        val withinBudget = VideoQualityPolicy.Metrics(
+            rttMs = 40,
+            lossPercent = 0.5,
+            availableBitrateBps = 8_000_000,
+            actualBitrateBps = 3_700_000,
+            trafficBudgetBps = 3_500_000,
+            bandwidthSettled = true,
+        )
+        val overBudget = withinBudget.copy(actualBitrateBps = 4_000_000)
+
+        assertEquals(
+            0,
+            VideoQualityPolicy.step(1920, 1920, withinBudget, 0, 0).highStreak,
+        )
+        assertEquals(
+            1,
+            VideoQualityPolicy.step(1920, 1920, overBudget, 0, 0).highStreak,
+        )
+    }
+
+    @Test
+    fun `实际发送码率超预算时不允许质量恢复`() {
+        val metrics = VideoQualityPolicy.Metrics(
+            rttMs = 40,
+            lossPercent = 0.5,
+            availableBitrateBps = 8_000_000,
+            actualBitrateBps = 4_000_000,
+            trafficBudgetBps = 3_500_000,
+        )
+        assertEquals(
+            null,
+            VideoQualityPolicy.step(1920, 960, metrics, highStreak = 0, lowStreak = 9).targetEdge,
+        )
     }
 
     @Test

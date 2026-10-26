@@ -27,6 +27,9 @@ adb -s <设备序列号> logcat -v time -s WebRtcClient:I WebRtcClient:W
 - `rttMs`：所选 ICE 候选对的往返时间，不是单向语音延迟。
 - `path`：候选类型组合（如 `host->srflx`、`relay->relay`）；`unknown` 表示设备/系统没有提供候选明细。
 - `availableBps`：所选路径估计的可用上行带宽；`-1` 表示 WebRTC 未提供。
+- `actualBps`：共享端主 outbound 视频统计的 `bytesSent` 区间码率；首样本、计数器重置或窗口不足时为 `na`。
+- `budgetBps`：当前视频传输预算；稳定带宽下最多使用估计可用上行的约 85%，并受质量档上限约束。
+- `targetFps` / `activity`：共享端当前目标帧率与活动状态（`ACTIVE`、`STATIC`、`PROBING`）。静态状态目标为 8 FPS，探测时临时回到 30 FPS。
 - `audioLossPct`：本统计窗口内的音频 RTP 丢包率。
 - `audioJitterMs`：当前采样的接收抖动缓冲输入指标，不是本窗口平均值。
 - `audioConcealedMs`：窗口内解码器用隐藏/补偿音频填补的累计时长；这是“短杂音/断续感”的代理指标，不等价于主观听感。
@@ -51,8 +54,10 @@ adb -s <设备序列号> logcat -v time -s WebRtcClient:I WebRtcClient:W
 ### 操控模式与编码诊断（v0.2.40+）
 
 - 标记 `S2S-Lag`（共享端）：每笔被注入手势的分段延迟。`wait`=收到消息→调系统注入（网络+排队）；`play`=系统回放时长；`overflow`=系统串行队列溢出；`inflight`=还压在队列里的手势数。wait 大→网络/排队问题；overflow/inflight 大→注入串行瓶颈；都小但主观仍卡→视频往返（下行）地板。
-- 标记 `WebRtcClient` 的 `ENC` 行：`impl=` 含 `Hardware`/`Software`（VP9/H.264 是否硬编以实际日志为准，不能从 SDP 直接推断）；`size=` 是主视频编码输出尺寸，`avgEncodeMs`=单帧编码耗时；`limitation=` `none`/`cpu`/`bandwidth`（`cpu` 高=软编吃不消，`bandwidth`=带宽不够）。`DEC` 行是观看端解码器。
+- 标记 `WebRtcClient` 的 `ENC` 行：`codec=` 是实际 outbound stats 关联的编码 MIME，`impl=` 含 `Hardware`/`Software`（是否硬编以实际日志为准，不能从 SDP 直接推断）；`size=` 是主视频编码输出尺寸，`actualBps=` 是 `bytesSent` 区间码率，`budgetBps=` 是应用层预算，`targetFps=`/`mode=` 是活动策略，`avgEncodeMs=` 是单帧编码耗时；`limitation=` `none`/`cpu`/`bandwidth`（`cpu` 高=软编吃不消，`bandwidth`=带宽不够）。`DEC` 行是观看端解码器。
+- 建连前会记录 codec capability policy：硬件可用的 VP9/H.264/VP8 才会被提前协商；硬件能力缺失时不强行选软件 VP9，仍保留 WebRTC 回退路径。`preferred=` 不是实际硬编证明，必须和后续 `ENC codec/impl` 一起读。
 - 「允许TA操控」期间共享端自动降到 960 长边档并把降级偏好改为**保帧率**（`control mode video profile: on=true`），收回授权自动恢复用户原档位；操控期间的远端画质请求只记录意图、退出后生效（日志 `edge=` 可见）。
+- 静态省电不是逐帧 Bitmap 比较：连续三个约 2 秒窗口低活动（低发送帧率，或实际码率不高于 400 kbps 且网络/编码器未受限）后进入 8 FPS；每 8 秒做一次约 2 秒的 30 FPS 探测，检测到运动立即恢复。网络受限、编码器受限或远控期间不进入静态模式。
 
 第一条 `S2S_QOS` 常会出现 `na`，因为累计计数需要前后两个样本才能计算窗口值；重点看后续连续采样。共享端与观看端的日志都要保留，才能区分发送侧、接收侧和所选中继路径。
 

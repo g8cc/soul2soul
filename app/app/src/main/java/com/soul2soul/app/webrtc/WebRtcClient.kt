@@ -11,6 +11,7 @@ import org.webrtc.CapturerObserver
 import org.webrtc.DataChannel
 import org.webrtc.DefaultVideoDecoderFactory
 import org.webrtc.DefaultVideoEncoderFactory
+import org.webrtc.HardwareVideoEncoderFactory
 import org.webrtc.IceCandidate
 import org.webrtc.MediaConstraints
 import org.webrtc.MediaStream
@@ -137,9 +138,36 @@ class WebRtcClient(
                 .setAudioTrackErrorCallback(audioTrackErrorCallback)
                 .createAudioDeviceModule()
         }
+    private val videoEncoderFactory = DefaultVideoEncoderFactory(eglContext, true, true)
+    private val hardwareVideoCodecNames: List<String> by lazy {
+        runCatching {
+            HardwareVideoEncoderFactory(eglContext, true, true)
+                .getSupportedCodecs()
+                .map { it.name }
+        }.onFailure {
+            Log.w(TAG, "hardware video codec capability probe failed", it)
+        }.getOrDefault(emptyList())
+    }
+    private val codecSelection: VideoCodecPolicy.Selection by lazy {
+        val selection = runCatching {
+            VideoCodecPolicy.select(
+                videoEncoderFactory.getSupportedCodecs().map { it.name },
+                hardwareVideoCodecNames,
+            )
+        }.onFailure {
+            Log.w(TAG, "video codec capability probe failed", it)
+        }.getOrDefault(VideoCodecPolicy.Selection(emptyList(), null, false, emptyList()))
+        Log.i(
+            TAG,
+            "video codec policy preferred=${selection.preferredName ?: "none"} " +
+                "hardware=${selection.hardwareNames.joinToString("/").ifEmpty { "none" }} " +
+                "order=${selection.orderedNames.joinToString("/").ifEmpty { "none" }}",
+        )
+        selection
+    }
     private val factory: PeerConnectionFactory = PeerConnectionFactory.builder()
         .setAudioDeviceModule(audioModule)
-        .setVideoEncoderFactory(DefaultVideoEncoderFactory(eglContext, true, true))
+        .setVideoEncoderFactory(videoEncoderFactory)
         .setVideoDecoderFactory(DefaultVideoDecoderFactory(eglContext))
         .createPeerConnectionFactory()
 
@@ -161,8 +189,8 @@ class WebRtcClient(
     private var surfaceHelper: SurfaceTextureHelper? = null
     @Volatile private var closed = false
     private val rttHandler = android.os.Handler(android.os.Looper.getMainLooper())
-    private var highRttStreak = 0
-    private var lowRttStreak = 0
+    @Volatile private var highRttStreak = 0
+    @Volatile private var lowRttStreak = 0
     private var statsPollCount = 0
     private var previousRemoteVideoLost = -1L
     private var previousRemoteVideoReceived = -1L
@@ -235,7 +263,13 @@ class WebRtcClient(
     // outbound-rtp/inbound-rtp 没有 framesPerSecond，只能按区间相减算，见 RtpQualityWindow.framesFps
     private var previousOutboundVideoFrames = -1L
     private var previousInboundVideoFrames = -1L
+    private var previousOutboundVideoBytes = -1L
     private var videoFramesAtMs = 0L
+    private var videoBytesAtMs = 0L
+    @Volatile private var activityState = VideoActivityPolicy.State()
+    @Volatile private var targetVideoFps = VideoActivityPolicy.ACTIVE_FPS
+    @Volatile private var trafficMaxBitrateBps = -1L
+    @Volatile private var lastTrafficUpdateAtMs = 0L
 
     /**
      * 最近一个 10s 诊断窗口的读数与选路（v0.2.59）。
@@ -357,10 +391,10 @@ class WebRtcClient(
         projectionState = "starting"
         return runCatching {
             capturer.initialize(helper, context, captureObserver(source, restart = true))
-            capturer.startCapture(captureWidth, captureHeight, CAPTURE_FPS)
+            capturer.startCapture(captureWidth, captureHeight, targetVideoFps)
             check(projectionState == "live") { "capture did not report started" }
             if (outputWidth > 0 && outputHeight > 0) {
-                runCatching { source.adaptOutputFormat(outputWidth, outputHeight, CAPTURE_FPS) }
+                runCatching { source.adaptOutputFormat(outputWidth, outputHeight, targetVideoFps) }
                     .onFailure { Log.w(TAG, "restore output format failed", it) }
             }
         }.fold(
@@ -471,12 +505,15 @@ class WebRtcClient(
         captureHeight = h
         outputWidth = w
         outputHeight = h
+        targetVideoFps = VideoActivityPolicy.ACTIVE_FPS
+        activityState = VideoActivityPolicy.State()
+        trafficMaxBitrateBps = -1L
         val helper = SurfaceTextureHelper.create("s2s-capture", eglContext)
         surfaceHelper = helper
         // 保留异步启动失败通知，但不再为每一帧做 AtomicLong 计数。
         try {
             capturer.initialize(helper, context, captureObserver(source, restart = false))
-            capturer.startCapture(w, h, CAPTURE_FPS)
+            capturer.startCapture(w, h, targetVideoFps)
             check(projectionState == "live") { "capture did not report started" }
         } catch (e: Exception) {
             projectionState = "stopped"
@@ -567,7 +604,11 @@ class WebRtcClient(
             return
         }
         preferredLongEdge = normalized
+        resetQualityAdaptation()
+        resetTrafficBudget()
+        activityState = VideoActivityPolicy.State()
         applyCaptureLongEdge(preferredLongEdge)
+        applyFrameRate(VideoActivityPolicy.ACTIVE_FPS)
     }
 
     /**
@@ -579,6 +620,9 @@ class WebRtcClient(
         rttHandler.post {
             if (closed || controlMode == on) return@post
             controlMode = on
+            resetQualityAdaptation()
+            activityState = VideoActivityPolicy.State()
+            resetTrafficBudget()
             if (on) {
                 edgeBeforeControl = preferredLongEdge
                 val target = VideoQualityPolicy.controlEnterEdge(preferredLongEdge)
@@ -592,6 +636,7 @@ class WebRtcClient(
                 applyCaptureLongEdge(restore)
                 edgeBeforeControl = -1
             }
+            applyFrameRate(VideoActivityPolicy.ACTIVE_FPS)
             videoSender?.let { applyBitrate(it) } // 立即切换保分辨率/保帧率偏好
             Log.d(TAG, "control mode video profile: on=$on edge=$qualityLongEdge " +
                 "cap=${captureWidth}x${captureHeight} formatChangeAllowed=$captureFormatChangeSupported")
@@ -615,12 +660,13 @@ class WebRtcClient(
                 return
             }
             val adapted = runCatching {
-                source.adaptOutputFormat(w, h, CAPTURE_FPS)
+                source.adaptOutputFormat(w, h, targetVideoFps)
             }.isSuccess
             if (adapted) {
                 outputWidth = w
                 outputHeight = h
                 qualityLongEdge = normalized
+                resetTrafficBudget()
             } else {
                 Log.w(TAG, "output resolution switch failed; keeping ${outputWidth}x${outputHeight}")
             }
@@ -642,7 +688,7 @@ class WebRtcClient(
         val oldOutputWidth = outputWidth
         val oldOutputHeight = outputHeight
         val switched = runCatching {
-            capturer.changeCaptureFormat(w, h, CAPTURE_FPS)
+            capturer.changeCaptureFormat(w, h, targetVideoFps)
         }.isSuccess
         if (switched) {
             captureLongEdge = normalized
@@ -651,6 +697,7 @@ class WebRtcClient(
             captureHeight = h
             outputWidth = w
             outputHeight = h
+            resetTrafficBudget()
         } else {
             Log.w(TAG, "capture format switch failed; restoring ${oldWidth}x${oldHeight}")
             captureLongEdge = oldEdge
@@ -660,12 +707,36 @@ class WebRtcClient(
             outputHeight = oldOutputHeight
             if (oldWidth > 0 && oldHeight > 0) {
                 runCatching {
-                    capturer.changeCaptureFormat(oldWidth, oldHeight, CAPTURE_FPS)
+                    capturer.changeCaptureFormat(oldWidth, oldHeight, targetVideoFps)
                 }
                     .onFailure { Log.w(TAG, "capture format rollback failed", it) }
             }
         }
         videoSender?.let { applyBitrate(it) }
+    }
+
+    @Synchronized
+    private fun applyFrameRate(frameRate: Int) {
+        val normalized = frameRate.coerceIn(1, VideoActivityPolicy.ACTIVE_FPS)
+        if (closed || normalized == targetVideoFps) return
+        val capturer = capturer ?: return
+        val source = videoSource ?: return
+        val switched = if (!captureFormatChangeSupported) {
+            runCatching { source.adaptOutputFormat(outputWidth, outputHeight, normalized) }.isSuccess
+        } else {
+            runCatching {
+                capturer.changeCaptureFormat(captureWidth, captureHeight, normalized)
+            }.isSuccess
+        }
+        if (switched) {
+            targetVideoFps = normalized
+            videoSender?.let { applyBitrate(it) }
+            Log.d(TAG, "video fps=$normalized edge=$qualityLongEdge " +
+                "cap=${captureWidth}x${captureHeight} out=${outputWidth}x${outputHeight} " +
+                "restartForbidden=${!captureFormatChangeSupported}")
+        } else {
+            Log.w(TAG, "video fps switch failed; keeping $targetVideoFps")
+        }
     }
 
     /**
@@ -700,26 +771,35 @@ class WebRtcClient(
                     RtpParameters.DegradationPreference.MAINTAIN_FRAMERATE
                 else
                     RtpParameters.DegradationPreference.MAINTAIN_RESOLUTION
-                params.encodings[0].maxBitrateBps =
-                    VideoQualityPolicy.requiredBitrateBps(qualityLongEdge).toInt()
-                params.encodings[0].maxFramerate = CAPTURE_FPS
+                val profileBitrate = VideoQualityPolicy.transportBitrateBps(qualityLongEdge)
+                val trafficBitrate = trafficMaxBitrateBps.takeIf { it > 0L } ?: profileBitrate
+                params.encodings[0].maxBitrateBps = minOf(profileBitrate, trafficBitrate).toInt()
+                params.encodings[0].maxFramerate = if (controlMode) {
+                    VideoActivityPolicy.ACTIVE_FPS
+                } else {
+                    targetVideoFps
+                }
                 sender.parameters = params
             }
         }.onFailure { Log.w(TAG, "bitrate set failed", it) }
     }
 
-    /** 屏幕内容编码优化：将 offer 中 VP9 的载荷提到最前（同码率下 UI/文字清晰度显著优于 H.264） */
-    private fun preferVp9(sdp: String): String {
+    private fun preferCodec(sdp: String, codecName: String?): String {
+        val preferredCodec = codecName?.let(VideoCodecPolicy::canonicalName)
+            ?.takeIf { it.isNotEmpty() } ?: return sdp
         val lines = sdp.split("\r\n").toMutableList()
         val mIdx = lines.indexOfFirst { it.startsWith("m=video") }
         if (mIdx < 0) return sdp
-        val vp9Pts = lines.filter { it.startsWith("a=rtpmap:") && it.contains("VP9/") }
+        val preferredPts = lines.filter {
+            it.startsWith("a=rtpmap:") &&
+                it.substringAfter(' ', "").substringBefore('/').equals(preferredCodec, ignoreCase = true)
+        }
             .map { it.removePrefix("a=rtpmap:").substringBefore(" ") }
-        if (vp9Pts.isEmpty()) return sdp
+        if (preferredPts.isEmpty()) return sdp
         val rtxPts = lines.filter { it.startsWith("a=fmtp:") && it.contains("apt=") }
-            .filter { fm -> vp9Pts.any { fm.contains("apt=$it ") || fm.endsWith("apt=$it") } }
+            .filter { fm -> preferredPts.any { fm.contains("apt=$it ") || fm.endsWith("apt=$it") } }
             .map { it.removePrefix("a=fmtp:").substringBefore(" ") }
-        val preferred = (vp9Pts + rtxPts).toSet()
+        val preferred = (preferredPts + rtxPts).toSet()
         val parts = lines[mIdx].split(" ")
         if (parts.size <= 3) return sdp
         val pts = parts.drop(3)
@@ -1116,7 +1196,16 @@ class WebRtcClient(
         previousOutboundVideoSent = -1L
         previousOutboundVideoFrames = -1L
         previousInboundVideoFrames = -1L
+        previousOutboundVideoBytes = -1L
         videoFramesAtMs = 0L
+        videoBytesAtMs = 0L
+        previousAudioQualityCounters = null
+        previousVideoQualityCounters = null
+        statsPollCount = 0
+        resetQualityAdaptation()
+        lastTrafficUpdateAtMs = 0L
+        activityState = VideoActivityPolicy.State()
+        trafficMaxBitrateBps = -1L
         rttHandler.post(object : Runnable {
             override fun run() {
                 val pc = pc ?: return
@@ -1133,9 +1222,11 @@ class WebRtcClient(
                     var remoteVideoLost = -1L
                     var remoteVideoReceived = -1L
                     var outboundVideoSent = -1L
+                    var outboundVideoBytes = -1L
                     var outboundVideoFrames = -1L
                     var inboundVideoFrames = -1L
                     var outboundVideoFps = -1.0
+                    var outboundVideoBitrateBps = -1L
                     var inboundVideoFps = -1.0
                     var encoderLimitation = "unknown"
                     val outboundVideoCandidates = mutableListOf<RtpStatsSelector.VideoStatRef>()
@@ -1231,6 +1322,8 @@ class WebRtcClient(
                     primaryOutboundVideoStats?.let { stats ->
                         outboundVideoSent =
                             (stats.members["packetsSent"] as? Number)?.toLong()?.coerceAtLeast(0L) ?: -1L
+                        outboundVideoBytes =
+                            (stats.members["bytesSent"] as? Number)?.toLong()?.coerceAtLeast(0L) ?: -1L
                         // 累计已发送帧数（这一版没有 framesPerSecond，帧率靠区间相减）
                         outboundVideoFrames =
                             (stats.members["framesSent"] as? Number)?.toLong()?.coerceAtLeast(0L) ?: -1L
@@ -1272,6 +1365,15 @@ class WebRtcClient(
                     if (outboundVideoFrames >= 0L) previousOutboundVideoFrames = outboundVideoFrames
                     if (inboundVideoFrames >= 0L) previousInboundVideoFrames = inboundVideoFrames
                     videoFramesAtMs = framesNowMs
+                    val bytesWindowMs =
+                        if (videoBytesAtMs > 0L) framesNowMs - videoBytesAtMs else -1L
+                    outboundVideoBitrateBps = RtpQualityWindow.bitrateBps(
+                        previousOutboundVideoBytes, outboundVideoBytes, bytesWindowMs,
+                    )
+                    if (outboundVideoBytes >= 0L) {
+                        previousOutboundVideoBytes = outboundVideoBytes
+                        videoBytesAtMs = framesNowMs
+                    }
                     best = if (selectedRtt >= 0) selectedRtt else fallbackRtt
                     availableOutgoingBps =
                         if (selectedAvailable >= 0) selectedAvailable else fallbackAvailable
@@ -1300,7 +1402,7 @@ class WebRtcClient(
                                 stats.type == "outbound-rtp" && mediaKind == "video" &&
                                     stats.id == primaryOutboundVideoStats?.id -> {
                                     val impl = stats.members["encoderImplementation"]?.toString() ?: "?"
-                                    val sent = (stats.members["bytesSent"] as? Number)?.toLong() ?: 0L
+                                    val sent = outboundVideoBytes.takeIf { it >= 0L } ?: 0L
                                     // avgEncodeMs 高 / limitationReason=cpu → 软编瓶颈；
                                     // =bandwidth → 带宽瓶颈（操控模式低清档正是在解这个）
                                     val encodeMs =
@@ -1313,7 +1415,12 @@ class WebRtcClient(
                                         (stats.members["frameHeight"] as? Number)?.toInt() ?: -1
                                     Log.d(
                                         TAG,
-                                        "ENC impl=$impl fps=${formatMetric(outboundVideoFps)} " +
+                                        "ENC impl=$impl codec=${primaryOutboundRef?.codecMimeType ?: "?"} " +
+                                            "fps=${formatMetric(outboundVideoFps)} " +
+                                            "actualBps=${formatMetric(outboundVideoBitrateBps)} " +
+                                            "budgetBps=${trafficMaxBitrateBps.takeIf { it > 0L }
+                                                ?: VideoQualityPolicy.transportBitrateBps(qualityLongEdge)} " +
+                                            "targetFps=$targetVideoFps mode=${activityState.mode.name} " +
                                             "size=${if (width > 0 && height > 0) "${width}x${height}" else "na"} " +
                                             "avgEncodeMs=${formatMetric(encodeMs)} " +
                                             "limitation=$limitation bytes=$sent",
@@ -1343,6 +1450,15 @@ class WebRtcClient(
                                 "ice=$latestIceState rttMs=$best path=$selectedPath " +
                                 "availableBps=$availableOutgoingBps edge=$qualityLongEdge " +
                                 "cap=${captureWidth}x${captureHeight} out=${outputWidth}x${outputHeight} " +
+                                "actualBps=${formatMetric(outboundVideoBitrateBps)} " +
+                                "budgetBps=${if (isSharer) {
+                                    trafficMaxBitrateBps.takeIf { it > 0L }
+                                        ?: VideoQualityPolicy.transportBitrateBps(qualityLongEdge)
+                                } else {
+                                    "na"
+                                }} " +
+                                "targetFps=${if (isSharer) targetVideoFps else -1} " +
+                                "activity=${if (isSharer) activityState.mode.name else "na"} " +
                                 "videoLossPct=${formatMetric(videoWindow.packetLossPercent)} " +
                                 "videoJitterMs=${formatMetric(videoWindow.jitterMs)} " +
                                 "videoFps=${formatMetric(videoFps)} " +
@@ -1437,19 +1553,62 @@ class WebRtcClient(
                         if (remoteVideoLost >= 0) previousRemoteVideoLost = remoteVideoLost
                         if (remoteVideoReceived >= 0) previousRemoteVideoReceived = remoteVideoReceived
                         if (outboundVideoSent >= 0) previousOutboundVideoSent = outboundVideoSent
+                        val bandwidthSettled = statsPollCount > BANDWIDTH_SETTLE_POLLS
+                        val profileBitrateBps = VideoQualityPolicy.transportBitrateBps(qualityLongEdge)
+                        val currentTrafficBudgetBps =
+                            trafficMaxBitrateBps.takeIf { it > 0L } ?: profileBitrateBps
+                        val qualityMetrics = VideoQualityPolicy.Metrics(
+                            rttMs = best,
+                            lossPercent = lossPercent,
+                            availableBitrateBps = availableOutgoingBps,
+                            outboundFps = outboundVideoFps,
+                            encoderLimitation = encoderLimitation,
+                            bandwidthSettled = bandwidthSettled,
+                            actualBitrateBps = outboundVideoBitrateBps,
+                            trafficBudgetBps = currentTrafficBudgetBps,
+                        )
+                        val activityDecision = VideoActivityPolicy.step(
+                            activityState,
+                            VideoActivityPolicy.Metrics(
+                                nowMs = framesNowMs,
+                                outboundFps = outboundVideoFps,
+                                actualBitrateBps = outboundVideoBitrateBps,
+                                constrained = !bandwidthSettled || VideoQualityPolicy.isConstrained(
+                                    qualityLongEdge, qualityMetrics,
+                                ),
+                                controlMode = controlMode,
+                            ),
+                        )
+                        activityState = activityDecision.state
+                        activityDecision.targetFps?.let { targetFps ->
+                            rttHandler.post {
+                                if (!closed) applyFrameRate(targetFps)
+                            }
+                        }
+                        val trafficTargetBps = VideoTrafficPolicy.targetMaxBitrateBps(
+                            profileMaxBps = profileBitrateBps,
+                            currentBps = currentTrafficBudgetBps,
+                            availableBps = availableOutgoingBps,
+                            actualBps = outboundVideoBitrateBps,
+                            outboundFps = outboundVideoFps,
+                            bandwidthSettled = bandwidthSettled,
+                            staticMode = activityDecision.state.mode == VideoActivityPolicy.Mode.STATIC,
+                        )
+                        val trafficUpdateDue = lastTrafficUpdateAtMs == 0L ||
+                            framesNowMs - lastTrafficUpdateAtMs >= TRAFFIC_UPDATE_INTERVAL_MS
+                        if (trafficUpdateDue &&
+                            VideoTrafficPolicy.shouldUpdate(currentTrafficBudgetBps, trafficTargetBps)
+                        ) {
+                            trafficMaxBitrateBps = trafficTargetBps
+                            lastTrafficUpdateAtMs = framesNowMs
+                            rttHandler.post {
+                                if (!closed) videoSender?.let { applyBitrate(it) }
+                            }
+                        }
                         val decision = VideoQualityPolicy.step(
                             preferredLongEdge,
                             qualityLongEdge,
-                            VideoQualityPolicy.Metrics(
-                                rttMs = best,
-                                lossPercent = lossPercent,
-                                availableBitrateBps = availableOutgoingBps,
-                                outboundFps = outboundVideoFps,
-                                encoderLimitation = encoderLimitation,
-                                // 估计器爬坡期（前 BANDWIDTH_SETTLE_POLLS 拍）的 300kbps 是初值不是实测，
-                                // 拿它判坏会在 6s 内必然攒出一次降档（v0.2.62 双模拟器实测）
-                                bandwidthSettled = statsPollCount > BANDWIDTH_SETTLE_POLLS,
-                            ),
+                            qualityMetrics,
                             highRttStreak,
                             lowRttStreak,
                         )
@@ -1482,6 +1641,19 @@ class WebRtcClient(
         } else {
             "na"
         }
+
+    private fun formatMetric(value: Long): String =
+        if (value >= 0L) value.toString() else "na"
+
+    private fun resetTrafficBudget() {
+        trafficMaxBitrateBps = -1L
+        lastTrafficUpdateAtMs = 0L
+    }
+
+    private fun resetQualityAdaptation() {
+        highRttStreak = 0
+        lowRttStreak = 0
+    }
 
     private fun videoStatRef(
         stats: org.webrtc.RTCStats,
@@ -1816,9 +1988,9 @@ class WebRtcClient(
 
     private fun sendSdp(desc: SessionDescription) {
         if (closed || endedNotified.get()) return
-        // 屏幕内容编码优化：offer 中将 VP9 载荷提前（对端按相同顺序应答）
+        // 屏幕内容编码优化：只把硬件可用的首选编码器载荷提前
         val sdpText = if (desc.type == SessionDescription.Type.OFFER) {
-            preferVp9(desc.description)
+            preferCodec(desc.description, codecSelection.preferredName)
         } else {
             desc.description
         }
@@ -1860,7 +2032,6 @@ class WebRtcClient(
     companion object {
         private const val TAG = "WebRtcClient"
         private const val STREAM = "soul"
-        private const val CAPTURE_FPS = 30
         private const val RTT_POLL_MS = 2000L
         private const val DIAGNOSTIC_EVERY_POLLS = 5
         private const val CONNECT_TIMEOUT_MS = 30_000L
@@ -1872,6 +2043,7 @@ class WebRtcClient(
         private const val VIEWER_STALL_POLLS = 3
         // 带宽估计器爬坡期：前 5 拍（10s）的 availableOutgoingBitrate 是初值不是实测，不参与降档判据
         private const val BANDWIDTH_SETTLE_POLLS = 5
+        private const val TRAFFIC_UPDATE_INTERVAL_MS = 6000L
         // Android 14 起 MediaProjection token 一次性：重启采集会被系统撤销授权
         private const val ANDROID_14 = 34
     }
