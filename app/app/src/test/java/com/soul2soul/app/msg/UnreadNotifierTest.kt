@@ -177,6 +177,10 @@ class UnreadNotifierTest {
             text.contains("deleteNotificationChannel(CH_MSG_SILENT)"))
         assertTrue("CH_MSG_SILENT 必须真的指向旧 id msg，否则删的是空气",
             Regex("CH_MSG_SILENT\\s*=\\s*\"msg\"").containsMatchIn(text))
+        assertTrue("上一版出声渠道 msg2 也必须删除：部分 ROM 会把它持久化成静音",
+            text.contains("deleteNotificationChannel(CH_MSG_PREVIOUS)"))
+        assertTrue("CH_MSG_PREVIOUS 必须真的指向上一版 msg2，否则迁移门是空的",
+            Regex("CH_MSG_PREVIOUS\\s*=\\s*\"msg2\"").containsMatchIn(text))
     }
 
     @Test
@@ -202,6 +206,18 @@ class UnreadNotifierTest {
             Regex("SDK_INT < 26[\\s\\S]{0,160}setSound").containsMatchIn(text))
         assertTrue("alert 必须由 isNewArrival 算出来，不许是常量",
             text.contains("isNewArrival(alertedIds, unread)"))
+    }
+
+    @Test
+    fun `M8 通知状态必须在 notify 成功后提交-权限恢复时还能重试`() {
+        val block = between(notifier(), "Action.Show -> {", "private fun lineOf")
+        val notify = block.indexOfFirst { it.contains("nm.notify(Notif.ID_MSG") }
+        val shown = block.indexOfFirst { it.contains("shownSig = signature(unread)") }
+        val alerted = block.indexOfFirst { it.contains("alertedIds =") }
+        assertTrue("找不到通知投递调用", notify >= 0)
+        assertTrue("shownSig 必须在 notify 成功回调之后写入，否则权限恢复不会重试", shown > notify)
+        assertTrue("alertedIds 必须在 notify 成功回调之后写入，否则失败投递会吞掉声音", alerted > notify)
+        assertTrue("notify 失败必须留下可查日志", block.any { it.contains("message notification failed") })
     }
 
     /** CH_MSG 那条渠道语句：同一行收尾就取一行，跨行则取到收尾括号（不许只取半句） */

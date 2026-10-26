@@ -70,12 +70,17 @@ object UnreadNotifier {
                 NotificationManagerCompat.from(ctx).cancel(Notif.ID_MSG)
             }
             Action.Show -> {
-                shownSig = signature(unread)
                 val nm = NotificationManagerCompat.from(ctx)
                 if (!nm.areNotificationsEnabled()) return // 权限没给就只留主页角标
                 val alert = isNewArrival(alertedIds, unread)
-                if (alert) alertedIds = (alertedIds + unread.map { it.id }).toSet()
+                // 先投递，成功后再记签名/已提醒。权限刚恢复或系统短暂拒绝时，下一次
+                // sync 必须还能重试，否则这条留言会永远停在主页角标而没有声音。
                 runCatching { nm.notify(Notif.ID_MSG, build(ctx, unread, alert)) }
+                    .onSuccess {
+                        shownSig = signature(unread)
+                        if (alert) alertedIds = (alertedIds + unread.map { it.id }).toSet()
+                    }
+                    .onFailure { android.util.Log.w(TAG, "message notification failed", it) }
             }
         }
     }
@@ -114,4 +119,6 @@ object UnreadNotifier {
             Notif.defaultSoundUri()?.let { b.setSound(it) }
         return b.build()
     }
+
+    private const val TAG = "UnreadNotifier"
 }
