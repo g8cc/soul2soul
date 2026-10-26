@@ -205,7 +205,6 @@ class MainActivity : AppCompatActivity() {
         )
 
         Notif.ensureChannels(this)
-        Presence.ensureStarted(this)
         requestNotificationPermissionIfNeeded()
         maybeAskBatteryExemption()
 
@@ -1036,6 +1035,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
+        Presence.ensureStarted(this)
         paused = false
         // 从"安装未知应用"授权页返回后，继续刚才搁置的安装
         pendingInstallFile?.let { file ->
@@ -1063,6 +1063,11 @@ class MainActivity : AppCompatActivity() {
         maybePromptAccReset()
         // 后台时 PresenceService 落下的找回请求：回前台立刻补弹窗（60s 内有效）
         Presence.claimRecall()?.let { showRecallAskDialog() }
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus) Presence.ensureStarted(this)
     }
 
     /** 更新安装后 ROM 常把无障碍悄悄弄坏：真被关 → 递一键重开；开关在但服务被冻 → 教"关→开一次"。

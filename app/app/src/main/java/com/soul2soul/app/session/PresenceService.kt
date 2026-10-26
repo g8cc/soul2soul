@@ -31,6 +31,9 @@ object Presence {
     var iceServersJson: org.json.JSONArray? = null
 
     @Volatile
+    private var serviceReady = false
+
+    @Volatile
     var sessionBusy: Boolean = false
 
     // 信令连接态（主页醒目胶囊的唯一权威可读源）。SharedFlow 无 replay，
@@ -63,12 +66,25 @@ object Presence {
     }
 
     fun ensureStarted(ctx: Context) {
-        if (android.os.Build.VERSION.SDK_INT >= 26) {
-            ctx.startForegroundService(Intent(ctx, PresenceService::class.java))
-        } else {
-            // 24/25: startService 即可，且服务 onCreate 必须立即 startForeground
-            ctx.startService(Intent(ctx, PresenceService::class.java))
+        if (serviceReady) return
+        try {
+            if (android.os.Build.VERSION.SDK_INT >= 26) {
+                ctx.startForegroundService(Intent(ctx, PresenceService::class.java))
+            } else {
+                // 24/25: startService 即可，且服务 onCreate 必须立即 startForeground
+                ctx.startService(Intent(ctx, PresenceService::class.java))
+            }
+        } catch (e: RuntimeException) {
+            android.util.Log.w("Presence", "service start deferred: ${e.javaClass.simpleName}", e)
         }
+    }
+
+    internal fun markServiceReady() {
+        serviceReady = true
+    }
+
+    internal fun markServiceStopped() {
+        serviceReady = false
     }
 }
 
@@ -170,6 +186,7 @@ class PresenceService : Service() {
         super.onCreate()
         Notif.ensureChannels(this)
         startForeground(Notif.ID_PRESENCE, buildPresenceNotification())
+        Presence.markServiceReady()
         // 只在"本次会话期间新来的留言"才挂条数通知：不在服务启动时补挂历史未读
         // （用户要求：通知栏不要常驻，有留言了才显示条数）
         // 聊天记录先于监听恢复：进程重启后聊天窗口还是完整的（微信式）
@@ -248,6 +265,7 @@ class PresenceService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int = START_STICKY
 
     override fun onDestroy() {
+        Presence.markServiceStopped()
         handler.removeCallbacksAndMessages(null)
         if (wakeLock.isHeld) wakeLock.release() // acquire 的对偶出口（穷举 restore）
         scope.cancel()
