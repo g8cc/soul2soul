@@ -198,12 +198,15 @@ class UnreadNotifierTest {
     }
 
     @Test
-    fun `M7 出声开关接在到达判定上-26以下还得自己挂声音`() {
+    fun `M7 出声开关接在到达判定上-所有版本都挂本体声音兼容国产 ROM`() {
         val text = notifier().joinToString("\n")
         assertTrue("setOnlyAlertOnce 必须由 alert 决定；焊死 true＝新留言也永远不出声",
             text.contains(".setOnlyAlertOnce(!alert)"))
-        assertTrue("渠道只存在于 26+；26 以下（Mi5/API 24）不在 Builder 上挂声音就是彻底静音",
-            Regex("SDK_INT < 26[\\s\\S]{0,160}setSound").containsMatchIn(text))
+        val build = between(text.lines(), "private fun build(ctx: Context,", "return b.build()")
+        assertTrue("通知本体必须始终携带声音：部分 MIUI/HyperOS 不会仅按渠道播放",
+            build.any { it.contains("Notif.defaultSoundUri()?.let") && it.contains("setSound") })
+        assertFalse("声音不能只在 26 以下绑定：Android 26+ 国产 ROM 也需要本体兜底",
+            Regex("SDK_INT < 26[\\s\\S]{0,200}defaultSoundUri").containsMatchIn(build.joinToString("\n")))
         assertTrue("alert 必须由 isNewArrival 算出来，不许是常量",
             text.contains("isNewArrival(alertedIds, unread)"))
     }

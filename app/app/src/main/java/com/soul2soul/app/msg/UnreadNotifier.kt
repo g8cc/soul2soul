@@ -114,9 +114,8 @@ object UnreadNotifier {
             for (m in bodyLines(unread)) style.addLine(lineOf(ctx, m))
             b.setStyle(style)
         }
-        // 26+ 声音挂在渠道上（写在这里会被系统忽略）；26 以下没有渠道概念，不挂就是彻底静音
-        if (android.os.Build.VERSION.SDK_INT < 26)
-            Notif.defaultSoundUri()?.let { b.setSound(it) }
+        // Android 26+ 的标准实现从渠道取声音，但 MIUI 仍可能只检查通知本体；两处都挂上
+        Notif.defaultSoundUri()?.let { b.setSound(it) }
         return b.build()
     }
 
