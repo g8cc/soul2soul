@@ -45,6 +45,8 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
     @Volatile private var stopping = false
     /** 系统撤销录屏授权而会话存续：画面停、语音与数据通道照旧（0.2.64） */
     @Volatile private var videoPaused = false
+    private val signalRecovery = SignalRecoveryTracker()
+    private val signalRecoveryTimeout = Runnable { onSignalRecoveryTimeout() }
     private val pendingSignals = mutableListOf<JSONObject>()
     private var signalJob: Job? = null
     private var screenReceiverRegistered = false
@@ -64,7 +66,7 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
     /**
      * 锁屏=画面暂停、会话存续（v0.2.56 推翻 PRD FR-8 的"15 秒自动结束"）：
      * 两人边语音边各玩各的，手机不动就会锁屏，会话必须继续。
-     * 结束会话只剩三条路：本端挂断 / 对端 bye·peer.gone / ICE 真断超时。
+     * 结束会话只剩三条路：本端挂断 / 对端 bye / ICE 真断或信令恢复超时。
      * 仍不能用"帧数停止增长"判断锁屏 —— 静止画面同样不出帧，会误杀（已踩坑）。
      * 锁屏瞬间立即通知观看端，让对方知道画面是暂停而不是卡死。
      */
@@ -210,6 +212,8 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
         // stopSelf() normally destroys the service, but a rapid redial can arrive before
         // onDestroy(). Reset all per-call state before accepting the new projection.
         stopping = false
+        watchdog.removeCallbacks(signalRecoveryTimeout)
+        signalRecovery.reset()
         pendingSignals.clear()
         videoPaused = false // 新会话从零开始：上一通的"画面已停"绝不能带进这一通
         audWanted = false   // 同上：内录开关默认关，不继承上一通的意图
@@ -226,6 +230,7 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
         }
 
         Notif.ensureChannels(this)
+        SessionStatusNotifier.clear(applicationContext)
         try {
             startSessionForeground()
         } catch (e: Exception) {
@@ -278,20 +283,32 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
                             dispatchSignal(client, json)
                         }
                     }
-                    "bye", "peer.gone" -> {
-                        // 秒断判定：peer.gone 只代表**信令**断了（服务器 30s pong 超时就会广播一次），
-                        // P2P 媒体可能完全正常。必须在拆会话**之前**记下到达瞬间的 ICE 态——
-                        // stopSession 之后 ice 只会是 CLOSED，「谁把会话关掉的」就永远读不出来了。
+                    "bye" -> {
+                        // bye 是对端明确结束；与 peer.gone（只代表信令短断）严格分开。
                         com.soul2soul.app.util.SelfCheck.reportEvent(
                             this@ScreenShareService, "sharer", "peer_signal",
-                            webRtc?.iceStateName ?: "-",
-                            "sig=" + if (json.optString("type") == "peer.gone") "gone" else "bye",
+                            webRtc?.iceStateName ?: "-", "sig=bye",
                         )
-                        // 占位必须在 stopSession 之前：收尾的 close() 会当场读 endReason 并上报，
-                        // 之后才写就来不及了（sendBye=false 那条 local_stop 守卫也进不去）。
-                        // 否则共享端被对方挂断时 diag.session.reason 只剩 local_close，"谁关的"要跨两行拼。
-                        webRtc?.noteEnd(if (json.optString("type") == "peer.gone") "peer_gone" else "remote_bye")
-                        stopSession(sendBye = false)
+                        webRtc?.noteEnd("remote_bye")
+                        stopSession(sendBye = false, notifyStatus = true)
+                    }
+                    "peer.gone" -> handleSignalLost(SignalRecoveryTracker.Source.PEER)
+                    "peer.online" -> handleSignalRestored(SignalRecoveryTracker.Source.PEER)
+                    "local.connState" -> {
+                        if (json.has("connected")) {
+                            handleSignalState(
+                                SignalRecoveryTracker.Source.LOCAL,
+                                json.optBoolean("connected"),
+                            )
+                        }
+                    }
+                    "registered" -> {
+                        if (json.has("peerOnline")) {
+                            handleSignalState(
+                                SignalRecoveryTracker.Source.PEER,
+                                json.optBoolean("peerOnline"),
+                            )
+                        }
                     }
                 }
             }
@@ -328,14 +345,27 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
     }
 
     override fun onDestroy() {
+        val wasStopping = stopping
+        val hadSession = live || webRtc != null
         stopping = true
         watchdog.removeCallbacksAndMessages(null) // 排队中的手势注入一并作废（服务已亡不再代表会话授权）
+        signalRecovery.reset()
         consent.resetForNewSession()
         signalJob?.cancel()
         signalJob = null
         if (screenReceiverRegistered) {
             runCatching { unregisterReceiver(screenReceiver) }
             screenReceiverRegistered = false
+        }
+        if (!wasStopping && hadSession) {
+            webRtc?.noteEnd("service_destroy")
+            SessionStatusNotifier.ended(
+                applicationContext,
+                "sharer",
+                getString(R.string.peer_lost),
+            )
+        } else if (!wasStopping) {
+            SessionStatusNotifier.clear(applicationContext)
         }
         scope.cancel()
         live = false
@@ -525,8 +555,138 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
         }
     }
 
+    private fun handleSignalState(source: SignalRecoveryTracker.Source, online: Boolean) {
+        if (stopping || webRtc == null) return
+        val now = android.os.SystemClock.elapsedRealtime()
+        val ice = webRtc?.iceStateName ?: "-"
+        val decision = if (source == SignalRecoveryTracker.Source.PEER) {
+            signalRecovery.onPeerSignal(online, now, ice)
+        } else {
+            signalRecovery.onLocalSignal(online, now, ice)
+        }
+        when (decision) {
+            is SignalRecoveryTracker.Decision.Started -> {
+                com.soul2soul.app.util.SelfCheck.reportEvent(
+                    this,
+                    "sharer",
+                    if (source == SignalRecoveryTracker.Source.PEER) "peer_signal" else "signaling_state",
+                    ice,
+                    if (source == SignalRecoveryTracker.Source.PEER) "sig=gone" else "state=down",
+                )
+                SessionStatusNotifier.recovering(
+                    applicationContext,
+                    "sharer",
+                    getString(
+                        if (source == SignalRecoveryTracker.Source.PEER) {
+                            R.string.peer_signal_recovering
+                        } else {
+                            R.string.signal_recovering
+                        },
+                    ),
+                )
+                updateNotification(statusText())
+            }
+            is SignalRecoveryTracker.Decision.Restored -> {
+                com.soul2soul.app.util.SelfCheck.reportEvent(
+                    this,
+                    "sharer",
+                    if (source == SignalRecoveryTracker.Source.PEER) "peer_signal_recovered" else "signaling_recovered",
+                    ice,
+                    if (source == SignalRecoveryTracker.Source.PEER) "sig=online" else "state=up",
+                )
+                updateNotification(statusText())
+            }
+            is SignalRecoveryTracker.Decision.EndNow -> {
+                val reason = if (source == SignalRecoveryTracker.Source.PEER) {
+                    "peer_signal_media_failed"
+                } else {
+                    "local_signal_media_failed"
+                }
+                com.soul2soul.app.util.SelfCheck.reportEvent(
+                    this,
+                    "sharer",
+                    if (source == SignalRecoveryTracker.Source.PEER) "peer_signal" else "signaling_state",
+                    ice,
+                    "sig=gone reason=$reason",
+                )
+                webRtc?.noteEnd(reason)
+                stopSession(sendBye = false, notifyStatus = true)
+            }
+            else -> updateNotification(statusText())
+        }
+        if (decision is SignalRecoveryTracker.Decision.EndNow) return
+        if (signalRecovery.isRecovering) {
+            scheduleSignalRecoveryTimeout()
+        } else {
+            watchdog.removeCallbacks(signalRecoveryTimeout)
+            SessionStatusNotifier.clear(applicationContext)
+            updateNotification(statusText())
+        }
+    }
+
+    private fun handleSignalLost(source: SignalRecoveryTracker.Source) {
+        handleSignalState(source, online = false)
+    }
+
+    private fun handleSignalRestored(source: SignalRecoveryTracker.Source) {
+        handleSignalState(source, online = true)
+    }
+
+    private fun scheduleSignalRecoveryTimeout() {
+        val deadline = signalRecovery.deadlineMs() ?: return
+        watchdog.removeCallbacks(signalRecoveryTimeout)
+        watchdog.postDelayed(
+            signalRecoveryTimeout,
+            (deadline - android.os.SystemClock.elapsedRealtime()).coerceAtLeast(1L),
+        )
+    }
+
+    private fun onSignalRecoveryTimeout() {
+        val decision = signalRecovery.onTimeout(android.os.SystemClock.elapsedRealtime())
+        if (stopping) return
+        if (decision !is SignalRecoveryTracker.Decision.TimedOut) {
+            if (signalRecovery.isRecovering) scheduleSignalRecoveryTimeout()
+            return
+        }
+        val source = decision.source
+        val event = if (source == SignalRecoveryTracker.Source.PEER) {
+            "peer_signal_timeout"
+        } else {
+            "signaling_timeout"
+        }
+        val reason = if (source == SignalRecoveryTracker.Source.PEER) {
+            "peer_signal_timeout"
+        } else {
+            "local_signal_timeout"
+        }
+        com.soul2soul.app.util.SelfCheck.reportEvent(
+            this,
+            "sharer",
+            event,
+            webRtc?.iceStateName ?: "-",
+            "graceMs=${SignalRecoveryTracker.DEFAULT_GRACE_MS}",
+        )
+        webRtc?.noteEnd(reason)
+        stopSession(sendBye = false, notifyStatus = true)
+    }
+
     override fun onEnded(reason: String) {
-        watchdog.post { stopSession(sendBye = reason != "bye") }
+        watchdog.post {
+            if (stopping) return@post
+            val normalized = reason
+                .replace(Regex("[^A-Za-z0-9_]+"), "_")
+                .trim('_')
+                .ifEmpty { "unknown" }
+                .take(32)
+            com.soul2soul.app.util.SelfCheck.reportEvent(
+                this,
+                "sharer",
+                "media_ended",
+                webRtc?.iceStateName ?: "-",
+                "reason=$normalized",
+            )
+            stopSession(sendBye = reason != "bye", notifyStatus = true)
+        }
     }
 
     override fun onRtt(ms: Long) {}
@@ -656,11 +816,12 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
 
     // ---------- 会话控制 ----------
 
-    private fun stopSession(sendBye: Boolean) {
+    private fun stopSession(sendBye: Boolean, notifyStatus: Boolean = false) {
         if (stopping) return
         stopping = true
         signalJob?.cancel()
         signalJob = null
+        watchdog.removeCallbacks(signalRecoveryTimeout)
         // Drop queued data-channel/UI work from this call before a rapid redial can reuse the service.
         watchdog.removeCallbacksAndMessages(null)
         live = false
@@ -674,9 +835,19 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
         audWanted = false // 内录开关是会话级意图，默认关——上一通"让她听到视频声"不能带进这一通
         peerPlaybackFailed = false
         consent.resetForNewSession() // 会话结束立即收回操控授权
+        signalRecovery.reset()
         // 静音是发送轨属性，随 AudioSource 销毁而复位，无需再全局恢复系统麦克风
         com.soul2soul.app.util.WifiKeeper.release()
         if (sendBye) Presence.client.send("bye")
+        if (notifyStatus) {
+            SessionStatusNotifier.ended(
+                applicationContext,
+                "sharer",
+                getString(R.string.peer_lost),
+            )
+        } else {
+            SessionStatusNotifier.clear(applicationContext)
+        }
         // 没有任何上游终止原因时才落到 local_stop：用户点停止/连接失败会先 noteEnd
         if (sendBye) webRtc?.noteEnd("local_stop")
         unbindStrokeAck() // 拆在 close 之前：ack 出口绝不能指向一个已关闭的 client
@@ -721,7 +892,16 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
                 videoPaused = videoPaused,
             ),
         )
-        return if (peerPlaybackFailed) "$base · ${getString(R.string.aud_remote_playback_failed)}" else base
+        val signal = when {
+            !signalRecovery.peerOnline -> getString(R.string.peer_signal_recovering)
+            !signalRecovery.localOnline -> getString(R.string.signal_recovering)
+            else -> null
+        }
+        return listOfNotNull(
+            base,
+            signal,
+            if (peerPlaybackFailed) getString(R.string.aud_remote_playback_failed) else null,
+        ).joinToString(" · ")
     }
 
     /** Android 14 会校验 FGS 类型对应的运行时权限；无麦克风权限时只声明屏幕采集。 */

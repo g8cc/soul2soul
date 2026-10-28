@@ -78,6 +78,9 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
     private var live = false
     /** 共享端报过 videooff 且还没报 videoon：解锁不许把横幅收起来（画面仍然停着） */
     private var remoteVideoPaused = false
+    private var remoteScreenOff = false
+    private val signalRecovery = SignalRecoveryTracker()
+    private val signalRecoveryTimeout = Runnable { onSignalRecoveryTimeout() }
     /**
      * 最近一条 `k=aud` 的两格现值（FR-16）。**null = 从没收到过**，这与"收到过 on=0"是两件事：
      * 后者能判"TA 没开"，前者什么都不能判（旧共享端根本不会发这条）。
@@ -354,12 +357,16 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
         if (intent?.getBooleanExtra(EXTRA_INCOMING, false) == true && !accepted) {
             sessionClaimed = true
             callInvalidated = false
+            mainHandler.removeCallbacks(signalRecoveryTimeout)
+            signalRecovery.reset()
             peerAudOn = null
             peerAudState = null
             peerPlaybackCapable = false
             playbackFailed = false
             audioChannelOpen = false
             peerAudioEnabled = false
+            remoteVideoPaused = false
+            remoteScreenOff = false
             Presence.sessionBusy = true
             showIncoming()
             if (intent.getBooleanExtra(EXTRA_AUTO_ACCEPT, false)) ensureMicThenAccept()
@@ -639,6 +646,7 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
         accepted = true
         sessionClaimed = true
         Presence.sessionBusy = true
+        SessionStatusNotifier.clear(applicationContext)
         stopRinging()
         com.soul2soul.app.util.WifiKeeper.acquire(this) // 观看端同样持 WiFi 高性能锁
         // 先稳定通信模式/扬声器路由，再创建 WebRTC 音频模块，避免连通瞬间切路由爆音。
@@ -668,30 +676,42 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
     }
 
     private fun handleSignal(json: JSONObject) {
-        when (val action = SignalRouter.routeSignal(json.optString("type"), accepted, client != null)) {
+        val type = json.optString("type")
+        when (val action = SignalRouter.routeSignal(
+            type = type,
+            accepted = accepted,
+            clientReady = client != null,
+            connected = if (type == "local.connState" && json.has("connected")) {
+                json.optBoolean("connected")
+            } else null,
+            peerOnline = if (type == "registered" && json.has("peerOnline")) {
+                json.optBoolean("peerOnline")
+            } else null,
+        )) {
             SignalRouter.SignalAction.None -> Unit
             SignalRouter.SignalAction.BufferMedia -> pendingSignals += json
             SignalRouter.SignalAction.DispatchMedia -> dispatchToClient(json)
+            is SignalRouter.SignalAction.SignalLost -> handleSignalLost(action.source)
+            is SignalRouter.SignalAction.SignalRestored -> handleSignalRestored(action.source)
             is SignalRouter.SignalAction.PeerEnded -> {
                 endedRemotely = true
-                val gone = action.noticeRes == R.string.peer_lost
-                // 与共享端同一条判据：先记 ICE 实况再拆页面。peer.gone 只是对端**信令**掉线
-                // （HyperOS 冻结后台套接字 → 服务器 pong 超时广播），ICE=CONNECTED 的 peer_signal
-                // 就等于「会话被信令假死拆掉」，是"米15 发起后几秒即断"的头号候选。
-                viewerEvent("peer_signal", if (gone) "sig=gone" else "sig=bye")
+                mainHandler.removeCallbacks(signalRecoveryTimeout)
+                signalRecovery.reset()
+                viewerEvent("peer_signal", "sig=bye")
                 finishWithCleanup(
                     sendBye = false,
                     notice = action.noticeRes,
-                    endReason = if (gone) "peer_gone" else "remote_bye",
+                    endReason = "remote_bye",
+                    notifyStatus = true,
                 )
             }
-            SignalRouter.SignalAction.CallerCanceledBeforeAccept -> {
+            is SignalRouter.SignalAction.CallerCanceledBeforeAccept -> {
                 callInvalidated = true
                 stopRinging()
                 android.widget.Toast.makeText(this, R.string.peer_canceled, android.widget.Toast.LENGTH_SHORT).show()
                 finish()
             }
-            SignalRouter.SignalAction.CanceledAfterAccept -> {
+            is SignalRouter.SignalAction.CanceledAfterAccept -> {
                 // 主叫在授权阶段反悔: 别让人对着"连接中"数 30 秒
                 endedRemotely = true
                 android.widget.Toast.makeText(this, R.string.peer_canceled, android.widget.Toast.LENGTH_SHORT).show()
@@ -699,6 +719,138 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
                 // 就会把"授权阶段反悔"读成"连上几秒被挂断"——正是我们要查的那一格的假阳性。
                 finishWithCleanup(sendBye = false, endReason = "call_canceled")
             }
+        }
+    }
+
+    private fun handleSignalLost(source: SignalRecoveryTracker.Source) {
+        if (!accepted || callInvalidated) return
+        val now = android.os.SystemClock.elapsedRealtime()
+        val ice = client?.iceStateName ?: "-"
+        val decision = if (source == SignalRecoveryTracker.Source.PEER) {
+            signalRecovery.onPeerSignal(false, now, ice)
+        } else {
+            signalRecovery.onLocalSignal(false, now, ice)
+        }
+        when (decision) {
+            is SignalRecoveryTracker.Decision.Started -> {
+                viewerEvent(
+                    if (source == SignalRecoveryTracker.Source.PEER) "peer_signal" else "signaling_state",
+                    if (source == SignalRecoveryTracker.Source.PEER) "sig=gone" else "state=down",
+                )
+                refreshConnectionBanner()
+                SessionStatusNotifier.recovering(
+                    applicationContext,
+                    "viewer",
+                    getString(
+                        if (source == SignalRecoveryTracker.Source.PEER) {
+                            R.string.peer_signal_recovering
+                        } else {
+                            R.string.signal_recovering
+                        },
+                    ),
+                )
+                scheduleSignalRecoveryTimeout()
+            }
+            is SignalRecoveryTracker.Decision.EndNow -> {
+                viewerEvent(
+                    if (source == SignalRecoveryTracker.Source.PEER) "peer_signal" else "signaling_state",
+                    "sig=gone ice=$ice",
+                )
+                val reason = if (source == SignalRecoveryTracker.Source.PEER) {
+                    "peer_signal_media_failed"
+                } else {
+                    "local_signal_media_failed"
+                }
+                finishWithCleanup(
+                    sendBye = false,
+                    notice = R.string.peer_lost,
+                    endReason = reason,
+                    notifyStatus = true,
+                )
+            }
+            else -> refreshConnectionBanner()
+        }
+        if (signalRecovery.isRecovering) scheduleSignalRecoveryTimeout()
+    }
+
+    private fun handleSignalRestored(source: SignalRecoveryTracker.Source) {
+        if (!accepted || callInvalidated) return
+        val now = android.os.SystemClock.elapsedRealtime()
+        val ice = client?.iceStateName ?: "-"
+        val decision = if (source == SignalRecoveryTracker.Source.PEER) {
+            signalRecovery.onPeerSignal(true, now, ice)
+        } else {
+            signalRecovery.onLocalSignal(true, now, ice)
+        }
+        if (decision is SignalRecoveryTracker.Decision.Restored) {
+            viewerEvent(
+                if (source == SignalRecoveryTracker.Source.PEER) "peer_signal_recovered" else "signaling_recovered",
+                if (source == SignalRecoveryTracker.Source.PEER) "sig=online" else "state=up",
+            )
+        }
+        if (!signalRecovery.isRecovering) {
+            mainHandler.removeCallbacks(signalRecoveryTimeout)
+            SessionStatusNotifier.clear(applicationContext)
+        }
+        refreshConnectionBanner()
+    }
+
+    private fun scheduleSignalRecoveryTimeout() {
+        val deadline = signalRecovery.deadlineMs() ?: return
+        mainHandler.removeCallbacks(signalRecoveryTimeout)
+        mainHandler.postDelayed(
+            signalRecoveryTimeout,
+            (deadline - android.os.SystemClock.elapsedRealtime()).coerceAtLeast(1L),
+        )
+    }
+
+    private fun onSignalRecoveryTimeout() {
+        val decision = signalRecovery.onTimeout(android.os.SystemClock.elapsedRealtime())
+        if (decision !is SignalRecoveryTracker.Decision.TimedOut) {
+            if (signalRecovery.isRecovering) scheduleSignalRecoveryTimeout()
+            return
+        }
+        val source = decision.source
+        viewerEvent(
+            if (source == SignalRecoveryTracker.Source.PEER) {
+                "peer_signal_timeout"
+            } else {
+                "signaling_timeout"
+            },
+            "graceMs=${SignalRecoveryTracker.DEFAULT_GRACE_MS}",
+        )
+        endedRemotely = true
+        finishWithCleanup(
+            sendBye = false,
+            notice = R.string.peer_lost,
+            endReason = if (source == SignalRecoveryTracker.Source.PEER) {
+                "peer_signal_timeout"
+            } else {
+                "local_signal_timeout"
+            },
+            notifyStatus = true,
+        )
+    }
+
+    private fun refreshConnectionBanner() {
+        if (!live) return
+        if (signalRecovery.isRecovering) {
+            tvState.visibility = View.VISIBLE
+            tvState.setText(
+                if (!signalRecovery.peerOnline) R.string.peer_signal_recovering else R.string.signal_recovering,
+            )
+            return
+        }
+        when {
+            remoteVideoPaused -> {
+                tvState.visibility = View.VISIBLE
+                tvState.setText(R.string.peer_video_off)
+            }
+            remoteScreenOff -> {
+                tvState.visibility = View.VISIBLE
+                tvState.setText(R.string.peer_screen_off)
+            }
+            else -> tvState.visibility = View.GONE
         }
     }
 
@@ -772,6 +924,13 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
     override fun onDataMessage(json: JSONObject) {
         runOnUiThread {
             if (isFinishing || isDestroyed || callInvalidated) return@runOnUiThread
+            if (json.optString("k") == "screenon" && remoteScreenOff) {
+                // 解锁事件即使画面仍因 videooff 暂停，也要清掉"锁屏"这一层原因；
+                // refreshConnectionBanner 会继续保留更准确的 videooff 横幅。
+                remoteScreenOff = false
+                client?.setRemoteScreenPaused(remoteVideoPaused)
+                refreshConnectionBanner()
+            }
             // 判据（controlMode/live）与 UI 更新同在主线程：与提取前的读取时序一致
             when (val action = SignalRouter.routeData(
                 json.optString("k"), overlay.controlMode, live, json.optString("reason"),
@@ -790,8 +949,8 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
                     }
                 }
                 SignalRouter.DataAction.PeerScreenOff -> {
-                    tvState.visibility = View.VISIBLE
-                    tvState.setText(R.string.peer_screen_off)
+                    remoteScreenOff = true
+                    refreshConnectionBanner()
                     // 锁屏期间零帧是设计行为（画面冻在最后一帧·语音继续），
                     // 不同步这个位每次锁屏都会误报一次 video_stall
                     client?.setRemoteScreenPaused(true)
@@ -800,17 +959,19 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
                     // 0.2.64 起共享端锁屏不再挂断，而是"画面停、通话续"：
                     // 必须和"对方挂了"区分开，否则观看端只会以为连接坏了
                     remoteVideoPaused = true
-                    tvState.visibility = View.VISIBLE
-                    tvState.setText(R.string.peer_video_off)
+                    refreshConnectionBanner()
                     client?.setRemoteScreenPaused(true)
                 }
                 SignalRouter.DataAction.HideBanner -> {
                     // 对方锁屏/收回授权：手势被静默丢弃时横幅必须说明原因，
                     // 否则操控端只会以为"功能坏了"（历史工单：退出后不能操控=这个）
-                    tvState.visibility = View.GONE
-                    if (json.optString("k") == "videoon") remoteVideoPaused = false
+                    when (json.optString("k")) {
+                        "screenon" -> remoteScreenOff = false
+                        "videoon" -> remoteVideoPaused = false
+                    }
                     // 横幅收起与暂停复位同一条路径（screenon 唯一入口），不给漏配机会
-                    client?.setRemoteScreenPaused(false)
+                    client?.setRemoteScreenPaused(remoteVideoPaused || remoteScreenOff)
+                    refreshConnectionBanner()
                 }
                 SignalRouter.DataAction.RevokedBanner -> {
                     // 对方收回授权=本地操控已成死模式：必须先同步退出，再报原因。
@@ -944,11 +1105,11 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
             if (isFinishing || isDestroyed || callInvalidated) return@runOnUiThread
             acceptTimeout?.let { mainHandler.removeCallbacks(it) }
             acceptTimeout = null
-            tvState.visibility = View.GONE
             setControlsVisible(true)
             btnBall.visibility = View.VISIBLE
             overlay.visibility = View.VISIBLE // 接听并连通前不显示/不响应画笔层
             live = true
+            refreshConnectionBanner()
             // 「对面版本太旧」这一格只能在这里出：旧共享端既不建 aud 通道也不发 k=aud，
             // 这条判断没有消息会再叫醒它，连通那一刻是唯一时机
             refreshAudBanner()
@@ -979,8 +1140,19 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
         runOnUiThread {
             if (isFinishing || isDestroyed || callInvalidated) return@runOnUiThread
             // 这是本端 PeerConnection 报告的失败/超时，需要通知共享端立即收口；
-            // 远端主动挂断仍由 bye/peer.gone 信令分支处理。
-            finishWithCleanup(sendBye = true, notice = R.string.peer_lost)
+            // 远端明确挂断由 bye 分支处理；peer.gone 只进入信令恢复状态机。
+            val normalized = reason
+                .replace(Regex("[^A-Za-z0-9_]+"), "_")
+                .trim('_')
+                .ifEmpty { "unknown" }
+                .take(32)
+            viewerEvent("media_ended", "reason=$normalized")
+            finishWithCleanup(
+                sendBye = true,
+                notice = R.string.peer_lost,
+                endReason = "media_$normalized",
+                notifyStatus = true,
+            )
         }
     }
 
@@ -1015,13 +1187,29 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
 
     // ---------- 生命周期 ----------
 
-    private fun finishWithCleanup(sendBye: Boolean, notice: Int? = null, endReason: String? = null) {
+    private fun finishWithCleanup(
+        sendBye: Boolean,
+        notice: Int? = null,
+        endReason: String? = null,
+        notifyStatus: Boolean = false,
+    ) {
         callInvalidated = true
+        mainHandler.removeCallbacks(signalRecoveryTimeout)
+        signalRecovery.reset()
         // 先停内录再收尾：`aud_stopped` 要在这条信令通道还开着的时候发出去，
         // 而 finish() 之后跟着的就是 onDestroy→client.close()（帧还躺在 socket 里会被一起关掉）
         audPlayer.stop(DeviceAudioPlayer.Exit.SESSION_ENDED)
         if (notice != null) {
             android.widget.Toast.makeText(this, notice, android.widget.Toast.LENGTH_SHORT).show()
+        }
+        if (notifyStatus) {
+            SessionStatusNotifier.ended(
+                applicationContext,
+                "viewer",
+                getString(notice ?: R.string.peer_lost),
+            )
+        } else {
+            SessionStatusNotifier.clear(applicationContext)
         }
         if (sendBye && !byeSent) {
             byeSent = true
@@ -1104,7 +1292,9 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
     }
 
     override fun onDestroy() {
+        val unexpectedTermination = accepted && !callInvalidated && !endedRemotely && !byeSent
         callInvalidated = true
+        mainHandler.removeCallbacks(signalRecoveryTimeout)
         if (sessionClaimed) Presence.sessionBusy = false
         stopRinging()
         com.soul2soul.app.util.WifiKeeper.release()
@@ -1114,7 +1304,12 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
         mainHandler.removeCallbacks(restoreCtlBanner)
         androidx.core.app.NotificationManagerCompat.from(this).cancel(Notif.ID_CALL)
         // 用户划掉小窗/最近任务时 isFinishing=true，这里也要发 bye，否则对端傻等掉线兜底
-        if (accepted && !endedRemotely && !byeSent) {
+        if (unexpectedTermination) {
+            SessionStatusNotifier.ended(
+                applicationContext,
+                "viewer",
+                getString(R.string.peer_lost),
+            )
             byeSent = true
             Presence.client.send("bye")
         }

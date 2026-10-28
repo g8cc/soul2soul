@@ -9,6 +9,7 @@ import android.media.RingtoneManager
 object Notif {
     const val CH_PRESENCE = "presence"
     const val CH_SESSION = "session"
+    const val CH_SESSION_STATUS = "session_status"
     const val CH_CALL = "call"
 
     /**
@@ -29,6 +30,8 @@ object Notif {
     const val ID_CALL = 3
     const val ID_MSG = 4
     const val ID_RECALL = 5
+    const val ID_SESSION_STATUS = 6
+    const val ID_SESSION_STATUS_ENDED = 7
 
     /** 26 以下没有渠道概念，声音只能挂在通知本身上（Mi5/API 24 走这条） */
     fun defaultSoundUri(): android.net.Uri? =
@@ -43,6 +46,21 @@ object Notif {
         nm.createNotificationChannel(
             NotificationChannel(CH_SESSION, "屏幕共享", NotificationManager.IMPORTANCE_LOW)
         )
+        val sessionStatus = NotificationChannel(
+            CH_SESSION_STATUS,
+            "通话状态",
+            NotificationManager.IMPORTANCE_DEFAULT,
+        )
+        defaultSoundUri()?.let { uri ->
+            sessionStatus.setSound(
+                uri,
+                AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_NOTIFICATION)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                    .build()
+            )
+        }
+        nm.createNotificationChannel(sessionStatus)
         nm.createNotificationChannel(
             NotificationChannel(CH_CALL, "呼叫", NotificationManager.IMPORTANCE_HIGH)
         )

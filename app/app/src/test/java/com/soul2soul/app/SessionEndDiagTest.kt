@@ -111,7 +111,7 @@ class SessionEndDiagTest {
     @Test
     fun `viewer hangup names its end reason`() {
         assertTrue("finishWithCleanup 的兜底必须按 sendBye 区分 user_hangup / remote_bye",
-            window(session(), "private fun finishWithCleanup(", 16)
+            functionBody(session(), "private fun finishWithCleanup(")
                 .any { it.contains("endReason ?: if (sendBye) \"user_hangup\" else \"remote_bye\"") })
     }
 
@@ -254,12 +254,53 @@ class SessionEndDiagTest {
     // stopSession(sendBye=false)，那条 local_stop 守卫进不去 ⇒ reason 退化成 local_close。
     @Test
     fun `sharer side remote hangup claims its own end reason`() {
-        val branch = window(share(), "\"bye\", \"peer.gone\" ->", 16)
+        val branch = window(share(), "\"bye\" ->", 16)
         val claim = branch.indexOfFirst { it.contains("noteEnd(") }
-        val stop = branch.indexOfFirst { it.contains("stopSession(sendBye = false)") }
+        val stop = branch.indexOfFirst { it.contains("stopSession(sendBye = false") }
         assertTrue("被对方挂断必须先占位（close() 会当场读 endReason 上报，之后写就来不及）", claim in 0 until stop)
-        assertTrue("bye 与 peer.gone 是两种死法，不许合成一个名字",
-            branch.any { it.contains("\"peer_gone\"") } && branch.any { it.contains("\"remote_bye\"") })
+        assertTrue("bye 必须使用 remote_bye", branch.any { it.contains("\"remote_bye\"") })
+        assertTrue("peer.gone 必须进入恢复状态机，不得复用 bye 的收尾分支",
+            share().any { it.contains("\"peer.gone\" -> handleSignalLost") })
+    }
+
+    @Test
+    fun `terminal ice loss is not mislabeled as signal recovery timeout`() {
+        for ((role, lines, anchor) in listOf(
+            Triple("共享端", share(), "private fun handleSignalState("),
+            Triple("观看端", session(), "private fun handleSignalLost("),
+        )) {
+            val body = functionBody(lines, anchor)
+            val terminal = branchBlock(body, "is SignalRecoveryTracker.Decision.EndNow -> {")
+            assertTrue(
+                "$role ICE 终态必须使用即时信令事件",
+                terminal.any { it.contains("\"peer_signal\"") } &&
+                    terminal.any { it.contains("\"signaling_state\"") },
+            )
+            assertTrue(
+                "$role ICE 终态不得冒用恢复超时事件或原因",
+                terminal.none { it.contains("peer_signal_timeout") || it.contains("signaling_timeout") },
+            )
+        }
+    }
+
+    @Test
+    fun `signal recovery timeout keeps its distinct timeout event and reason`() {
+        for ((role, lines) in listOf(
+            "共享端" to share(),
+            "观看端" to session(),
+        )) {
+            val body = functionBody(lines, "private fun onSignalRecoveryTimeout()")
+            assertTrue(
+                "$role 恢复窗口超时必须分别记录 peer/local timeout 事件",
+                body.any { it.contains("\"peer_signal_timeout\"") } &&
+                    body.any { it.contains("\"signaling_timeout\"") },
+            )
+            assertTrue(
+                "$role 恢复窗口超时必须把对应 timeout 原因交给收尾",
+                body.any { it.contains("\"peer_signal_timeout\"") } &&
+                    body.any { it.contains("\"local_signal_timeout\"") },
+            )
+        }
     }
 
     // D14：观看端对称的那半——名字不能从 sendBye 布尔值反推。三个 sendBye=false 的入口里
@@ -268,14 +309,14 @@ class SessionEndDiagTest {
     @Test
     fun `viewer side end reason is named by the caller not by the boolean`() {
         val src = code(session())
+        val cleanup = functionBody(session(), "private fun finishWithCleanup(")
         assertTrue("finishWithCleanup 必须接受 endReason（否则远程结束只能按布尔值取名）",
-            src.any { it.contains("fun finishWithCleanup(") && it.contains("endReason") })
+            cleanup.any { it.contains("endReason") })
         assertTrue("noteEnd 只能把布尔值当兜底，不能当唯一来源",
             src.any { it.contains("noteEnd(endReason ?:") })
         val peerEnded = window(session(), "is SignalRouter.SignalAction.PeerEnded -> {", 16)
-        assertTrue("PeerEnded 必须显式交出名分，且 bye 与 peer.gone 分开",
+        assertTrue("PeerEnded 必须显式交出 remote_bye 名分",
             peerEnded.any { it.contains("endReason =") } &&
-                peerEnded.any { it.contains("\"peer_gone\"") } &&
                 peerEnded.any { it.contains("\"remote_bye\"") })
         assertTrue("主叫在授权阶段反悔不许伪装成 remote_bye（那一通从没连通过）",
             window(session(), "SignalAction.CanceledAfterAccept -> {", 8)

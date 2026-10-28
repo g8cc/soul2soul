@@ -51,8 +51,9 @@ class SignalRouterTest {
         assertTrue(bye is SignalRouter.SignalAction.PeerEnded)
         assertEquals(R.string.peer_ended, (bye as SignalRouter.SignalAction.PeerEnded).noticeRes)
         val gone = SignalRouter.routeSignal("peer.gone", accepted = true, clientReady = true)
-        assertTrue(gone is SignalRouter.SignalAction.PeerEnded)
-        assertEquals(R.string.peer_lost, (gone as SignalRouter.SignalAction.PeerEnded).noticeRes)
+        assertTrue("信令短断不能直接结束媒体会话", gone !is SignalRouter.SignalAction.PeerEnded)
+        val online = SignalRouter.routeSignal("peer.online", accepted = true, clientReady = true)
+        assertTrue("对端恢复必须进入会话恢复路径", online !is SignalRouter.SignalAction.None)
     }
 
     @Test
@@ -76,6 +77,18 @@ class SignalRouterTest {
         assertEquals(
             SignalRouter.SignalAction.None,
             SignalRouter.routeSignal("", accepted = false, clientReady = false),
+        )
+    }
+
+    @Test
+    fun `缺少连接状态字段的事件不能被猜成掉线`() {
+        assertEquals(
+            SignalRouter.SignalAction.None,
+            SignalRouter.routeSignal("local.connState", accepted = true, clientReady = true),
+        )
+        assertEquals(
+            SignalRouter.SignalAction.None,
+            SignalRouter.routeSignal("registered", accepted = true, clientReady = true),
         )
     }
 

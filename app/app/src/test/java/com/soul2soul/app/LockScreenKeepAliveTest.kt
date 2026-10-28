@@ -78,9 +78,9 @@ class LockScreenKeepAliveTest {
         assertTrue("screenoff 到达时必须置位",
             window(session(), "SignalRouter.DataAction.PeerScreenOff -> {", 8)
                 .any { it.contains("setRemoteScreenPaused(true)") })
-        assertTrue("screenon（HideBanner）到达时必须复位——与横幅收起同一条路径",
-            window(session(), "SignalRouter.DataAction.HideBanner -> {", 8)
-                .any { it.contains("setRemoteScreenPaused(false)") })
+        assertTrue("screenon（HideBanner）到达时必须按当前暂停原因复位",
+            window(session(), "SignalRouter.DataAction.HideBanner -> {", 12)
+                .any { it.contains("setRemoteScreenPaused(remoteVideoPaused || remoteScreenOff)") })
     }
 
     // L5：观看端**自己**锁屏时 surface 被销毁，解码必然停帧——这不是对端断流。

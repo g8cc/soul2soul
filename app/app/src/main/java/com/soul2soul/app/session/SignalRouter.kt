@@ -15,15 +15,34 @@ object SignalRouter {
         object None : SignalAction()
         object BufferMedia : SignalAction()               // client 未就绪：缓存 offer/ice
         object DispatchMedia : SignalAction()             // 转发给 WebRtcClient
-        data class PeerEnded(val noticeRes: Int) : SignalAction() // 已接听：endedRemotely + finish(sendBye=false)
+        data class PeerEnded(val noticeRes: Int) : SignalAction() // bye：已接听后对端明确结束
+        data class SignalLost(val source: SignalRecoveryTracker.Source) : SignalAction()
+        data class SignalRestored(val source: SignalRecoveryTracker.Source) : SignalAction()
         object CallerCanceledBeforeAccept : SignalAction() // 未接听就取消：停铃 + 提示 + finish（不发 bye）
         object CanceledAfterAccept : SignalAction()        // 授权阶段主叫反悔：别让对方对着"连接中"数 30 秒
     }
 
-    fun routeSignal(type: String, accepted: Boolean, clientReady: Boolean): SignalAction = when (type) {
+    fun routeSignal(
+        type: String,
+        accepted: Boolean,
+        clientReady: Boolean,
+        connected: Boolean? = null,
+        peerOnline: Boolean? = null,
+    ): SignalAction = when (type) {
         "sdp", "ice" -> if (clientReady) SignalAction.DispatchMedia else SignalAction.BufferMedia
         "bye" -> if (accepted) SignalAction.PeerEnded(R.string.peer_ended) else SignalAction.None
-        "peer.gone" -> if (accepted) SignalAction.PeerEnded(R.string.peer_lost) else SignalAction.None
+        "peer.gone" -> if (accepted) SignalAction.SignalLost(SignalRecoveryTracker.Source.PEER) else SignalAction.None
+        "peer.online" -> if (accepted) SignalAction.SignalRestored(SignalRecoveryTracker.Source.PEER) else SignalAction.None
+        "local.connState" -> if (!accepted) SignalAction.None else when (connected) {
+            true -> SignalAction.SignalRestored(SignalRecoveryTracker.Source.LOCAL)
+            false -> SignalAction.SignalLost(SignalRecoveryTracker.Source.LOCAL)
+            null -> SignalAction.None
+        }
+        "registered" -> if (!accepted) SignalAction.None else when (peerOnline) {
+            true -> SignalAction.SignalRestored(SignalRecoveryTracker.Source.PEER)
+            false -> SignalAction.SignalLost(SignalRecoveryTracker.Source.PEER)
+            null -> SignalAction.None
+        }
         "call.canceled" -> if (accepted) SignalAction.CanceledAfterAccept else SignalAction.CallerCanceledBeforeAccept
         else -> SignalAction.None
     }

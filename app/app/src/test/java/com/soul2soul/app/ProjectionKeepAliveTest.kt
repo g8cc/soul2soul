@@ -308,7 +308,7 @@ class ProjectionKeepAliveTest {
         // 恢复侧：只有 videoon 能清这个位（screenon 不算画面回来了）
         assertTrue(
             "清位必须钉在 videoon 上（screenon 不算画面回来了）",
-            sessionAct().any { it.contains("if (json.optString(\"k\") == \"videoon\") remoteVideoPaused = false") },
+            sessionAct().any { it.contains("\"videoon\" -> remoteVideoPaused = false") },
         )
     }
 }

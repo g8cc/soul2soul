@@ -3,12 +3,15 @@
 从 `AGENTS.md` 搬出（10-23 瘦身：AGENTS 只留"每次都要守"的规则，读数口径按 needing 加载）。
 **改任何埋点、或要从 `diag.*` 下结论之前先读这里。** 锚点行号会腐烂，本节全部按"事件名 + 版本"定位。
 
-- **`diag.session reason` 的版本分界是 0.2.61**（10-19 抓到四处"同一个字符串掩盖两种死法"，全部已在 repo 修掉）：
+- **`diag.session reason` 的版本分界分三段**（10-19 抓到四处"同一个字符串掩盖两种死法"，全部已在 repo 修掉）：
   ≤0.2.60 里 `local_stop` 同时涵盖"她按了停止"与"HyperOS 撤销录屏授权"（`MediaProjection.Callback.onStop()`
   不占 first-wins 槽，被收尾那条 `local_stop` 覆盖），共享端被对方挂断则只剩 `local_close`。
-  0.2.61 起可直接读：`projection_stopped`＝系统撤的授权、`remote_bye`＝她挂的、`peer_gone`＝只是信令掉线
-  （媒体可能本来就好）、`call_canceled`＝主叫在授权阶段反悔（`setupMs=-1`，从没连过，别读成"连上几秒被挂断"），
-  另有 `diag.event stop_tap detail=src_main_page|src_notify` 回答"她点的是哪一个停止入口"。
+  0.2.61–0.2.68 可直接读：`projection_stopped`＝系统撤的授权、`remote_bye`＝她挂的、`peer_gone`＝信令掉线并被旧实现当作结束；
+  `call_canceled`＝主叫在授权阶段反悔（`setupMs=-1`，从没连过，别读成"连上几秒被挂断"），另有
+  `diag.event stop_tap detail=src_main_page|src_notify` 回答"她点的是哪一个停止入口"。
+  **0.2.69 起不要再把 `peer.gone` 读成终止原因**：它只启动 20 秒信令恢复窗口；恢复成功记
+  `peer_signal_recovered`/`signaling_recovered`，ICE 终态记 `peer_signal_media_failed`/`local_signal_media_failed`，
+  恢复超时才记 `peer_signal_timeout`/`local_signal_timeout`。
   现网补救读法（≤0.2.60 唯一可用的一列）＝同一行 `proj`：`stopped`⇒被撤销、`live`⇒她按的；`proj=_` 的会话永久无法判。
 - **`reason=projection_stopped` 到 0.2.63 为止；0.2.64 起它根本不再产生**：系统撤销录屏授权（她锁屏省电、或在系统隐私提示里点"停止录制"）
   从这一版起**不是会话终止**，而是"画面停·语音与信令续·一键重开"。判据换了一条：

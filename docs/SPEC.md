@@ -1,7 +1,7 @@
 # Soul2Soul 技术规格（SPEC）
 
 版本 v0.1 ｜ 2026-09-28 ｜ 关联: `PRD.md`（需求）、`DESIGN.md`（架构与选型记录）
-本文档是**实现的合同**：协议、状态机、坐标公式、时序、验收映射都以此为准。
+本文档保留 v0.1 设计稿；线上协议与会话生命周期以 [`docs/PROTOCOL.md`](PROTOCOL.md) 为唯一权威，本文的早期状态机只作历史参考。
 
 ---
 
@@ -64,7 +64,7 @@ soul2soul/
 | `sdp` | 双向 | sdp:{type,sdp} | 原样转发 |
 | `ice` | 双向 | candidate:{candidate,sdpMid,sdpMLineIndex} | 原样转发 |
 | `bye` | 双向 | — | 挂断 |
-| `peer.gone` | S→C | — | 对方连接断开（服务器代发） |
+| `peer.gone` | S→C | — | 对端信令暂时断开（服务器代发，客户端进入恢复窗口，不等于媒体结束） |
 | `cancel` / `call.canceled` | C→S / S→C(对方) | — | 主叫在对方接听前撤呼 |
 | `app.diag` | C→S | role/model/os/sdk/app/notif/overlay/acc/mic/battery… | 会话能力自检矩阵，服务器只落 `[diag.selfcheck]` 日志、不转发 |
 | `app.version` | C→S | localCode/localName/remoteCode/remoteName/hasUpdate | 更新判定自检，服务器只落 `[diag.version]` 日志、不转发 |
@@ -94,7 +94,7 @@ TURN 凭证 = `HMAC-SHA1(secret, "<unix秒过期>")`，1 小时时限（coturn `
    │            ICE 连通 → DataChannel 开 → Live              │
 ```
 
-挂断：任一端 `bye` → 对方收到后释放全部资源；服务器检测到连接断开则代发 `peer.gone`。
+挂断：任一端 `bye` → 对方收到后立即释放全部资源；服务器检测到信令连接断开则代发 `peer.gone`，客户端先进入恢复窗口。
 
 ## 3. 标注协议（DataChannel "anno"，reliable + ordered）
 
@@ -117,10 +117,10 @@ TURN 凭证 = `HMAC-SHA1(secret, "<unix秒过期>")`，1 小时时限（coturn `
 Idle ──invite──► Calling ──accepted──► Preparing(授权+FGS) ──pc建立──► Connecting
  ▲                 │30s超时/offline        │授权拒绝/异常                   │ICE连通
  │                 ▼                       ▼                              ▼
- └── bye/gone/失败 ◄──────────────────────────────► Ended ◄──────────── Live
+ └── bye/失败/恢复超时 ◄─────────────────────────► Ended ◄──────────── Live
 ```
 
-- `Live` 中 `peer.gone` / `bye` / ICE `FAILED` → 直接 `Ended`。
+- `Live` 中 `bye` 立即结束；`peer.gone` 进入信令恢复窗口，只有媒体终态或恢复超时才进入 `Ended`。
 - 断线宽限：ICE `DISCONNECTED` 容忍 10s（libwebrtc 自带重连窗口），超时视为失败。
 - 共享端锁屏：VirtualDisplay 停止出帧 → 观看端收 `screenoff` 显示"画面暂停·语音继续"，会话存续；解锁补发 `screenon` 恢复（FR-8，v0.2.56 起**不再有自动结束定时器**）。
 

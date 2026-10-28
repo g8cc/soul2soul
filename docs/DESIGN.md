@@ -69,7 +69,7 @@
 | C→S | `accept` / `decline` | 接听方回应 → 对方收到 `accepted`{iceServers} / `declined` |
 | 双向 | `sdp` {sdp:{type,sdp}} | 原样转发 |
 | 双向 | `ice` {candidate:{...}} | 原样转发 |
-| 双向 | `bye` | 挂断 → 对方收到后清理；对端掉线服务器代发 `peer.gone` |
+| 双向 | `bye` | 明确挂断 → 对方收到后立即清理；对端信令暂时掉线时服务器代发 `peer.gone`，客户端先进入恢复窗口 |
 
 `iceServers` 由服务器在 `incoming`/`accepted` 里下发：`[{urls:[...], username, credential}]`，
 TURN 凭证为 HMAC-SHA1(静态密钥) 时限凭证（过期时间 = now+1h），泄露也只在一小时内有效。
@@ -110,7 +110,7 @@ TURN 凭证为 HMAC-SHA1(静态密钥) 时限凭证（过期时间 = now+1h）�
 | 观看端锁屏→解锁 | — | 锁屏不触发进小窗（v0.2.56 防御）；surface 生命周期全程 `diag.event` 自报，黑屏可判 |
 | 切后台 | 继续共享（前台服务活着） | 继续观看（可开小窗/画中画，v1.1） |
 | Wi-Fi↔4G | ICE 自动切换/重连，失败 10s 结束 | 同左 |
-| 进程被杀 | 对端收 `peer.gone` 自动结束 | 同左 |
+| 进程被杀 | 对端先收 `peer.gone` 并进入信令恢复窗口；媒体终态或恢复超时后结束 | 同左 |
 
 ## 六、安全与隐私
 - 媒体走 DTLS-SRTP 加密；信令 v0 用明文 ws + deviceId（不上架、家庭场景可接受），**v1 升级 wss + 配对时约定的 token**（服务器加 TLS 即可，协议不变）。
