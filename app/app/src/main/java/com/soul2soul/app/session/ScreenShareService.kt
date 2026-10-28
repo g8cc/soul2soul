@@ -573,17 +573,6 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
                     ice,
                     if (source == SignalRecoveryTracker.Source.PEER) "sig=gone" else "state=down",
                 )
-                SessionStatusNotifier.recovering(
-                    applicationContext,
-                    "sharer",
-                    getString(
-                        if (source == SignalRecoveryTracker.Source.PEER) {
-                            R.string.peer_signal_recovering
-                        } else {
-                            R.string.signal_recovering
-                        },
-                    ),
-                )
                 updateNotification(statusText())
             }
             is SignalRecoveryTracker.Decision.Restored -> {
@@ -617,9 +606,10 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
         if (decision is SignalRecoveryTracker.Decision.EndNow) return
         if (signalRecovery.isRecovering) {
             scheduleSignalRecoveryTimeout()
+            refreshSignalRecoveryStatus()
         } else {
             watchdog.removeCallbacks(signalRecoveryTimeout)
-            SessionStatusNotifier.clear(applicationContext)
+            refreshSignalRecoveryStatus()
             updateNotification(statusText())
         }
     }
@@ -630,6 +620,19 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
 
     private fun handleSignalRestored(source: SignalRecoveryTracker.Source) {
         handleSignalState(source, online = true)
+    }
+
+    private fun refreshSignalRecoveryStatus() {
+        val text = when (signalRecovery.recoverySource()) {
+            SignalRecoveryTracker.Source.PEER -> getString(R.string.peer_signal_recovering)
+            SignalRecoveryTracker.Source.LOCAL -> getString(R.string.signal_recovering)
+            null -> null
+        }
+        if (text == null) {
+            SessionStatusNotifier.clear(applicationContext)
+        } else {
+            SessionStatusNotifier.recovering(applicationContext, "sharer", text)
+        }
     }
 
     private fun scheduleSignalRecoveryTimeout() {
@@ -892,10 +895,10 @@ class ScreenShareService : Service(), WebRtcClient.Listener {
                 videoPaused = videoPaused,
             ),
         )
-        val signal = when {
-            !signalRecovery.peerOnline -> getString(R.string.peer_signal_recovering)
-            !signalRecovery.localOnline -> getString(R.string.signal_recovering)
-            else -> null
+        val signal = when (signalRecovery.recoverySource()) {
+            SignalRecoveryTracker.Source.PEER -> getString(R.string.peer_signal_recovering)
+            SignalRecoveryTracker.Source.LOCAL -> getString(R.string.signal_recovering)
+            null -> null
         }
         return listOfNotNull(
             base,

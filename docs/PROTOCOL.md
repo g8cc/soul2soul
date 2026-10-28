@@ -59,7 +59,7 @@
 | `call.canceled` | — | 对方撤呼 |
 | `peer.offline` | `reason`(可选: `not_authed`/`too_fast`) | 呼叫时对端不在 |
 | `bye` / `sdp` / `ice` | 原样转发 | 对端挂断/媒体协商 |
-| `peer.gone` | — | 对端连接断开（服务端 close 时补发） |
+| `peer.gone` | — | 对端信令连接暂时断开（服务端 close 时补发，客户端进入恢复窗口） |
 | `msg.inbox` | `items`[]（留言条目） | hello 成功后，若有未送达留言（非空才发） |
 | `msg.sent` | `id` | msg.post 成功回执（容量溢出挤掉的旧留言由服务端自行删除，不再通知） |
 | `msg.failed` | `reason`: `unpaired` / `too_fast` / `empty` / `too_long` / `bad_recipient` / `bad_kind` / `bad_voice_id` / `bad_duration` | msg.post 被拒 |

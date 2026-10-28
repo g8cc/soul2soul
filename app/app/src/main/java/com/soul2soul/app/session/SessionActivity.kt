@@ -738,17 +738,6 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
                     if (source == SignalRecoveryTracker.Source.PEER) "sig=gone" else "state=down",
                 )
                 refreshConnectionBanner()
-                SessionStatusNotifier.recovering(
-                    applicationContext,
-                    "viewer",
-                    getString(
-                        if (source == SignalRecoveryTracker.Source.PEER) {
-                            R.string.peer_signal_recovering
-                        } else {
-                            R.string.signal_recovering
-                        },
-                    ),
-                )
                 scheduleSignalRecoveryTimeout()
             }
             is SignalRecoveryTracker.Decision.EndNow -> {
@@ -770,7 +759,9 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
             }
             else -> refreshConnectionBanner()
         }
+        if (decision is SignalRecoveryTracker.Decision.EndNow) return
         if (signalRecovery.isRecovering) scheduleSignalRecoveryTimeout()
+        refreshSignalRecoveryStatus()
     }
 
     private fun handleSignalRestored(source: SignalRecoveryTracker.Source) {
@@ -790,9 +781,22 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
         }
         if (!signalRecovery.isRecovering) {
             mainHandler.removeCallbacks(signalRecoveryTimeout)
-            SessionStatusNotifier.clear(applicationContext)
         }
+        refreshSignalRecoveryStatus()
         refreshConnectionBanner()
+    }
+
+    private fun refreshSignalRecoveryStatus() {
+        val text = when (signalRecovery.recoverySource()) {
+            SignalRecoveryTracker.Source.PEER -> getString(R.string.peer_signal_recovering)
+            SignalRecoveryTracker.Source.LOCAL -> getString(R.string.signal_recovering)
+            null -> null
+        }
+        if (text == null) {
+            SessionStatusNotifier.clear(applicationContext)
+        } else {
+            SessionStatusNotifier.recovering(applicationContext, "viewer", text)
+        }
     }
 
     private fun scheduleSignalRecoveryTimeout() {
@@ -834,12 +838,18 @@ class SessionActivity : AppCompatActivity(), WebRtcClient.Listener {
 
     private fun refreshConnectionBanner() {
         if (!live) return
-        if (signalRecovery.isRecovering) {
-            tvState.visibility = View.VISIBLE
-            tvState.setText(
-                if (!signalRecovery.peerOnline) R.string.peer_signal_recovering else R.string.signal_recovering,
-            )
-            return
+        when (signalRecovery.recoverySource()) {
+            SignalRecoveryTracker.Source.PEER -> {
+                tvState.visibility = View.VISIBLE
+                tvState.setText(R.string.peer_signal_recovering)
+                return
+            }
+            SignalRecoveryTracker.Source.LOCAL -> {
+                tvState.visibility = View.VISIBLE
+                tvState.setText(R.string.signal_recovering)
+                return
+            }
+            null -> Unit
         }
         when {
             remoteVideoPaused -> {

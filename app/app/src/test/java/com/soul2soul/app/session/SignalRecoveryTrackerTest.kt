@@ -103,6 +103,21 @@ class SignalRecoveryTrackerTest {
     }
 
     @Test
+    fun `active recovery source follows the leg that is still offline`() {
+        val tracker = SignalRecoveryTracker(graceMs = 2_000L)
+
+        tracker.onLocalSignal(online = false, nowMs = 100L, iceState = "CONNECTED")
+        tracker.onPeerSignal(online = false, nowMs = 200L, iceState = "CONNECTED")
+        assertEquals(SignalRecoveryTracker.Source.LOCAL, tracker.recoverySource())
+
+        tracker.onPeerSignal(online = true, nowMs = 300L, iceState = "CONNECTED")
+        assertEquals(SignalRecoveryTracker.Source.LOCAL, tracker.recoverySource())
+
+        tracker.onLocalSignal(online = true, nowMs = 400L, iceState = "CONNECTED")
+        assertEquals(null, tracker.recoverySource())
+    }
+
+    @Test
     fun `closed ice state ends immediately`() {
         val tracker = SignalRecoveryTracker()
 

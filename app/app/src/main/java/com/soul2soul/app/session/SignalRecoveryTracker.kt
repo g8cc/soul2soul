@@ -56,6 +56,18 @@ class SignalRecoveryTracker(
         .filter { it > 0L }
         .minOrNull()
 
+    fun recoverySource(): Source? {
+        if (!isRecovering) return null
+        if (!localOnline && !peerOnline) {
+            return if (localDeadlineMs <= peerDeadlineMs) Source.LOCAL else Source.PEER
+        }
+        return when {
+            !peerOnline -> Source.PEER
+            !localOnline -> Source.LOCAL
+            else -> null
+        }
+    }
+
     fun reset() {
         localOnline = true
         peerOnline = true
